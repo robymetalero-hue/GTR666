@@ -1,81 +1,48 @@
-# Auditoría y Certificación Final: Parche de Seguridad Crítica & Modo Kiosco V2
+# Plan de Implementación: Redondeo Comercial Estricto a Bs. 0,50 en POS
 
-Plan integral de verificación, pruebas y certificación para el cierre del parche de seguridad crítica en GTR POS, comprobando punto por punto que los vendedores no puedan acceder a costos, alterar precios, elevar privilegios ni ejecutar operaciones destructivas, manteniendo intacto el flujo comercial y offline.
+## Contexto y Decisión
+El usuario ha solicitado aplicar de forma estricta la política comercial contenida en el parche `GTR666_redondeo_Bs050_para_AI_Studio_c96e84ca.zip` para **todos los pagos en bolivianos** procesados en el mostrador POS.
 
-## User Review & Critical Decisions
+La regla de redondeo es:
+$$\text{roundCashBs}(x) = \frac{\text{round}((x + \varepsilon) \times 2)}{2}$$
+- Fracciones $[0{,}00 \dots 0{,}24] \to 0{,}00$ (ej. Bs. 10,20 $\to$ Bs. 10,00)
+- Fracciones $[0{,}25 \dots 0{,}74] \to 0{,}50$ (ej. Bs. 10,25 $\to$ Bs. 10,50; Bs. 10,70 $\to$ Bs. 10,50)
+- Fracciones $[0{,}75 \dots 0{,}99] \to 1{,}00$ (ej. Bs. 10,80 $\to$ Bs. 11,00)
 
-> [!IMPORTANT]
-> **Puntos Críticos de Validación Confirmados:**
-> - **Cero Regresiones Operativas:** Los vendedores pueden buscar productos, calcular totales, emitir comprobantes fiscales/tickets, registrar pagos en Bs/USD y trabajar sin conexión a internet exactamente como antes.
-> - **Ocultación Absoluta de Costos:** Respuestas de `/api/products` y exportaciones omiten `price_cost` y márgenes de ganancia para roles no autorizados; la memoria y caché local se purgan al cambiar a sesión de vendedor.
-> - **Validación de Precios en Servidor:** `POST /api/sales` valida precios unitarios y descuentos autorizados contra la base de datos antes de registrar transacciones, rechazando manipulaciones indebidas con error 403 y alerta de auditoría.
-> - **Aislamiento de Operaciones Administrativas:** Rutas de reinicio, reseteo de turnos, respaldos, sandbox y tasa de cambio exigen verificación estricta de rol `admin` o `propietario`.
+Precios y cobros en **USD** continúan operando con centavos estándar (2 decimales exactos).
 
-## 1. Overview & Core Concept
+---
 
-- **Qué hace:** Ejecuta una auditoría de seguridad integral en servidor y cliente para certificar que todas las vulnerabilidades críticas señaladas en el parche están mitigadas y blindadas, sin interferir con la experiencia del cajero ni con la sincronización local/offline.
-- **Audiencia objetivo:** Propietarios de negocio, administradores y personal de caja de GTR POS.
-- **Valor clave:** Certeza absoluta de cumplimiento normativo y de seguridad sin interrupción operativa de la tienda en producción.
+## Fases de Implementación
 
-## 2. User Experience & Visual Design
+### Fase 1: Creación de la Utilidad y Pruebas Unitarias
+1. **Archivo `src/utils/roundCashBs.ts`**:
+   - Crear función pura `roundCashBs(amount: number): number`.
+   - Garantizar que devuelva múltiplos exactos de 0,50 para cualquier valor finito y 0 para valores no válidos.
+2. **Archivo `tests/test_roundCashBs.ts`**:
+   - Incorporar la suite de 19 pruebas de límites de redondeo (0,20 $\to$ 0; 0,25 $\to$ 0,5; 0,74 $\to$ 0,5; 0,75 $\to$ 1, etc.).
 
-- **Flujo del Vendedor / Cajero:**
-  - Inicia sesión normalmente o desbloquea con su PIN de caja.
-  - La interfaz de Punto de Venta (`pos`) muestra productos con sus precios de venta y mayorista oficiales; los campos de costo de adquisición no aparecen en ninguna tabla, modal ni inspección de red.
-  - El vendedor no puede salir arbitrariamente a paneles administrativos sin autorización de supervisor (`SupervisorUnlockModal`).
-  - Las operaciones de cierre ciego de caja (`cajas`) y conteo físico (`conteo_fisico`) operan fluidamente.
+### Fase 2: Adaptación del Frontend (`src/views/POS.tsx`)
+1. Importar `roundCashBs as roundBs` desde `../utils/roundCashBs`.
+2. Aplicar `roundBs` en:
+   - Precios mostrados en sugerencias de autocompletado y búsqueda rápida.
+   - Cálculo de precio unitario en Bs en el carrito (`getCartItemPriceBs`).
+   - Precios personalizados ingresados manualmente en Bs.
+   - Cálculo de descuentos en bolivianos (`discountValue`).
+   - Cálculo del total del carrito en bolivianos (`total`).
+3. Separar `usdSubtotal` y `usdTotal` para preservar los precios exactos en USD del catálogo sin contaminarse con el redondeo de 50 centavos bolivianos.
+4. Ajustar la impresión de tickets y modal de confirmación para imprimir el subtotal en USD exacto cuando la venta sea en dólares, y el redondeado en Bs cuando sea en bolivianos.
 
-- **Flujo del Administrador / Supervisor:**
-  - Dispone de acceso completo a costos, márgenes, configuración de tasas de cambio, auditoría forense e inventario global.
-  - Al ingresar su PIN o credenciales en terminales bloqueadas, recibe una sesión temporal de 5 minutos con re-bloqueo automático tras inactividad.
+### Fase 3: Sincronización del Servidor (`server.ts`)
+1. Incorporar la función `roundCashBs` en `server.ts`.
+2. En `POST /api/sales`:
+   - Validar que los precios unitarios y mayoristas en bolivianos coincidan estrictamente con `roundCashBs(unitUSD * currentRate)` o `roundCashBs(bulkUSD * currentRate)`.
+   - Rechazar precios con centavos fraccionarios no redondeados en BOB (tolerancia estricta de 0,01).
+   - Validar que el total enviado coincida exactamente con `roundCashBs(expectedTotal)` en BOB.
+   - Mantener tolerancia de centavos para ventas en USD.
 
-## 3. Key Product Decisions & Trade-Offs
-
-- **Decisión 1: Verificación de Identidad por Token JWT Seguro:**
-  - *Enfoque:* El servidor no confía en encabezados manipulables por el cliente (`x-user-role`, `x-user-permissions`). La identidad se deriva exclusivamente del token firmado o de la sesión verificada en SQLite.
-  - *Por qué:* Previene ataques de falsificación y suplantación de permisos en llamadas API directas.
-
-- **Decisión 2: Validación Transaccional de Ventas en el Backend:**
-  - *Enfoque:* `POST /api/sales` recalcula subtotales y valida precios contra el catálogo registrado antes de asentar inventario y transacciones financieras.
-  - *Por qué:* Impide la manipulación de precios desde consolas de desarrollador o clientes modificados.
-
-- **Decisión 3: Purga de Caché de Costos en Cliente sin Borrado de Ventas Offline:**
-  - *Enfoque:* Al iniciar sesión como vendedor, se limpian selectivamente las propiedades de costo en memoria y almacenamiento local (`localForageCache`), preservando intacta la cola de ventas offline (`offline_sales_queue`).
-  - *Por qué:* Protege la confidencialidad de compras sin poner en riesgo transacciones pendientes por sincronizar.
-
-## 4. Technical Architecture & Data Strategy
-
-```
-┌────────────────────────────────────────────────────────┐
-│              GTR POS Client Application                │
-├──────────────────────────┬─────────────────────────────┤
-│      Sesión Admin        │       Sesión Vendedor       │
-│  • Visualiza Costos      │  • Costos Purgados          │
-│  • Ajustes de Sistema    │  • Bloqueado en POS / Caja  │
-│  • Tasa de Cambio        │  • Precios de Venta Fijos   │
-└────────────┬─────────────┴──────────────┬──────────────┘
-             │                            │
-             │   JWT Auth Header          │
-             ▼                            ▼
-┌────────────────────────────────────────────────────────┐
-│             Server Security Middleware                 │
-│  • enforcePermission / verifySupervisorToken           │
-│  • Sanitización de Costos en /api/products             │
-│  • Validación de Precios en POST /api/sales            │
-└──────────────────────────┬─────────────────────────────┘
-                           │
-             ┌─────────────┴─────────────┐
-             ▼                           ▼
-┌──────────────────────────┐┌────────────────────────────┐
-│      SQLite Engine       ││      System Audit Log      │
-│  • Catálogo Oficial      ││  • Registro de Intentos    │
-│  • Precios & Existencias ││  • Alertas de Precios 403  │
-└──────────────────────────┘└────────────────────────────┘
-```
-
-- **Plan de Verificación y Pruebas a Ejecutar:**
-  1. **Prueba de Exposición de Costos:** Petición no autenticada y con rol cajero a `/api/products` para verificar la ausencia total de `price_cost`.
-  2. **Prueba de Elevación de Privilegios:** Intento de modificación de rol a través de `PUT /api/users/:id` por un usuario regular, comprobando el rechazo 403.
-  3. **Prueba de Rutas Administrativas:** Verificación de rechazo (401/403) en `/api/admin/reset-database`, `/api/settings/exchange-rate` y respaldos.
-  4. **Prueba de Manipulación de Ventas:** Envío de una venta con precio unitario alterado para confirmar el rechazo por parte del servidor.
-  5. **Prueba de Regresión Comercial:** Ejecución de venta válida con cálculo de Bs/USD, confirmando que la lógica operativa está 100% preservada.
+### Fase 4: Verificación y Calidad
+1. Ejecutar `tests/test_roundCashBs.ts` para validar los 19 casos de prueba.
+2. Actualizar y correr `tests/test_all_six_points.cjs` para asegurar que las ventas legítimas con redondeo a 0,50 se aprueben y las ventas manipuladas se rechacen (cero regresiones).
+3. Ejecutar `compile_applet` y `lint_applet` para garantizar que la compilación de TypeScript sea 100% limpia.
+4. Mantener los cambios en la rama de pruebas `test-security-patch` sin alterar producción ni publicar reglas de Firestore.

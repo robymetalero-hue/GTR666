@@ -1,0 +1,178 @@
+diff --git a/server.ts b/server.ts
+--- a/server.ts
++++ b/server.ts
+@@ -21,6 +21,7 @@
+ } from "./database.ts";
+ import { hashPassword, verifyPassword, isPasswordHashed, getJwtSecret } from "./authSecurity.ts";
+ import { normalizeProductName } from "./src/utils/productUtils.ts";
++import { roundCashBs } from "./src/utils/roundCashBs.ts";
+ import { pullFirestoreToLocal, pushFirestoreToLocal, startPeriodicLedgerReconciliation, syncAfterWrite, pushAllLocalToFirestore, firestore, clearAllFirestoreAndLocalData, recordDeletion, deleteFromFirestore, reconcileCatalogStockWithLedger, getCollectionName } from "./firebaseSync.ts";
+ import { getProductForensicTimeline, auditEntireCatalog, searchProductsForAudit, generateForensicMarkdownReport, getAvailableAuditPeriods, auditDatabaseByPeriod, reconcileProductDiscrepancy } from "./forensicAuditEngine.ts";
+ import { requestContextStorage, getRecentFirestoreLedger, getFirestoreLedgerStats, validateFirestoreWriteOperation } from "./firestoreIntegrityMiddleware.ts";
+@@ -5384,13 +5384,13 @@
+               const unitUSD = Number(prodCheck.price_unit) || 0;
+               const bulkUSD = Number(prodCheck.price_bulk) || 0;
+-              const officialUnitBs = roundBs(unitUSD * currentRate);
+-              const officialBulkBs = roundBs(bulkUSD * currentRate);
++              const officialUnitBs = roundCashBs(unitUSD * currentRate);
++              const officialBulkBs = roundCashBs(bulkUSD * currentRate);
+               officialUnitLabel = `${officialUnitBs.toFixed(2)} Bs`;
+               officialBulkLabel = `${officialBulkBs.toFixed(2)} Bs`;
+ 
+-              // Match roundBs or direct conversion
+-              matchesUnit = Math.abs(safePrice - officialUnitBs) < 0.01 || Math.abs(safePrice - (unitUSD * currentRate)) < 0.01;
+-              matchesBulk = Math.abs(safePrice - officialBulkBs) < 0.01 || Math.abs(safePrice - (bulkUSD * currentRate)) < 0.01;
++              // Solo múltiplos de Bs. 0,50; no admitir el precio decimal sin redondear.
++              matchesUnit = Math.abs(safePrice - officialUnitBs) < 0.01;
++              matchesBulk = Math.abs(safePrice - officialBulkBs) < 0.01;
+             }
+ 
+             if (!matchesUnit && !matchesBulk) {
+@@ -5423,10 +5423,10 @@
+         // Validate final total consistency
+         if (!canModifyPrices) {
+           const expectedTotal = Math.max(0, expectedSubtotal - safeDiscount);
+-          const expectedTotalRounded = safeCurrency === 'USD' ? expectedTotal : roundBs(expectedTotal);
+-          const diff = Math.abs(safeTotal - expectedTotal);
+-          const diffRounded = Math.abs(safeTotal - expectedTotalRounded);
+-          if (diff > 0.05 && diffRounded > 0.05) {
++          const expectedTotalRounded = safeCurrency === 'USD' ? expectedTotal : roundCashBs(expectedTotal);
++          // USD conserva centavos; BOB siempre se cobra en múltiplos de Bs. 0,50.
++          const allowedDifference = safeCurrency === 'USD' ? 0.05 : 0.01;
++          if (Math.abs(safeTotal - expectedTotalRounded) > allowedDifference) {
+             return res.status(403).json({
+               error: `Venta rechazada: El total final enviado (${safeTotal} ${safeCurrency}) no coincide con el subtotal y descuentos autorizados (${expectedTotalRounded.toFixed(2)} ${safeCurrency}).`
+             });
+diff --git a/src/views/POS.tsx b/src/views/POS.tsx
+--- a/src/views/POS.tsx
++++ b/src/views/POS.tsx
+@@ -3,6 +3,7 @@
+ import { motion, AnimatePresence } from 'motion/react';
+ import { useAppContext } from '../context/AppContext';
+ import { hasPermission } from '../utils/permissions';
++import { roundCashBs as roundBs } from '../utils/roundCashBs';
+ import type { Product } from '../types';
+ import { 
+     ShoppingCart, Plus, Minus, Trash2, Printer, Search, UserCheck, 
+@@ -187,7 +188,7 @@
+                         <span className="text-[9px] lowercase text-slate-400 font-normal">Click o Enter para agregar</span>
+                     </div>
+                     {suggestions.slice(0, 8).map((prod, idx) => {
+-                        const priceBs = (prod.price_unit * (exchangeRate || 6.96)).toFixed(2);
++                        const priceBs = roundBs(prod.price_unit * (exchangeRate || 6.96)).toFixed(2);
+                         const isHighlighted = idx === highlightedIndex;
+                         return (
+                             <div 
+@@ -245,7 +246,7 @@
+     const { 
+         products, fetchProducts, cart, addToCart: rawAddToCart, updateCartItemQuantity: rawUpdateCartItemQuantity, 
+         removeFromCart, clearCart, lastClearedCart, cartBackup, restoreLastClearedCart, restoreCartBackup, discardCartBackup, updateCartItemPrice, user, kioskMode, exchangeRate, 
+-        roundBs, receiptTemplate, clients, fetchClients,
++        receiptTemplate, clients, fetchClients,
+         tabs, setTabs, activeTabId, setActiveTabId,
+         clientName, setClientName, clientPhone, setClientPhone,
+         discount, setDiscount, discountType, setDiscountType,
+@@ -1411,7 +1412,7 @@
+         const rate = exchangeRate || 6.96;
+         if (item.price_type === 'custom') {
+             if (item.custom_price_bs !== undefined && item.custom_price_bs !== null) {
+-                return Number(item.custom_price_bs) || 0;
++                return roundBs(Number(item.custom_price_bs) || 0);
+             }
+             if (item.custom_price !== undefined && item.custom_price !== null) {
+                 return roundBs((Number(item.custom_price) || 0) * rate);
+@@ -1482,9 +1483,11 @@
+     
+     // Process discount with memoization
+     const discountValue = React.useMemo(() => {
+-        return discountType === 'porcentaje' 
+-            ? (subtotal * (discount / 100)) 
++        const rawDiscount = discountType === 'porcentaje'
++            ? (subtotal * (discount / 100))
+             : discount;
++        // Redondear únicamente los importes que se cobran en bolivianos.
++        return roundBs(rawDiscount);
+     }, [subtotal, discount, discountType]);
+ 
+     const matchedClient = React.useMemo(() => {
+@@ -1504,12 +1507,17 @@
+     }, [usePoints, availablePoints, subtotal, discountValue]);
+ 
+     const total = React.useMemo(() => {
+-        return Math.max(0, subtotal - discountValue - pointsRedeemedValue);
++        return roundBs(Math.max(0, subtotal - discountValue - pointsRedeemedValue));
+     }, [subtotal, discountValue, pointsRedeemedValue]);
+ 
++    // USD conserva los precios originales del catálogo, sin redondeo de Bs. 0,50.
++    const usdSubtotal = React.useMemo(() => {
++        return cart.reduce((acc, item) => acc + getCartItemPriceUSD(item) * item.cartQuantity, 0);
++    }, [cart]);
++
+     const usdTotal = React.useMemo(() => {
+-        return total / exchangeRate;
+-    }, [total, exchangeRate]);
++        return Math.max(0, usdSubtotal - (discountValue + pointsRedeemedValue) / exchangeRate);
++    }, [usdSubtotal, discountValue, pointsRedeemedValue, exchangeRate]);
+ 
+     const executeCheckout = async (methodToUse = paymentMethod) => {
+         if (cart.length === 0) return;
+@@ -1771,6 +1779,7 @@
+         const activeExchangeRate = overrideExchangeRate || exchangeRate;
+         const activeTotal = overrideTotal !== undefined ? overrideTotal : (activeCurrency === 'USD' ? usdTotal : total);
+         const activeSubtotal = overrideSubtotal !== undefined ? overrideSubtotal : subtotal;
++        const activeSubtotalUsd = overrideCart ? activeSubtotal / activeExchangeRate : usdSubtotal;
+         const activeCashReceived = overrideCashReceived !== undefined ? overrideCashReceived : cashReceived;
+ 
+         try {
+@@ -1985,7 +1994,7 @@
+ 
+             doc.text(`Subtotal:`, ml, y);
+             const subStr = activeCurrency === 'USD'
+-                ? `$ ${(activeSubtotal / activeExchangeRate).toFixed(2)}`
++                ? `$ ${activeSubtotalUsd.toFixed(2)}`
+                 : `Bs. ${activeSubtotal.toFixed(2)}`;
+             doc.text(subStr, colPriceX, y, { align: 'right' });
+             y += 4;
+@@ -2624,7 +2633,7 @@
+                                 Bs. {subtotal.toFixed(2)}
+                             </span>
+                             <span className="text-[9.5px] font-mono font-extrabold text-slate-400 mt-1">
+-                                $ {(subtotal / exchangeRate).toFixed(2)} USD
++                                $ {usdSubtotal.toFixed(2)} USD
+                             </span>
+                         </div>
+                     </div>
+diff --git a/src/utils/roundCashBs.ts b/src/utils/roundCashBs.ts
+new file mode 100644
+--- /dev/null
++++ b/src/utils/roundCashBs.ts
+@@ -0,0 +1,9 @@
++/**
++ * Redondeo comercial de cobros en BOLIVIANOS a incrementos de Bs. 0,50.
++ * [0,00..0,24] -> 0,00; [0,25..0,74] -> 0,50; [0,75..0,99] -> 1,00.
++ * No utilizar para precios/costos en USD, tipo de cambio ni cantidades.
++ */
++export function roundCashBs(amount: number): number {
++  if (!Number.isFinite(amount)) return 0;
++  return Math.round((amount + Number.EPSILON) * 2) / 2;
++}
+diff --git a/tests/test_roundCashBs.ts b/tests/test_roundCashBs.ts
+new file mode 100644
+--- /dev/null
++++ b/tests/test_roundCashBs.ts
+@@ -0,0 +1,15 @@
++/** Pruebas unitarias del redondeo comercial en Bs. sin base de datos. */
++import assert from 'node:assert/strict';
++import { roundCashBs } from '../src/utils/roundCashBs.ts';
++
++const cases: Array<[number, number]> = [
++  [0, 0], [0.15, 0], [0.20, 0], [0.24, 0],
++  [0.25, 0.5], [0.26, 0.5], [0.50, 0.5], [0.74, 0.5],
++  [0.75, 1], [0.76, 1], [0.99, 1],
++  [10.20, 10], [10.25, 10.5], [10.74, 10.5], [10.75, 11],
++  [125.24, 125], [125.25, 125.5], [125.74, 125.5], [125.75, 126]
++];
++for (const [input, expected] of cases) {
++  assert.equal(roundCashBs(input), expected, `Bs. ${input} => Bs. ${expected}`);
++}
++console.log(`PASS: ${cases.length} pruebas de redondeo de bolivianos`);

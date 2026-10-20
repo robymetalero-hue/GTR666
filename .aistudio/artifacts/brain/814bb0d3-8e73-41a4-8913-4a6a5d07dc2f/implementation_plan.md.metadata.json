@@ -1,6 +1,6 @@
 {
-  "summary": "Plan de auditoría, verificación y certificación integral del Parche de Seguridad Crítica y Modo Kiosco V2 para GTR POS, garantizando cero regresiones operativas en ventas locales y offline.",
-  "updatedAt": "2026-10-19T21:19:29.253470035Z",
+  "summary": "Plan para implementar la política comercial de redondeo estricto a múltiplos de Bs. 0,50 en todas las ventas en bolivianos desde el POS, sincronizando la visualización en frontend, recibos y la validación estricta en el servidor sin afectar precios en dólares ni ventas históricas.",
+  "updatedAt": "2026-10-20T11:11:35.959284385Z",
   "requestFeedback": true,
   "userFacing": true
 }

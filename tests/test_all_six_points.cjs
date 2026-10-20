@@ -31,9 +31,9 @@ function request(options, body = null) {
   });
 }
 
-function roundBs(amount) {
-  if (isNaN(amount) || amount === null || amount === undefined) return 0;
-  return Math.round((Number(amount) + Number.EPSILON) * 100) / 100;
+function roundCashBs(amount) {
+  if (!Number.isFinite(amount)) return 0;
+  return Math.round((amount + Number.EPSILON) * 2) / 2;
 }
 
 async function runTests() {
@@ -102,7 +102,7 @@ async function runTests() {
   console.log("\n--- PUNTO 1: PRECIOS (roundBs exacto, mayorista, USD/Bs, total) ---");
   
   // 1.1 Venta con precio oficial unitario en Bs
-  const officialPriceBs = roundBs(testProduct.price_unit * currentRate);
+  const officialPriceBs = roundCashBs(testProduct.price_unit * currentRate);
   const legitSaleRes = await request({
     path: '/api/sales',
     method: 'POST',
@@ -117,10 +117,10 @@ async function runTests() {
     exchange_rate: currentRate,
     items: [{ product_id: testProduct.id, quantity: 1, price: officialPriceBs }]
   });
-  assert(legitSaleRes.status === 200, "Venta legítima a precio oficial unitario (roundBs) aprobada con éxito");
+  assert(legitSaleRes.status === 200, "Venta legítima a precio oficial unitario (roundCashBs a 0.50) aprobada con éxito");
 
   // 1.2 Venta con precio oficial mayorista en Bs
-  const officialBulkBs = roundBs(testProduct.price_bulk * currentRate);
+  const officialBulkBs = roundCashBs(testProduct.price_bulk * currentRate);
   const bulkSaleRes = await request({
     path: '/api/sales',
     method: 'POST',
@@ -135,7 +135,25 @@ async function runTests() {
     exchange_rate: currentRate,
     items: [{ product_id: testProduct.id, quantity: 1, price: officialBulkBs }]
   });
-  assert(bulkSaleRes.status === 200, "Venta legítima a precio oficial mayorista (roundBs) aprobada con éxito");
+  assert(bulkSaleRes.status === 200, "Venta legítima a precio oficial mayorista (roundCashBs a 0.50) aprobada con éxito");
+
+  // 1.3 Venta con precio no redondeado a 0.50 Bs (ej. +0.20 Bs)
+  const unroundedPriceBs = officialPriceBs + 0.20;
+  const unroundedPriceRes = await request({
+    path: '/api/sales',
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${sellerToken}`
+    }
+  }, {
+    total: unroundedPriceBs,
+    discount: 0,
+    currency: 'BOB',
+    exchange_rate: currentRate,
+    items: [{ product_id: testProduct.id, quantity: 1, price: unroundedPriceBs }]
+  });
+  assert(unroundedPriceRes.status === 403, "Venta con precio no redondeado a Bs 0.50 rechazada con 403");
 
   // 1.3 Venta con precio unitario alterado por vendedor no autorizado
   const alteredPriceRes = await request({

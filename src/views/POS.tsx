@@ -3,6 +3,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAppContext } from '../context/AppContext';
 import { hasPermission } from '../utils/permissions';
+import { roundCashBs as roundBs } from '../utils/roundCashBs';
 import type { Product } from '../types';
 import { 
     ShoppingCart, Plus, Minus, Trash2, Printer, Search, UserCheck, 
@@ -187,7 +188,7 @@ const POSSearchInput = React.memo(({
                         <span className="text-[9px] lowercase text-slate-400 font-normal">Click o Enter para agregar</span>
                     </div>
                     {suggestions.slice(0, 8).map((prod, idx) => {
-                        const priceBs = (prod.price_unit * (exchangeRate || 6.96)).toFixed(2);
+                        const priceBs = roundBs(prod.price_unit * (exchangeRate || 6.96)).toFixed(2);
                         const isHighlighted = idx === highlightedIndex;
                         return (
                             <div 
@@ -245,7 +246,7 @@ export default function POS() {
     const { 
         products, fetchProducts, cart, addToCart: rawAddToCart, updateCartItemQuantity: rawUpdateCartItemQuantity, 
         removeFromCart, clearCart, lastClearedCart, cartBackup, restoreLastClearedCart, restoreCartBackup, discardCartBackup, updateCartItemPrice, user, kioskMode, exchangeRate, 
-        roundBs, receiptTemplate, clients, fetchClients,
+        receiptTemplate, clients, fetchClients,
         tabs, setTabs, activeTabId, setActiveTabId,
         clientName, setClientName, clientPhone, setClientPhone,
         discount, setDiscount, discountType, setDiscountType,
@@ -1411,7 +1412,7 @@ export default function POS() {
         const rate = exchangeRate || 6.96;
         if (item.price_type === 'custom') {
             if (item.custom_price_bs !== undefined && item.custom_price_bs !== null) {
-                return Number(item.custom_price_bs) || 0;
+                return roundBs(Number(item.custom_price_bs) || 0);
             }
             if (item.custom_price !== undefined && item.custom_price !== null) {
                 return roundBs((Number(item.custom_price) || 0) * rate);
@@ -1482,9 +1483,11 @@ export default function POS() {
     
     // Process discount with memoization
     const discountValue = React.useMemo(() => {
-        return discountType === 'porcentaje' 
+        const rawDiscount = discountType === 'porcentaje' 
             ? (subtotal * (discount / 100)) 
             : discount;
+        // Redondear únicamente los importes que se cobran en bolivianos.
+        return roundBs(rawDiscount);
     }, [subtotal, discount, discountType]);
 
     const matchedClient = React.useMemo(() => {
@@ -1504,12 +1507,17 @@ export default function POS() {
     }, [usePoints, availablePoints, subtotal, discountValue]);
 
     const total = React.useMemo(() => {
-        return Math.max(0, subtotal - discountValue - pointsRedeemedValue);
+        return roundBs(Math.max(0, subtotal - discountValue - pointsRedeemedValue));
     }, [subtotal, discountValue, pointsRedeemedValue]);
 
+    // USD conserva los precios originales del catálogo, sin redondeo de Bs. 0,50.
+    const usdSubtotal = React.useMemo(() => {
+        return cart.reduce((acc, item) => acc + getCartItemPriceUSD(item) * item.cartQuantity, 0);
+    }, [cart]);
+
     const usdTotal = React.useMemo(() => {
-        return total / exchangeRate;
-    }, [total, exchangeRate]);
+        return Math.max(0, usdSubtotal - (discountValue + pointsRedeemedValue) / exchangeRate);
+    }, [usdSubtotal, discountValue, pointsRedeemedValue, exchangeRate]);
 
     const executeCheckout = async (methodToUse = paymentMethod) => {
         if (cart.length === 0) return;
@@ -1771,6 +1779,7 @@ export default function POS() {
         const activeExchangeRate = overrideExchangeRate || exchangeRate;
         const activeTotal = overrideTotal !== undefined ? overrideTotal : (activeCurrency === 'USD' ? usdTotal : total);
         const activeSubtotal = overrideSubtotal !== undefined ? overrideSubtotal : subtotal;
+        const activeSubtotalUsd = overrideCart ? activeSubtotal / activeExchangeRate : usdSubtotal;
         const activeCashReceived = overrideCashReceived !== undefined ? overrideCashReceived : cashReceived;
 
         try {
@@ -1985,7 +1994,7 @@ export default function POS() {
 
             doc.text(`Subtotal:`, ml, y);
             const subStr = activeCurrency === 'USD'
-                ? `$ ${(activeSubtotal / activeExchangeRate).toFixed(2)}`
+                ? `$ ${activeSubtotalUsd.toFixed(2)}`
                 : `Bs. ${activeSubtotal.toFixed(2)}`;
             doc.text(subStr, colPriceX, y, { align: 'right' });
             y += 4;
@@ -2624,7 +2633,7 @@ export default function POS() {
                                 Bs. {subtotal.toFixed(2)}
                             </span>
                             <span className="text-[9.5px] font-mono font-extrabold text-slate-400 mt-1">
-                                $ {(subtotal / exchangeRate).toFixed(2)} USD
+                                $ {usdSubtotal.toFixed(2)} USD
                             </span>
                         </div>
                     </div>

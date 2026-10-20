@@ -421,6 +421,11 @@ async function startServer() {
     return Math.round((Number(amount) + Number.EPSILON) * 100) / 100;
   }
 
+  function roundCashBs(amount: number): number {
+    if (!Number.isFinite(amount)) return 0;
+    return Math.round((amount + Number.EPSILON) * 2) / 2;
+  }
+
   const enforcePermission = (permissionKey: string) => {
     return (req: any, res: any, next: any) => {
       const user = (req as any).verifiedUser;
@@ -5380,17 +5385,17 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
               matchesUnit = Math.abs(safePrice - officialUnit) < 0.01;
               matchesBulk = Math.abs(safePrice - officialBulk) < 0.01;
             } else {
-              // Exact roundBs formula from POS in Bolivianos
+              // Exact roundCashBs formula from POS in Bolivianos (multiples of Bs. 0.50)
               const unitUSD = Number(prodCheck.price_unit) || 0;
               const bulkUSD = Number(prodCheck.price_bulk) || 0;
-              const officialUnitBs = roundBs(unitUSD * currentRate);
-              const officialBulkBs = roundBs(bulkUSD * currentRate);
+              const officialUnitBs = roundCashBs(unitUSD * currentRate);
+              const officialBulkBs = roundCashBs(bulkUSD * currentRate);
               officialUnitLabel = `${officialUnitBs.toFixed(2)} Bs`;
               officialBulkLabel = `${officialBulkBs.toFixed(2)} Bs`;
 
-              // Match roundBs or direct conversion
-              matchesUnit = Math.abs(safePrice - officialUnitBs) < 0.01 || Math.abs(safePrice - (unitUSD * currentRate)) < 0.01;
-              matchesBulk = Math.abs(safePrice - officialBulkBs) < 0.01 || Math.abs(safePrice - (bulkUSD * currentRate)) < 0.01;
+              // Solo múltiplos de Bs. 0,50; no admitir el precio decimal sin redondear.
+              matchesUnit = Math.abs(safePrice - officialUnitBs) < 0.01;
+              matchesBulk = Math.abs(safePrice - officialBulkBs) < 0.01;
             }
 
             if (!matchesUnit && !matchesBulk) {
@@ -5422,10 +5427,10 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         // Validate final total consistency
         if (!canModifyPrices) {
           const expectedTotal = Math.max(0, expectedSubtotal - safeDiscount);
-          const expectedTotalRounded = safeCurrency === 'USD' ? expectedTotal : roundBs(expectedTotal);
-          const diff = Math.abs(safeTotal - expectedTotal);
-          const diffRounded = Math.abs(safeTotal - expectedTotalRounded);
-          if (diff > 0.05 && diffRounded > 0.05) {
+          const expectedTotalRounded = safeCurrency === 'USD' ? expectedTotal : roundCashBs(expectedTotal);
+          // USD conserva centavos; BOB siempre se cobra en múltiplos de Bs. 0,50.
+          const allowedDifference = safeCurrency === 'USD' ? 0.05 : 0.01;
+          if (Math.abs(safeTotal - expectedTotalRounded) > allowedDifference) {
             return res.status(403).json({
               error: `Venta rechazada: El total final enviado (${safeTotal} ${safeCurrency}) no coincide con el subtotal y descuentos autorizados (${expectedTotalRounded.toFixed(2)} ${safeCurrency}).`
             });
