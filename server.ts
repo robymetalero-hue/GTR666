@@ -5232,12 +5232,16 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           );
           refMovId = movResult.lastInsertRowid;
 
-          // Update seller's cash balance
+          // Punto 5: Calcular el equivalente en BOB a deducir del saldo de caja usando la tasa histórica de la venta
+          const refundRate = Number(originalSale.exchange_rate || 6.96);
+          const refundAmountInBs = originalSale.currency === 'USD' ? (totalRefundAmount * refundRate) : totalRefundAmount;
+
+          // Update seller's cash balance (current_balance está en BOB)
           db.prepare(`
             UPDATE cash_accounts
             SET current_balance = MAX(0, current_balance - ?), updated_at = CURRENT_TIMESTAMP
             WHERE seller_id = ?
-          `).run(totalRefundAmount, sId);
+          `).run(refundAmountInBs, sId);
 
           const accRow = db.prepare('SELECT id FROM cash_accounts WHERE seller_id = ?').get(sId) as any;
           refAccId = accRow?.id;
@@ -5336,7 +5340,9 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const safeCurrency = currency || 'BOB';
       try {
         const rateRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('exchange_rate') as any;
-        const currentRate = (exchange_rate !== undefined && exchange_rate !== null) ? Number(exchange_rate) : (rateRow ? parseFloat(rateRow.value) : 6.96);
+        const officialRate = rateRow ? parseFloat(rateRow.value) : 6.96;
+        // Punto 2: Tasa oficial del servidor validada y guardada como snapshot inmutable
+        const currentRate = officialRate;
 
         const verifiedUser = (req as any).verifiedUser;
         const userRow = verifiedUser 
@@ -7365,13 +7371,55 @@ DIRECTIVAS CRÍTICAS:
       const todaySales = db.prepare("SELECT COALESCE(SUM(CASE WHEN currency='USD' THEN total * exchange_rate ELSE total END), 0) as total FROM sales WHERE substr(created_at, 1, 10) = ?").get(todayStr) as any;
       const lowStock = db.prepare("SELECT * FROM products WHERE stock <= stock_alarm").all();
       
-      const todayProfit = db.prepare(`
-        SELECT COALESCE(SUM(si.quantity * (CASE WHEN s.currency='USD' THEN (si.price - COALESCE(si.cost, p.price_cost, 0)) * s.exchange_rate ELSE si.price - (COALESCE(si.cost, p.price_cost, 0) * s.exchange_rate) END)), 0) as profit
+      // Punto 4: Cálculo de Utilidades con costos históricos de sale_items, deduciendo descuentos y devoluciones
+      const todayGrossProfit = (db.prepare(`
+        SELECT COALESCE(SUM(
+          CASE 
+            WHEN si.cost IS NOT NULL AND si.cost > 0 THEN 
+              (CASE WHEN s.currency='USD' THEN (si.price - si.cost) * s.exchange_rate ELSE si.price - (si.cost * s.exchange_rate) END) * si.quantity
+            ELSE 0 
+          END
+        ), 0) as gross_profit
         FROM sale_items si
         JOIN sales s ON s.id = si.sale_id
-        JOIN products p ON p.id = si.product_id
         WHERE substr(s.created_at, 1, 10) = ?
-      `).get(todayStr) as any;
+      `).get(todayStr) as any)?.gross_profit || 0;
+
+      const todayDiscount = (db.prepare(`
+        SELECT COALESCE(SUM(CASE WHEN currency='USD' THEN discount * exchange_rate ELSE discount END), 0) as total_discount
+        FROM sales
+        WHERE substr(created_at, 1, 10) = ?
+      `).get(todayStr) as any)?.total_discount || 0;
+
+      const todayRefunds = (db.prepare(`
+        SELECT COALESCE(SUM(CASE WHEN s.currency='USD' THEN sr.refund_amount * s.exchange_rate ELSE sr.refund_amount END), 0) as total_refunds
+        FROM sale_returns sr
+        JOIN sales s ON s.id = sr.sale_id
+        WHERE substr(sr.created_at, 1, 10) = ?
+      `).get(todayStr) as any)?.total_refunds || 0;
+
+      const todayProfit = { profit: Math.max(0, todayGrossProfit - todayDiscount - todayRefunds) };
+
+      // Helper for returns WHERE conditions
+      const buildReturnsWhere = (start?: string, end?: string) => {
+        const conditions: string[] = [];
+        const params: any[] = [];
+        if (start && end) {
+          conditions.push(`substr(sr.created_at, 1, 10) >= ? AND substr(sr.created_at, 1, 10) <= ?`);
+          params.push(start, end);
+        } else if (start) {
+          conditions.push(`substr(sr.created_at, 1, 10) >= ?`);
+          params.push(start);
+        } else if (end) {
+          conditions.push(`substr(sr.created_at, 1, 10) <= ?`);
+          params.push(end);
+        }
+        if (sellerId && sellerId !== 'all') {
+          conditions.push(`sr.cashier_id = ?`);
+          params.push(Number(sellerId));
+        }
+        return { whereSql: conditions.length > 0 ? "WHERE " + conditions.join(" AND ") : "", params };
+      };
 
       // 2. Compute Period Summary (KPIs Pro)
       const currentWhere = buildSalesWhere(startDate, endDate, 's');
@@ -7384,20 +7432,42 @@ DIRECTIVAS CRÍTICAS:
         ${currentWhere.whereSql}
       `).get(...currentWhere.params) as any;
 
-      const periodProfitRow = db.prepare(`
+      const periodGrossProfitRow = db.prepare(`
         SELECT 
-          COALESCE(SUM(si.quantity * (CASE WHEN s.currency='USD' THEN (si.price - COALESCE(si.cost, p.price_cost, 0)) * s.exchange_rate ELSE si.price - (COALESCE(si.cost, p.price_cost, 0) * s.exchange_rate) END)), 0) as total_profit,
+          COALESCE(SUM(
+            CASE 
+              WHEN si.cost IS NOT NULL AND si.cost > 0 THEN 
+                (CASE WHEN s.currency='USD' THEN (si.price - si.cost) * s.exchange_rate ELSE si.price - (si.cost * s.exchange_rate) END) * si.quantity
+              ELSE 0 
+            END
+          ), 0) as gross_profit,
           COALESCE(SUM(si.quantity), 0) as total_items
         FROM sale_items si
         JOIN sales s ON s.id = si.sale_id
-        JOIN products p ON p.id = si.product_id
         ${currentWhere.whereSql}
       `).get(...currentWhere.params) as any;
 
+      const periodDiscountRow = db.prepare(`
+        SELECT COALESCE(SUM(CASE WHEN s.currency='USD' THEN s.discount * s.exchange_rate ELSE s.discount END), 0) as total_discount
+        FROM sales s
+        ${currentWhere.whereSql}
+      `).get(...currentWhere.params) as any;
+
+      const currReturnsWhere = buildReturnsWhere(startDate, endDate);
+      const periodRefundsRow = db.prepare(`
+        SELECT COALESCE(SUM(CASE WHEN s.currency='USD' THEN sr.refund_amount * s.exchange_rate ELSE sr.refund_amount END), 0) as total_refunds
+        FROM sale_returns sr
+        JOIN sales s ON s.id = sr.sale_id
+        ${currReturnsWhere.whereSql}
+      `).get(...currReturnsWhere.params) as any;
+
       const totalSales = Number(periodSalesRow?.total_sales || 0);
       const totalTx = Number(periodSalesRow?.total_tx || 0);
-      const totalProfit = Number(periodProfitRow?.total_profit || 0);
-      const totalItems = Number(periodProfitRow?.total_items || 0);
+      const periodGross = Number(periodGrossProfitRow?.gross_profit || 0);
+      const periodDisc = Number(periodDiscountRow?.total_discount || 0);
+      const periodRef = Number(periodRefundsRow?.total_refunds || 0);
+      const totalProfit = Math.max(0, periodGross - periodDisc - periodRef);
+      const totalItems = Number(periodGrossProfitRow?.total_items || 0);
 
       const avgTicket = totalTx > 0 ? totalSales / totalTx : 0;
       const avgItemsPerTicket = totalTx > 0 ? totalItems / totalTx : 0;
@@ -7434,16 +7504,38 @@ DIRECTIVAS CRÍTICAS:
           ${prevWhere.whereSql}
         `).get(...prevWhere.params) as any;
 
-        const prevProfitRow = db.prepare(`
-          SELECT COALESCE(SUM(si.quantity * (CASE WHEN s.currency='USD' THEN (si.price - COALESCE(si.cost, p.price_cost, 0)) * s.exchange_rate ELSE si.price - (COALESCE(si.cost, p.price_cost, 0) * s.exchange_rate) END)), 0) as total_profit
+        const prevGrossRow = db.prepare(`
+          SELECT COALESCE(SUM(
+            CASE 
+              WHEN si.cost IS NOT NULL AND si.cost > 0 THEN 
+                (CASE WHEN s.currency='USD' THEN (si.price - si.cost) * s.exchange_rate ELSE si.price - (si.cost * s.exchange_rate) END) * si.quantity
+              ELSE 0 
+            END
+          ), 0) as gross_profit
           FROM sale_items si
           JOIN sales s ON s.id = si.sale_id
-          JOIN products p ON p.id = si.product_id
           ${prevWhere.whereSql}
         `).get(...prevWhere.params) as any;
 
+        const prevDiscountRow = db.prepare(`
+          SELECT COALESCE(SUM(CASE WHEN s.currency='USD' THEN s.discount * s.exchange_rate ELSE s.discount END), 0) as total_discount
+          FROM sales s
+          ${prevWhere.whereSql}
+        `).get(...prevWhere.params) as any;
+
+        const prevReturnsWhere = buildReturnsWhere(startDatePrev, endDatePrev);
+        const prevRefundsRow = db.prepare(`
+          SELECT COALESCE(SUM(CASE WHEN s.currency='USD' THEN sr.refund_amount * s.exchange_rate ELSE sr.refund_amount END), 0) as total_refunds
+          FROM sale_returns sr
+          JOIN sales s ON s.id = sr.sale_id
+          ${prevReturnsWhere.whereSql}
+        `).get(...prevReturnsWhere.params) as any;
+
         prevPeriodSales = Number(prevSalesRow?.total_sales || 0);
-        prevPeriodProfit = Number(prevProfitRow?.total_profit || 0);
+        const prevGross = Number(prevGrossRow?.gross_profit || 0);
+        const prevDisc = Number(prevDiscountRow?.total_discount || 0);
+        const prevRef = Number(prevRefundsRow?.total_refunds || 0);
+        prevPeriodProfit = Math.max(0, prevGross - prevDisc - prevRef);
         prevPeriodTx = Number(prevSalesRow?.total_tx || 0);
 
         growthSalesPct = prevPeriodSales > 0 ? ((totalSales - prevPeriodSales) / prevPeriodSales) * 100 : (totalSales > 0 ? 100 : 0);
@@ -7454,8 +7546,13 @@ DIRECTIVAS CRÍTICAS:
       // Best selling products - filtered by period and seller/payment
       let topProducts;
       topProducts = db.prepare(`
-        SELECT p.id, p.name, p.sku, SUM(si.quantity) as total_qty, SUM(si.quantity * si.price) as total_revenue,
-               SUM(si.quantity * (CASE WHEN s.currency='USD' THEN (si.price - COALESCE(si.cost, p.price_cost, 0)) * s.exchange_rate ELSE si.price - (COALESCE(si.cost, p.price_cost, 0) * s.exchange_rate) END)) as total_profit
+        SELECT p.id, p.name, p.sku, SUM(si.quantity) as total_qty, 
+               SUM(CASE WHEN s.currency='USD' THEN si.quantity * si.price * s.exchange_rate ELSE si.quantity * si.price END) as total_revenue,
+               SUM(CASE 
+                 WHEN si.cost IS NOT NULL AND si.cost > 0 THEN 
+                   (CASE WHEN s.currency='USD' THEN (si.price - si.cost) * s.exchange_rate ELSE si.price - (si.cost * s.exchange_rate) END) * si.quantity
+                 ELSE 0 
+               END) as total_profit
         FROM sale_items si 
         JOIN products p ON p.id = si.product_id 
         JOIN sales s ON s.id = si.sale_id
@@ -7509,10 +7606,13 @@ DIRECTIVAS CRÍTICAS:
             ) t
             LEFT JOIN (
               SELECT substr(s.created_at, 1, 10) as label,
-                     SUM(si.quantity * (CASE WHEN s.currency='USD' THEN (si.price - COALESCE(si.cost, p.price_cost, 0)) * s.exchange_rate ELSE si.price - (COALESCE(si.cost, p.price_cost, 0) * s.exchange_rate) END)) as profit
+                     SUM(CASE 
+                       WHEN si.cost IS NOT NULL AND si.cost > 0 THEN 
+                         (CASE WHEN s.currency='USD' THEN (si.price - si.cost) * s.exchange_rate ELSE si.price - (si.cost * s.exchange_rate) END) * si.quantity
+                       ELSE 0 
+                     END) as profit
               FROM sale_items si
               JOIN sales s ON s.id = si.sale_id
-              JOIN products p ON p.id = si.product_id
               ${currWhereItems.whereSql}
               GROUP BY label
             ) p_info ON t.label = p_info.label
@@ -7534,10 +7634,13 @@ DIRECTIVAS CRÍTICAS:
             ) t
             LEFT JOIN (
               SELECT substr(s.created_at, 1, 10) as label,
-                     SUM(si.quantity * (CASE WHEN s.currency='USD' THEN (si.price - COALESCE(si.cost, p.price_cost, 0)) * s.exchange_rate ELSE si.price - (COALESCE(si.cost, p.price_cost, 0) * s.exchange_rate) END)) as profit
+                     SUM(CASE 
+                       WHEN si.cost IS NOT NULL AND si.cost > 0 THEN 
+                         (CASE WHEN s.currency='USD' THEN (si.price - si.cost) * s.exchange_rate ELSE si.price - (si.cost * s.exchange_rate) END) * si.quantity
+                       ELSE 0 
+                     END) as profit
               FROM sale_items si
               JOIN sales s ON s.id = si.sale_id
-              JOIN products p ON p.id = si.product_id
               ${prevWhereItems.whereSql}
               GROUP BY label
             ) p_info ON t.label = p_info.label
@@ -7580,10 +7683,13 @@ DIRECTIVAS CRÍTICAS:
             ) t
             LEFT JOIN (
               SELECT substr(s.created_at, 1, 10) as label,
-                     SUM(si.quantity * (CASE WHEN s.currency='USD' THEN (si.price - COALESCE(si.cost, p.price_cost, 0)) * s.exchange_rate ELSE si.price - (COALESCE(si.cost, p.price_cost, 0) * s.exchange_rate) END)) as profit
+                     SUM(CASE 
+                       WHEN si.cost IS NOT NULL AND si.cost > 0 THEN 
+                         (CASE WHEN s.currency='USD' THEN (si.price - si.cost) * s.exchange_rate ELSE si.price - (si.cost * s.exchange_rate) END) * si.quantity
+                       ELSE 0 
+                     END) as profit
               FROM sale_items si
               JOIN sales s ON s.id = si.sale_id
-              JOIN products p ON p.id = si.product_id
               ${currWhereItems.whereSql}
               GROUP BY label
             ) p_info ON t.label = p_info.label
@@ -7606,10 +7712,13 @@ DIRECTIVAS CRÍTICAS:
           ) t
           LEFT JOIN (
             SELECT substr(s.created_at, 1, 10) as label,
-                   SUM(si.quantity * (CASE WHEN s.currency='USD' THEN (si.price - COALESCE(si.cost, p.price_cost, 0)) * s.exchange_rate ELSE si.price - (COALESCE(si.cost, p.price_cost, 0) * s.exchange_rate) END)) as profit
+                   SUM(CASE 
+                     WHEN si.cost IS NOT NULL AND si.cost > 0 THEN 
+                       (CASE WHEN s.currency='USD' THEN (si.price - si.cost) * s.exchange_rate ELSE si.price - (si.cost * s.exchange_rate) END) * si.quantity
+                     ELSE 0 
+                   END) as profit
             FROM sale_items si
             JOIN sales s ON s.id = si.sale_id
-            JOIN products p ON p.id = si.product_id
             ${currWhereItems.whereSql}
             GROUP BY label
           ) p_info ON t.label = p_info.label
@@ -8868,11 +8977,17 @@ DIRECTIVAS CRÍTICAS:
 
         const account = db.prepare('SELECT * FROM cash_accounts WHERE seller_id = ?').get(sellerId) as any;
         
-        // Sum all pending movements
-        const pendingMovements = db.prepare("SELECT * FROM cash_movements WHERE seller_id = ? AND status = 'pendiente'").all(sellerId) as any[];
+        // Sum all pending movements using historical exchange rate of the sale
+        const pendingMovements = db.prepare(`
+          SELECT m.*, s.exchange_rate as sale_exchange_rate
+          FROM cash_movements m
+          LEFT JOIN sales s ON m.sale_id = s.id
+          WHERE m.seller_id = ? AND m.status = 'pendiente'
+        `).all(sellerId) as any[];
         let calculatedBalance = 0;
         for (const m of pendingMovements) {
-          const amtInBs = m.currency === 'USD' ? (m.amount * currentRate) : m.amount;
+          const rate = Number(m.sale_exchange_rate || currentRate);
+          const amtInBs = m.currency === 'USD' ? (m.amount * rate) : m.amount;
           calculatedBalance += amtInBs;
         }
 
@@ -8950,7 +9065,7 @@ DIRECTIVAS CRÍTICAS:
       selfHealCashAccounts(sellerId);
 
       const movements = db.prepare(`
-        SELECT m.*, s.total as sale_total, s.discount as sale_discount, s.payment_method as sale_payment
+        SELECT m.*, s.total as sale_total, s.discount as sale_discount, s.payment_method as sale_payment, s.exchange_rate as sale_exchange_rate
         FROM cash_movements m
         LEFT JOIN sales s ON m.sale_id = s.id
         WHERE m.seller_id = ?

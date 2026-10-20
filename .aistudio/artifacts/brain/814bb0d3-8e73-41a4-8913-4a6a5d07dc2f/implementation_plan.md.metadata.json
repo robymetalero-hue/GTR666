@@ -1,6 +1,6 @@
 {
-  "summary": "Plan para implementar la política comercial de redondeo estricto a múltiplos de Bs. 0,50 en todas las ventas en bolivianos desde el POS, sincronizando la visualización en frontend, recibos y la validación estricta en el servidor sin afectar precios en dólares ni ventas históricas.",
-  "updatedAt": "2026-10-20T11:11:35.959284385Z",
-  "requestFeedback": true,
-  "userFacing": true
+  "summary":  "Plan detallado de corrección quirúrgica para históricos financieros y tipo de cambio en GTR666 (repositorio robymetalero-hue/GTR666).\nCubre los 6 puntos críticos de consistencia monetaria:\n1. Reconstrucción de equivalentes en caja usando sales.exchange_rate en server.ts (selfHealCashAccounts) y CajasView.tsx (calculateMethodTotals).\n2. Verificación de tipo de cambio oficial del servidor en POST /api/sales para ventas online y asignación de tasa oficial al sincronizar ventas offline.\n3. Consolidación de ingresos en Bs en ExtraViews.tsx convirtiendo cada venta USD a su tasa histórica sin alterar comprobantes.\n4. Corrección de utilidades en /api/dashboard utilizando costos y precios de sale_items, deduciendo descuentos y devoluciones, y excluyendo ventas antiguas sin costo registrado sin proyectar costos actuales.\n5. Tratamiento monetario coherente en POST /api/sales/refund con reembolso en la moneda original al tipo de cambio histórico de la venta.\n6. Eliminación de conversiones referenciales con tipo de cambio dinámico en historiales auditados de Inventory.tsx.\nIncluye estrategia de validación en base de datos aislada con tasas 10, 11 y 12.",
+  "updatedAt":  "2026-10-20T14:54:35.211794911Z",
+  "requestFeedback":  true,
+  "userFacing":  true
 }

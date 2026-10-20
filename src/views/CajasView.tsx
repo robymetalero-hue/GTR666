@@ -319,7 +319,8 @@ export default function CajasView() {
     movements.forEach(m => {
       if (m.status === 'pendiente') {
         const method = m.payment_method || 'Efectivo';
-        const amtInBs = m.currency === 'USD' ? (m.amount * (exchangeRate || 6.96)) : m.amount;
+        const rate = Number(m.sale_exchange_rate || m.exchange_rate || exchangeRate || 6.96);
+        const amtInBs = m.currency === 'USD' ? (m.amount * rate) : m.amount;
         totalPending += amtInBs;
 
         if (totals[method] !== undefined) {
@@ -877,7 +878,14 @@ export default function CajasView() {
                             </td>
                             <td className="p-3 text-slate-400 font-semibold max-w-[200px] truncate">{m.notes || '-'}</td>
                             <td className={`p-3 text-right font-black font-mono ${amtColor}`}>
-                              {m.amount > 0 ? `+${m.amount.toFixed(2)}` : m.amount.toFixed(2)} Bs.
+                              <div>
+                                {m.amount > 0 ? `+${m.amount.toFixed(2)}` : m.amount.toFixed(2)} {m.currency === 'USD' ? '$' : 'Bs.'}
+                              </div>
+                              {m.currency === 'USD' && (
+                                <div className="text-[8.5px] font-normal text-slate-400">
+                                  (~Bs. {(m.amount * Number(m.sale_exchange_rate || m.exchange_rate || exchangeRate || 6.96)).toFixed(2)})
+                                </div>
+                              )}
                             </td>
                             <td className="p-3 text-center pr-4 font-mono text-slate-450 text-[9px]">{new Date(m.created_at).toLocaleString()}</td>
                           </tr>
@@ -1246,10 +1254,16 @@ export default function CajasView() {
                         {traceTicketDetails.currency === 'USD' ? '$' : 'Bs.'}{traceTicketDetails.total.toFixed(2)} {traceTicketDetails.currency}
                       </span>
                     </div>
-                    {traceTicketDetails.currency === 'BOB' && exchangeRate && (
+                    {traceTicketDetails.currency === 'BOB' && (traceTicketDetails.exchange_rate || exchangeRate) && (
                       <div className="text-[10px] text-slate-400 flex items-center justify-between font-medium border-t border-slate-150 dark:border-slate-850 pt-2">
-                        <span>Conversión Referencial (Tipo de Cambio: {exchangeRate}):</span>
-                        <span className="font-mono font-bold">${(traceTicketDetails.total / exchangeRate).toFixed(2)} USD</span>
+                        <span>Conversión Histórica (Tipo de Cambio: {traceTicketDetails.exchange_rate || exchangeRate}):</span>
+                        <span className="font-mono font-bold">${(traceTicketDetails.total / (traceTicketDetails.exchange_rate || exchangeRate)).toFixed(2)} USD</span>
+                      </div>
+                    )}
+                    {traceTicketDetails.currency === 'USD' && traceTicketDetails.exchange_rate && (
+                      <div className="text-[10px] text-slate-400 flex items-center justify-between font-medium border-t border-slate-150 dark:border-slate-850 pt-2">
+                        <span>Conversión Histórica (Tipo de Cambio: {traceTicketDetails.exchange_rate}):</span>
+                        <span className="font-mono font-bold">Bs. {(traceTicketDetails.total * traceTicketDetails.exchange_rate).toFixed(2)}</span>
                       </div>
                     )}
                   </div>

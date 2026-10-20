@@ -385,10 +385,19 @@ export function HistorialVentasView() {
                 }
             }
 
+            // Helper para convertir montos a Bs utilizando su tasa histórica
+            const toBs = (s: any, field: 'total' | 'discount' | 'capital' = 'total') => {
+                const rate = Number(s.exchange_rate || 1);
+                const val = Number(s[field] || 0);
+                return s.currency === 'USD' ? (val * rate) : val;
+            };
+
+            const saleTotalBs = toBs(sale, 'total');
+
             // Min Amount Filter (in BOB/Bs.)
             if (minAmount.trim() !== '') {
                 const min = parseFloat(minAmount);
-                if (!isNaN(min) && sale.total < min) {
+                if (!isNaN(min) && saleTotalBs < min) {
                     return false;
                 }
             }
@@ -396,7 +405,7 @@ export function HistorialVentasView() {
             // Max Amount Filter (in BOB/Bs.)
             if (maxAmount.trim() !== '') {
                 const max = parseFloat(maxAmount);
-                if (!isNaN(max) && sale.total > max) {
+                if (!isNaN(max) && saleTotalBs > max) {
                     return false;
                 }
             }
@@ -405,15 +414,21 @@ export function HistorialVentasView() {
         });
     }, [sales, searchQuery, selectedCashier, selectedPaymentMethod, minAmount, maxAmount]);
 
-    // calculate metrics
-    const totalEarnings = filteredSales.reduce((sum, s) => sum + s.total, 0);
-    const totalDiscounts = filteredSales.reduce((sum, s) => sum + (s.discount || 0), 0);
+    // calculate metrics (consolidated in Bs using historical exchange rates)
+    const toBs = (s: any, field: 'total' | 'discount' | 'capital' = 'total') => {
+        const rate = Number(s.exchange_rate || 1);
+        const val = Number(s[field] || 0);
+        return s.currency === 'USD' ? (val * rate) : val;
+    };
+
+    const totalEarnings = filteredSales.reduce((sum, s) => sum + toBs(s, 'total'), 0);
+    const totalDiscounts = filteredSales.reduce((sum, s) => sum + toBs(s, 'discount'), 0);
     const transactionsCount = filteredSales.length;
     const totalItemsCount = filteredSales.reduce((sum, s) => sum + (s.item_count || 0), 0);
     const averageTicket = transactionsCount > 0 ? totalEarnings / transactionsCount : 0;
 
     // Capital & Profit calculations requested by user
-    const totalCapital = filteredSales.reduce((sum, s) => sum + (s.capital || 0), 0);
+    const totalCapital = filteredSales.reduce((sum, s) => sum + toBs(s, 'capital'), 0);
     const totalProfit = totalEarnings - totalCapital;
     const profitMargin = totalEarnings > 0 ? (totalProfit / totalEarnings) * 100 : 0;
 
@@ -2391,12 +2406,18 @@ export function AnalisisView() {
         fetchSales();
     }, [dateRange]);
 
+    // Helper para convertir el monto de una venta a Bs utilizando su tasa histórica
+    const toBs = (s: any) => {
+        const rate = Number(s.exchange_rate || 1);
+        return s.currency === 'USD' ? (Number(s.total || 0) * rate) : Number(s.total || 0);
+    };
+
     // Formulate variables
-    const cashTotal = sales.filter(s => s.payment_method === 'Efectivo').reduce((acc, s) => acc + s.total, 0);
-    const cardTotal = sales.filter(s => s.payment_method === 'Tarjeta').reduce((acc, s) => acc + s.total, 0);
-    const transferTotal = sales.filter(s => s.payment_method === 'Transferencia').reduce((acc, s) => acc + s.total, 0);
+    const cashTotal = sales.filter(s => s.payment_method === 'Efectivo').reduce((acc, s) => acc + toBs(s), 0);
+    const cardTotal = sales.filter(s => s.payment_method === 'Tarjeta').reduce((acc, s) => acc + toBs(s), 0);
+    const transferTotal = sales.filter(s => s.payment_method === 'Transferencia').reduce((acc, s) => acc + toBs(s), 0);
     const totalTransactions = sales.length;
-    const totalRevenue = sales.reduce((acc, s) => acc + s.total, 0);
+    const totalRevenue = sales.reduce((acc, s) => acc + toBs(s), 0);
     const averageTicket = totalTransactions > 0 ? totalRevenue / totalTransactions : 0;
 
 
@@ -2416,7 +2437,7 @@ export function AnalisisView() {
                     hour = s.created_at.split(' ')[1].split(':')[0];
                 }
                 if (hour && groups[hour]) {
-                    groups[hour].total += s.total;
+                    groups[hour].total += toBs(s);
                     groups[hour].count += 1;
                 }
             }
@@ -2435,7 +2456,7 @@ export function AnalisisView() {
         const groups: { [key: string]: number } = {};
         sales.forEach(s => {
             const rawDate = s.created_at.split('T')[0];
-            groups[rawDate] = (groups[rawDate] || 0) + s.total;
+            groups[rawDate] = (groups[rawDate] || 0) + toBs(s);
         });
         const sorted = Object.keys(groups).sort();
         return sorted.map(dateKey => {

@@ -3350,10 +3350,16 @@ export default function Inventory() {
                                                 {traceTicketDetails.currency === 'USD' ? '$' : 'Bs.'}{traceTicketDetails.total.toFixed(2)} {traceTicketDetails.currency}
                                             </span>
                                         </div>
-                                        {traceTicketDetails.currency === 'BOB' && exchangeRate && (
+                                        {traceTicketDetails.currency === 'BOB' && (traceTicketDetails.exchange_rate || exchangeRate) && (
                                             <div className="text-[10px] text-slate-400 flex items-center justify-between font-medium border-t border-slate-150 dark:border-slate-850 pt-2">
-                                                <span>Conversión Referencial (Tipo de Cambio: {exchangeRate}):</span>
-                                                <span className="font-mono font-bold">${(traceTicketDetails.total / exchangeRate).toFixed(2)} USD</span>
+                                                <span>Conversión Histórica (Tipo de Cambio: {traceTicketDetails.exchange_rate || exchangeRate}):</span>
+                                                <span className="font-mono font-bold">${(traceTicketDetails.total / (traceTicketDetails.exchange_rate || exchangeRate)).toFixed(2)} USD</span>
+                                            </div>
+                                        )}
+                                        {traceTicketDetails.currency === 'USD' && traceTicketDetails.exchange_rate && (
+                                            <div className="text-[10px] text-slate-400 flex items-center justify-between font-medium border-t border-slate-150 dark:border-slate-850 pt-2">
+                                                <span>Conversión Histórica (Tipo de Cambio: {traceTicketDetails.exchange_rate}):</span>
+                                                <span className="font-mono font-bold">Bs. {(traceTicketDetails.total * traceTicketDetails.exchange_rate).toFixed(2)}</span>
                                             </div>
                                         )}
                                     </div>
@@ -3633,13 +3639,8 @@ export default function Inventory() {
                                                                 {sideDiffText}
                                                             </span>
                                                             <span className="text-[8px] text-slate-400 dark:text-slate-500 font-mono font-bold mt-0.5">
-                                                                Valuado: {log.price !== undefined ? `$${(log.price || 0).toFixed(2)}` : 'N/A'}
+                                                                Valuado: {log.price !== undefined ? `$${(log.price || 0).toFixed(2)} USD` : 'N/A'}
                                                             </span>
-                                                            {exchangeRate && log.price !== undefined && (
-                                                                <span className="text-[7.5px] text-slate-400 font-mono mt-0.5 font-semibold">
-                                                                    (Bs. {((log.price || 0) * exchangeRate).toFixed(2)})
-                                                                </span>
-                                                            )}
                                                         </div>
                                                     )}
                                                 </div>
