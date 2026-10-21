@@ -56,14 +56,15 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
-    // Internal System Settings - allows read, writes require authentication or server integrity proof
+    // Internal System Settings - allows read of non-sensitive settings; writes require authentication or server integrity proof
     match /settings/{settingId} {
-      allow read: if true;
-      allow create, update: if (isAuthenticated() || isSandbox('settings') || hasIntegrityProof());
+      allow read: if settingId != 'jwt_secret';
+      allow create, update: if (isAuthenticated() || isSandbox('settings') || hasIntegrityProof()) && settingId != 'jwt_secret';
       allow delete: if false;
     }
     match /sandbox_settings/{settingId} {
-      allow read, write: if true;
+      allow read: if settingId != 'jwt_secret';
+      allow write: if settingId != 'jwt_secret';
     }
 
     // Sale Returns (Auditoría de Devoluciones - FASE 4)

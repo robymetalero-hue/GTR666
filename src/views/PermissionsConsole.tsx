@@ -49,7 +49,8 @@ const ALL_PERMISSION_GROUPS: PermissionGroup[] = [
       { key: 'edit_pending_sales', label: 'Editar ventas pendientes', description: 'Permite alterar notas o cantidades de preventas.', defaultValue: true },
       { key: 'delete_pending_sales', label: 'Eliminar ventas pendientes', description: 'Permite anular pre-tickets guardados.', defaultValue: true },
       { key: 'complete_pending_sales', label: 'Completar ventas pendientes', description: 'Permite consolidar preventas a ventas de mostrador.', defaultValue: true },
-      { key: 'manage_credits', label: 'Gestionar Créditos y CxC', description: 'Permite abrir y gestionar el módulo de Ventas Pendientes y Cuentas por Cobrar (CxC).', defaultValue: true }
+      { key: 'manage_credits', label: 'Gestionar Créditos y CxC', description: 'Permite abrir y gestionar el módulo de Ventas Pendientes y Cuentas por Cobrar (CxC).', defaultValue: true },
+      { key: 'view_clients', label: 'Ver clientes', description: 'Permite buscar, listar y asociar clientes a las ventas en caja.', defaultValue: true }
     ]
   },
   {

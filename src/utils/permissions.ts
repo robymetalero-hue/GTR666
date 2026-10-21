@@ -26,6 +26,7 @@ export const DEFAULT_PERMISSIONS: Record<string, boolean> = {
   delete_pending_sales: true,
   complete_pending_sales: true,
   manage_credits: true,
+  view_clients: true,
 
   // Inventario
   view_inventory: true,
@@ -75,6 +76,7 @@ export const DEFAULT_PERMISSIONS: Record<string, boolean> = {
   admin_users: false,
   admin_permissions: false,
   view_audit: false,
+  view_audit_logs: false, // alias of view_audit
   access_ai: true,
   view_diagnostics: false,
   access_forensic_audit: false, // Strict: only admins by default, or explicitly delegated by admin
@@ -124,6 +126,15 @@ export function normalizePermissions(rawPermissions: any): Record<string, boolea
   const viewReportsVal = perms.view_general_reports !== undefined ? !!perms.view_general_reports : (perms.view_reports !== undefined ? !!perms.view_reports : DEFAULT_PERMISSIONS.view_general_reports);
   normalized.view_general_reports = viewReportsVal;
   normalized.view_reports = viewReportsVal;
+
+  const viewAuditVal = perms.view_audit !== undefined ? !!perms.view_audit : (perms.view_audit_logs !== undefined ? !!perms.view_audit_logs : DEFAULT_PERMISSIONS.view_audit);
+  normalized.view_audit = viewAuditVal;
+  normalized.view_audit_logs = viewAuditVal;
+
+  const viewClientsVal = perms.view_clients !== undefined ? !!perms.view_clients : (perms.clients !== undefined ? !!perms.clients : (perms.view_customers !== undefined ? !!perms.view_customers : DEFAULT_PERMISSIONS.view_clients));
+  normalized.view_clients = viewClientsVal;
+  normalized.clients = viewClientsVal;
+  normalized.view_customers = viewClientsVal;
 
   return normalized;
 }

@@ -193,26 +193,15 @@ async function startServer() {
   app.use(express.urlencoded({ limit: "100mb", extended: true }));
 
   // Sandbox vs Production Environment Isolation Gate
-  // Server-authoritative isolation: client headers (like x-app-environment) are strictly ignored
+  // Server-authoritative isolation: HTTP headers (Host, x-forwarded-host, Referer, x-app-environment) are strictly ignored.
   app.use((req, res, next) => {
-    const host = String(req.headers['x-forwarded-host'] || req.headers.host || '');
-    const referer = String(req.headers.referer || '');
-
     let isSandbox = false;
     if (process.env.APP_ENV === 'sandbox' || process.env.APP_ENV === 'development') {
       isSandbox = true;
     } else if (process.env.APP_ENV === 'production') {
       isSandbox = false;
-    } else if (host.includes('ais-dev') || referer.includes('ais-dev') || host.includes('localhost') || host.includes('127.0.0.1')) {
-      isSandbox = true;
-    } else if (host.includes('ais-pre')) {
-      isSandbox = false;
     } else {
-      isSandbox = Boolean(
-        process.env.K_SERVICE?.startsWith('ais-dev') || 
-        process.env.APP_URL?.includes('ais-dev') || 
-        process.env.NODE_ENV !== 'production'
-      );
+      isSandbox = process.env.NODE_ENV !== 'production';
     }
 
     (req as any).isSandbox = isSandbox;
@@ -3480,11 +3469,63 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         console.warn("Failed to reconstruct stock history: ", calcErr.message);
       }
 
+      const verifiedUser = (req as any).verifiedUser;
+      const uRole = String(verifiedUser?.role || '').toLowerCase();
+      const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+      const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
+      const canViewCosts = isAdmin || !!userPerms.view_costs || !!userPerms.financial_reports;
+
+      if (!canViewCosts) {
+        unifiedLogs.forEach((ul: any) => {
+          ul.price = null;
+          ul.price_before = null;
+          ul.price_after = null;
+          if (ul.changed_fields && typeof ul.changed_fields === 'object') {
+            delete ul.changed_fields.price_cost;
+            delete ul.changed_fields.cost;
+            delete ul.changed_fields.arrival_price;
+          }
+        });
+      }
+
       res.json(unifiedLogs);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
   });
+
+  // Alias endpoint for inventory history
+  app.get("/api/products/:id/inventory-history", (req, res, next) => {
+    (req as any).url = `/api/products/${req.params.id}/audit-history`;
+    app._router.handle(req, res, next);
+  });
+
+  // Helper to deeply sanitize cost and purchase price fields in audit logs for non-financial users
+  function sanitizeAuditLogCosts(log: any) {
+    if (!log) return log;
+    const sanitized = { ...log };
+    const isCostEvent = sanitized.event_type === 'cambio_costo' || sanitized.action === 'cambio_costo' || sanitized.category === 'costos';
+    if (isCostEvent) {
+      sanitized.price_before = null;
+      sanitized.price_after = null;
+      sanitized.price = null;
+    }
+    ['before_data', 'after_data', 'changed_fields'].forEach(field => {
+      if (sanitized[field]) {
+        try {
+          const parsed = typeof sanitized[field] === 'string' ? JSON.parse(sanitized[field]) : { ...sanitized[field] };
+          if (typeof parsed === 'object' && parsed !== null) {
+            delete parsed.price_cost;
+            delete parsed.cost;
+            delete parsed.arrival_price;
+            delete parsed.c_unit;
+            sanitized[field] = typeof log[field] === 'string' ? JSON.stringify(parsed) : parsed;
+          }
+        } catch (_) {}
+      }
+    });
+    return sanitized;
+  }
 
   // Product price history endpoint
   app.get("/api/products/:id/price-history", (req, res) => {
@@ -3504,7 +3545,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       `).all(id, id) as any[];
 
       if (!canViewCosts) {
-        logs = logs.filter(l => l.event_type !== 'cambio_costo');
+        logs = logs.filter(l => l.event_type !== 'cambio_costo').map(sanitizeAuditLogCosts);
       }
       res.json(logs);
     } catch (e: any) {
@@ -3515,11 +3556,21 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   // Global inventory audit logs (legacy fallback)
   app.get("/api/inventory-audit", (req, res) => {
     try {
-      const logs = db.prepare(`
+      const verifiedUser = (req as any).verifiedUser;
+      const uRole = String(verifiedUser?.role || '').toLowerCase();
+      const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+      const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
+      const canViewCosts = isAdmin || !!userPerms.view_costs || !!userPerms.financial_reports;
+
+      let logs = db.prepare(`
         SELECT * FROM system_audit_logs
         WHERE category = 'inventario' OR category = 'ventas'
         ORDER BY created_at DESC
-      `).all();
+      `).all() as any[];
+
+      if (!canViewCosts) {
+        logs = logs.filter(l => l.event_type !== 'cambio_costo').map(sanitizeAuditLogCosts);
+      }
       res.json(logs);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -3533,7 +3584,8 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const uRole = String(verifiedUser?.role || '').toLowerCase();
       const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
       const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
-      if (!isAdmin && !userPerms.view_audit_logs && !userPerms.system_audit) {
+      const canViewAudit = isAdmin || !!userPerms.view_audit || !!userPerms.view_audit_logs || !!userPerms.system_audit;
+      if (!canViewAudit) {
         return res.status(403).json({ error: "No autorizado para consultar registros de auditoría del sistema." });
       }
 
@@ -3757,7 +3809,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const uRole = String(verifiedUser?.role || '').toLowerCase();
       const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
       const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
-      const canViewCosts = isAdmin || !!userPerms.view_costs || !!userPerms.financial_reports || !!userPerms.increase_stock;
+      const canViewCosts = isAdmin || !!userPerms.view_costs || !!userPerms.financial_reports;
 
       const query = `
         SELECT sa.*, p.name as product_name, p.sku as product_sku 
@@ -3880,9 +3932,9 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const uRole = String(verifiedUser.role || '').toLowerCase();
       const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
       const userPerms = (typeof verifiedUser.permissions === 'string' ? JSON.parse(verifiedUser.permissions || '{}') : verifiedUser.permissions) || {};
-      const canViewClients = isAdmin || !!userPerms.view_clients || !!userPerms.clients || !!userPerms.view_customers;
+      const canViewClients = isAdmin || userPerms.view_clients === true || (userPerms.view_clients === undefined && (uRole === 'vendedor' || uRole === 'cajero')) || !!userPerms.clients || !!userPerms.view_customers;
 
-      if (!canViewClients) {
+      if (!canViewClients || userPerms.view_clients === false) {
         return res.status(403).json({ error: "No tienes autorización para ver la lista de clientes (se requiere permiso view_clients)." });
       }
 
@@ -6869,20 +6921,24 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   // Strict Access: Only Admin or delegated users
   // ==========================================
   const requireForensicAuditAccess = (req: any, res: any, next: any) => {
-    const role = String(req.headers['x-user-role'] || (req as any).auditUser?.userRole || '').toLowerCase();
-    const username = String(req.headers['x-user-username'] || (req as any).auditUser?.userName || '').toLowerCase();
+    const verifiedUser = (req as any).verifiedUser;
+    if (!verifiedUser) {
+      return res.status(401).json({
+        error: "ACCESO DENEGADO: Se requiere autenticación válida.",
+        code: "UNAUTHENTICATED"
+      });
+    }
 
-    if (role === 'admin' || role === 'propietario' || role === 'administrador' || username === 'admin' || username === 'roby') {
+    const role = String(verifiedUser.role || '').toLowerCase();
+    const isAdmin = role === 'admin' || role === 'propietario' || role === 'administrador' || isMainAdmin(verifiedUser);
+    if (isAdmin) {
       return next();
     }
 
-    try {
-      const rawPerms = req.headers['x-user-permissions'] || '';
-      const perms = JSON.parse(rawPerms || '{}');
-      if (perms.access_forensic_audit === true) {
-        return next();
-      }
-    } catch (e) {}
+    const perms = (typeof verifiedUser.permissions === 'string' ? JSON.parse(verifiedUser.permissions || '{}') : verifiedUser.permissions) || {};
+    if (perms.access_forensic_audit === true) {
+      return next();
+    }
 
     return res.status(403).json({
       error: "ACCESO DENEGADO: El módulo de Auditoría Forense con IA está restringido exclusivamente a la Administración.",
@@ -8740,6 +8796,17 @@ DIRECTIVAS CRÍTICAS:
         return res.status(403).json({ error: "No autorizado: Solo un administrador verificado puede cerrar o aprobar sesiones de control físico." });
       }
 
+      if (status === 'cancelado') {
+        const countRow = db.prepare('SELECT user_id FROM inventory_counts WHERE id = ?').get(id) as any;
+        if (!countRow) {
+          return res.status(404).json({ error: "Sesión de conteo no encontrada." });
+        }
+        const isOwner = Number(countRow.user_id) === Number(verifiedUser.id);
+        if (!isAdmin && !isOwner) {
+          return res.status(403).json({ error: "No autorizado: No tienes autorización para cancelar esta sesión de control físico." });
+        }
+      }
+
       if (auto_apply === true && !isAdmin) {
         return res.status(403).json({ error: "No autorizado: Solo administradores pueden aplicar ajustes automáticos de stock." });
       }
@@ -9146,17 +9213,22 @@ DIRECTIVAS CRÍTICAS:
   // Obtener estado de cajas de vendedores
   app.get("/api/cash-accounts", (req, res) => {
     try {
-      const userRole = req.headers['x-user-role'] || req.query.user_role;
-      const userId = Number(req.headers['x-user-id'] || req.query.user_id);
+      const verifiedUser = (req as any).verifiedUser;
+      if (!verifiedUser) {
+        return res.status(401).json({ error: "Sesión requerida." });
+      }
+      const uRole = String(verifiedUser.role || '').toLowerCase();
+      const userId = Number(verifiedUser.id);
+      const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
 
       // Trigger self-healing first!
-      if (userRole === 'vendedor') {
+      if (!isAdmin) {
         selfHealCashAccounts(userId);
       } else {
         selfHealCashAccounts(); // heals everyone
       }
 
-      if (userRole === 'vendedor') {
+      if (!isAdmin) {
         // A seller can only see their own cash account!
         const account = db.prepare('SELECT * FROM cash_accounts WHERE seller_id = ?').get(userId);
         if (!account) {
@@ -9187,10 +9259,15 @@ DIRECTIVAS CRÍTICAS:
   app.get("/api/cash-accounts/:sellerId/movements", (req, res) => {
     const sellerId = Number(req.params.sellerId);
     try {
-      const userRole = req.headers['x-user-role'] || req.query.user_role;
-      const userId = Number(req.headers['x-user-id'] || req.query.user_id);
+      const verifiedUser = (req as any).verifiedUser;
+      if (!verifiedUser) {
+        return res.status(401).json({ error: "Sesión requerida." });
+      }
+      const uRole = String(verifiedUser.role || '').toLowerCase();
+      const userId = Number(verifiedUser.id);
+      const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
 
-      if (userRole === 'vendedor' && String(userId) !== String(sellerId)) {
+      if (!isAdmin && userId !== sellerId) {
         return res.status(403).json({ error: "No tienes autorización para ver los movimientos de caja de otros vendedores." });
       }
 
