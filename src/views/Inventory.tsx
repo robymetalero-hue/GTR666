@@ -3350,10 +3350,10 @@ export default function Inventory() {
                                                 {traceTicketDetails.currency === 'USD' ? '$' : 'Bs.'}{traceTicketDetails.total.toFixed(2)} {traceTicketDetails.currency}
                                             </span>
                                         </div>
-                                        {traceTicketDetails.currency === 'BOB' && (traceTicketDetails.exchange_rate || exchangeRate) && (
+                                        {traceTicketDetails.currency === 'BOB' && traceTicketDetails.exchange_rate && (
                                             <div className="text-[10px] text-slate-400 flex items-center justify-between font-medium border-t border-slate-150 dark:border-slate-850 pt-2">
-                                                <span>Conversión Histórica (Tipo de Cambio: {traceTicketDetails.exchange_rate || exchangeRate}):</span>
-                                                <span className="font-mono font-bold">${(traceTicketDetails.total / (traceTicketDetails.exchange_rate || exchangeRate)).toFixed(2)} USD</span>
+                                                <span>Conversión Histórica (Tipo de Cambio: {traceTicketDetails.exchange_rate}):</span>
+                                                <span className="font-mono font-bold">${(traceTicketDetails.total / traceTicketDetails.exchange_rate).toFixed(2)} USD</span>
                                             </div>
                                         )}
                                         {traceTicketDetails.currency === 'USD' && traceTicketDetails.exchange_rate && (

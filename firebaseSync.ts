@@ -182,6 +182,8 @@ export const SYNC_TABLES = [
   'firestore_transaction_ledger'
 ];
 
+export const SENSITIVE_SETTINGS_KEYS = new Set(['jwt_secret']);
+
 let isPullingInProgress = false;
 let lastPullTimestamp = 0;
 const PULL_COOLDOWN_MS = 10000; // 10 seconds rate limit for background pulls
@@ -288,7 +290,11 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
   try {
     const isSettings = tableName === 'settings';
     let rows: any[] = [];
-    const idList = idOrIds ? (Array.isArray(idOrIds) ? idOrIds.map(String) : [String(idOrIds)]) : null;
+    let idList = idOrIds ? (Array.isArray(idOrIds) ? idOrIds.map(String) : [String(idOrIds)]) : null;
+    if (isSettings && idList) {
+      idList = idList.filter(k => !SENSITIVE_SETTINGS_KEYS.has(k));
+      if (idList.length === 0) return;
+    }
 
     // Filter out locally deleted records
     let deletedIdsSet = new Set<string>();
@@ -302,6 +308,7 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
       if (isSettings) {
         const placeholders = idList.map(() => '?').join(', ');
         rows = db.prepare(`SELECT * FROM settings WHERE key IN (${placeholders})`).all(...idList) as any[];
+        rows = rows.filter(r => !SENSITIVE_SETTINGS_KEYS.has(String(r.key)));
       } else {
         const validIds = idList.filter(id => !deletedIdsSet.has(String(id)));
         if (validIds.length === 0) {
@@ -408,6 +415,9 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
       }
 
       rows = db.prepare(`SELECT * FROM ${tableName}`).all() as any[];
+      if (isSettings) {
+        rows = rows.filter(r => !SENSITIVE_SETTINGS_KEYS.has(String(r.key)));
+      }
       if (deletedIdsSet.size > 0 && !isSettings) {
         rows = rows.filter(r => !deletedIdsSet.has(String(r.id)));
       }
@@ -744,6 +754,9 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
               data.key = docSnap.id;
             }
             const docId = String(table === 'settings' ? (data.key || docSnap.id) : (data.id !== undefined ? data.id : docSnap.id));
+            if (table === 'settings' && SENSITIVE_SETTINGS_KEYS.has(docId)) {
+              continue;
+            }
             remoteIds.add(docId);
 
             // Never re-insert records that have been legitimately deleted, unless forceOverwrite is requested

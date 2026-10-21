@@ -319,7 +319,7 @@ export default function CajasView() {
     movements.forEach(m => {
       if (m.status === 'pendiente') {
         const method = m.payment_method || 'Efectivo';
-        const rate = Number(m.sale_exchange_rate || m.exchange_rate || exchangeRate || 6.96);
+        const rate = Number(m.sale_exchange_rate || m.exchange_rate || 6.96);
         const amtInBs = m.currency === 'USD' ? (m.amount * rate) : m.amount;
         totalPending += amtInBs;
 

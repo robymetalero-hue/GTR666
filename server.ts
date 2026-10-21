@@ -193,16 +193,15 @@ async function startServer() {
   app.use(express.urlencoded({ limit: "100mb", extended: true }));
 
   // Sandbox vs Production Environment Isolation Gate
-  // Dynamically determines whether the request operates in the isolated sandbox environment or production
+  // Server-authoritative isolation: client headers (like x-app-environment) are strictly ignored
   app.use((req, res, next) => {
     const host = String(req.headers['x-forwarded-host'] || req.headers.host || '');
     const referer = String(req.headers.referer || '');
-    const explicitHeader = String(req.headers['x-app-environment'] || '').toLowerCase();
 
     let isSandbox = false;
-    if (explicitHeader === 'sandbox') {
+    if (process.env.APP_ENV === 'sandbox' || process.env.APP_ENV === 'development') {
       isSandbox = true;
-    } else if (explicitHeader === 'production') {
+    } else if (process.env.APP_ENV === 'production') {
       isSandbox = false;
     } else if (host.includes('ais-dev') || referer.includes('ais-dev') || host.includes('localhost') || host.includes('127.0.0.1')) {
       isSandbox = true;
@@ -289,7 +288,6 @@ async function startServer() {
       (req.method === 'GET' && (
         req.path === '/api/products' ||
         req.path === '/api/departments' ||
-        req.path === '/api/clients' ||
         req.path === '/api/categories' ||
         req.path === '/api/settings/exchange-rate' ||
         req.path === '/api/settings/kiosk' ||
@@ -3279,6 +3277,12 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   app.get("/api/products/:id/stock-history", (req, res) => {
     const { id } = req.params;
     try {
+      const verifiedUser = (req as any).verifiedUser;
+      const uRole = String(verifiedUser?.role || '').toLowerCase();
+      const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+      const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
+      const canViewCosts = isAdmin || !!userPerms.view_costs || !!userPerms.financial_reports;
+
       // Get all stock arrivals for this product
       const arrivals = db.prepare(`
         SELECT 
@@ -3290,7 +3294,11 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           'Administrador' as user
         FROM stock_arrivals
         WHERE product_id = ?
-      `).all(id);
+      `).all(id) as any[];
+
+      if (!canViewCosts) {
+        arrivals.forEach(a => { a.price = null; });
+      }
 
       // Get all sales for this product
       const sales = db.prepare(`
@@ -3482,12 +3490,22 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   app.get("/api/products/:id/price-history", (req, res) => {
     const { id } = req.params;
     try {
-      const logs = db.prepare(`
+      const verifiedUser = (req as any).verifiedUser;
+      const uRole = String(verifiedUser?.role || '').toLowerCase();
+      const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+      const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
+      const canViewCosts = isAdmin || !!userPerms.view_costs || !!userPerms.financial_reports;
+
+      let logs = db.prepare(`
         SELECT * FROM system_audit_logs
         WHERE (related_product_id = ? OR (entity_type = 'producto' AND entity_id = ?))
           AND (category = 'precios' OR event_type = 'cambio_precio' OR event_type = 'cambio_costo' OR event_type = 'salida_venta')
         ORDER BY created_at DESC
-      `).all(id, id);
+      `).all(id, id) as any[];
+
+      if (!canViewCosts) {
+        logs = logs.filter(l => l.event_type !== 'cambio_costo');
+      }
       res.json(logs);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -3511,6 +3529,14 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   // Global system audit logs (advanced search, filters & pagination)
   app.get("/api/system-audit", (req, res) => {
     try {
+      const verifiedUser = (req as any).verifiedUser;
+      const uRole = String(verifiedUser?.role || '').toLowerCase();
+      const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+      const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
+      if (!isAdmin && !userPerms.view_audit_logs && !userPerms.system_audit) {
+        return res.status(403).json({ error: "No autorizado para consultar registros de auditoría del sistema." });
+      }
+
       const page = Math.max(1, parseInt(String(req.query.page || '1')));
       const limit = Math.max(1, parseInt(String(req.query.limit || '50')));
       const offset = (page - 1) * limit;
@@ -3727,13 +3753,23 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   // REST API: Stock Arrivals (Ingreso de Existencias)
   app.get("/api/stock-arrivals", (req, res) => {
     try {
+      const verifiedUser = (req as any).verifiedUser;
+      const uRole = String(verifiedUser?.role || '').toLowerCase();
+      const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+      const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
+      const canViewCosts = isAdmin || !!userPerms.view_costs || !!userPerms.financial_reports || !!userPerms.increase_stock;
+
       const query = `
         SELECT sa.*, p.name as product_name, p.sku as product_sku 
         FROM stock_arrivals sa 
         LEFT JOIN products p ON sa.product_id = p.id 
         ORDER BY sa.created_at DESC
       `;
-      res.json(db.prepare(query).all());
+      let rows = db.prepare(query).all() as any[];
+      if (!canViewCosts) {
+        rows = rows.map(r => ({ ...r, arrival_price: null }));
+      }
+      res.json(rows);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -3837,6 +3873,19 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   // REST API: Clients
   app.get("/api/clients", (req, res) => {
     try {
+      const verifiedUser = (req as any).verifiedUser;
+      if (!verifiedUser) {
+        return res.status(401).json({ error: "Sesión requerida para consultar clientes." });
+      }
+      const uRole = String(verifiedUser.role || '').toLowerCase();
+      const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+      const userPerms = (typeof verifiedUser.permissions === 'string' ? JSON.parse(verifiedUser.permissions || '{}') : verifiedUser.permissions) || {};
+      const canViewClients = isAdmin || !!userPerms.view_clients || !!userPerms.clients || !!userPerms.view_customers;
+
+      if (!canViewClients) {
+        return res.status(403).json({ error: "No tienes autorización para ver la lista de clientes (se requiere permiso view_clients)." });
+      }
+
       res.json(db.prepare('SELECT * FROM clients').all());
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -3866,11 +3915,22 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     const { id } = req.params;
     const { points } = req.body;
     try {
+      const verifiedUser = (req as any).verifiedUser;
+      if (!verifiedUser) {
+        return res.status(401).json({ error: "Sesión requerida." });
+      }
+      const uRole = String(verifiedUser.role || '').toLowerCase();
+      const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+      const userPerms = (typeof verifiedUser.permissions === 'string' ? JSON.parse(verifiedUser.permissions || '{}') : verifiedUser.permissions) || {};
+      if (!isAdmin && !userPerms.manage_loyalty && !userPerms.manage_clients) {
+        return res.status(403).json({ error: "No tienes autorización para modificar puntos de clientes." });
+      }
+
       db.prepare('UPDATE clients SET points = ? WHERE id = ?').run(Number(points || 0), id);
       syncAfterWrite("clients", id);
       res.json({ success: true });
     } catch (e: any) {
-      res.status(550).json({ error: e.message });
+      res.status(500).json({ error: e.message });
     }
   });
 
@@ -8018,6 +8078,16 @@ DIRECTIVAS CRÍTICAS:
 
   app.post("/api/settings/receipt", (req, res) => {
     try {
+      const verifiedUser = (req as any).verifiedUser;
+      if (!verifiedUser) {
+        return res.status(401).json({ error: "Sesión requerida." });
+      }
+      const uRole = String(verifiedUser.role || '').toLowerCase();
+      const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+      if (!isAdmin) {
+        return res.status(403).json({ error: "No autorizado. Solo administradores pueden modificar la configuración de recibos." });
+      }
+
       const { template } = req.body;
       if (!template) {
         return res.status(400).json({ error: "No se proporcionó plantilla de recibo." });
@@ -8058,6 +8128,20 @@ DIRECTIVAS CRÍTICAS:
 
   app.get("/api/cajas/:userId/sales", (req, res) => {
     const { userId } = req.params;
+    const verifiedUser = (req as any).verifiedUser;
+    if (!verifiedUser) {
+      return res.status(401).json({ error: "Sesión requerida." });
+    }
+    const requestingUserId = Number(verifiedUser.id);
+    const targetUserId = Number(userId);
+    const uRole = String(verifiedUser.role || '').toLowerCase();
+    const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+    
+    // A cashier can only see their own cash sales
+    if (!isAdmin && requestingUserId !== targetUserId) {
+      return res.status(403).json({ error: "No tienes autorización para ver las ventas de otra caja." });
+    }
+
     try {
       const sales = db.prepare(`
         SELECT s.*, c.name as client_name
@@ -8065,15 +8149,28 @@ DIRECTIVAS CRÍTICAS:
         LEFT JOIN clients c ON c.id = s.client_id
         WHERE s.user_id = ? AND s.cierre_id IS NULL
         ORDER BY s.created_at DESC
-      `).all(userId) as any[];
+      `).all(targetUserId) as any[];
+
+      const userPerms = (typeof verifiedUser.permissions === 'string' ? JSON.parse(verifiedUser.permissions || '{}') : verifiedUser.permissions) || {};
+      const canViewCosts = isAdmin || !!userPerms.view_costs || !!userPerms.financial_reports;
 
       for (const sale of sales) {
-        sale.items = db.prepare(`
-          SELECT si.*, p.name as product_name, p.sku, p.category
-          FROM sale_items si
-          JOIN products p ON p.id = si.product_id
-          WHERE si.sale_id = ?
-        `).all(sale.id);
+        if (canViewCosts) {
+          sale.items = db.prepare(`
+            SELECT si.*, p.name as product_name, p.sku, p.category
+            FROM sale_items si
+            JOIN products p ON p.id = si.product_id
+            WHERE si.sale_id = ?
+          `).all(sale.id);
+        } else {
+          // Omit si.cost for non-admin cashiers
+          sale.items = db.prepare(`
+            SELECT si.id, si.sale_id, si.product_id, si.quantity, si.price, si.product_name_snapshot, si.product_sku_snapshot, p.name as product_name, p.sku, p.category
+            FROM sale_items si
+            JOIN products p ON p.id = si.product_id
+            WHERE si.sale_id = ?
+          `).all(sale.id);
+        }
       }
       res.json(sales);
     } catch (e: any) {
@@ -8083,9 +8180,16 @@ DIRECTIVAS CRÍTICAS:
 
   app.post("/api/cajas/:userId/close", (req, res) => {
     const { userId } = req.params;
-    const { adminUser, observation } = req.body;
+    const { observation } = req.body;
+    const verifiedUser = (req as any).verifiedUser;
     
-    if (!adminUser || adminUser.role !== 'admin') {
+    if (!verifiedUser) {
+      return res.status(401).json({ error: "Sesión requerida." });
+    }
+    const uRole = String(verifiedUser.role || '').toLowerCase();
+    const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+
+    if (!isAdmin) {
       return res.status(403).json({ error: "No autorizado. Solo administradores pueden cerrar cajas." });
     }
 
@@ -8098,9 +8202,9 @@ DIRECTIVAS CRÍTICAS:
       const unclosedSalesNum = db.prepare("SELECT COUNT(*) as count, COALESCE(SUM(CASE WHEN currency = 'USD' THEN total * exchange_rate ELSE total END), 0) as total FROM sales WHERE user_id = ? AND cierre_id IS NULL").get(userId) as any;
 
       const transaction = db.transaction(() => {
-        // Record closure
+        // Record closure with authentic verified admin
         const result = db.prepare('INSERT INTO caja_cierres (user_id, username, admin_id, admin_username, amount, observation, sales_count) VALUES (?, ?, ?, ?, ?, ?, ?)')
-          .run(userId, targetUser.username, adminUser.id, adminUser.username, unclosedSalesNum.total, observation || "", unclosedSalesNum.count);
+          .run(userId, targetUser.username, verifiedUser.id, verifiedUser.username, unclosedSalesNum.total, observation || "", unclosedSalesNum.count);
         
         const closureId = result.lastInsertRowid;
         
@@ -8182,8 +8286,9 @@ DIRECTIVAS CRÍTICAS:
   // Obtener todas las sesiones de conteo físico
   app.get("/api/inventory-counts", (req, res) => {
     try {
-      const userRole = req.headers['x-user-role'] || req.query.user_role;
-      const isAdmin = userRole === 'admin' || userRole === 'administrador' || userRole === 'propietario' || userRole === 'dueño' || userRole === 'jefe';
+      const verifiedUser = (req as any).verifiedUser;
+      const uRole = String(verifiedUser?.role || '').toLowerCase();
+      const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
       let counts = db.prepare('SELECT * FROM inventory_counts ORDER BY id DESC').all() as any[];
 
       if (!isAdmin) {
@@ -8216,9 +8321,12 @@ DIRECTIVAS CRÍTICAS:
 
     try {
       const verifiedUser = (req as any).verifiedUser;
-      const userRole = req.headers['x-user-role'] || req.body.user_role || (verifiedUser ? verifiedUser.role : '');
-      const isAdmin = userRole === 'admin' || userRole === 'administrador' || userRole === 'propietario' || userRole === 'dueño' || userRole === 'jefe' || username === 'admin';
-      const userPerms = (verifiedUser && verifiedUser.permissions) ? verifiedUser.permissions : {};
+      if (!verifiedUser) {
+        return res.status(401).json({ error: "Sesión requerida." });
+      }
+      const uRole = String(verifiedUser.role || '').toLowerCase();
+      const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+      const userPerms = (typeof verifiedUser.permissions === 'string' ? JSON.parse(verifiedUser.permissions || '{}') : verifiedUser.permissions) || {};
       const canPreviewQuantities = isAdmin || !!userPerms.preview_quantities_in_count;
 
       // REGLA: Si el usuario no tiene permisos de administrador ni preview_quantities_in_count,
@@ -8226,7 +8334,10 @@ DIRECTIVAS CRÍTICAS:
       const finalMode = (canPreviewQuantities && mode === 'STANDARD') ? 'STANDARD' : 'BLIND';
 
       if (force_new) {
-        db.prepare("UPDATE inventory_counts SET status = 'cancelado', notes = 'Cancelada automáticamente al iniciar nueva auditoría' WHERE status IN ('en_progreso', 'pausado')").run();
+        if (!isAdmin) {
+          return res.status(403).json({ error: "Acceso denegado: Solo administradores verificados pueden forzar una nueva sesión y cancelar auditorías activas." });
+        }
+        db.prepare("UPDATE inventory_counts SET status = 'cancelado', notes = 'Cancelada por administrador al forzar nueva auditoría' WHERE status IN ('en_progreso', 'pausado')").run();
       } else {
         const activeSession = db.prepare("SELECT id FROM inventory_counts WHERE status IN ('en_progreso', 'pausado') ORDER BY id DESC").get() as any;
         if (activeSession) {
@@ -8341,8 +8452,9 @@ DIRECTIVAS CRÍTICAS:
   app.get("/api/inventory-counts/:id", (req, res) => {
     const { id } = req.params;
     try {
-      const userRole = req.headers['x-user-role'] || req.query.user_role;
-      const isAdmin = userRole === 'admin' || userRole === 'administrador' || userRole === 'propietario' || userRole === 'dueño' || userRole === 'jefe';
+      const verifiedUser = (req as any).verifiedUser;
+      const uRole = String(verifiedUser?.role || '').toLowerCase();
+      const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
       const isAuditorView = req.query.is_auditor_view === 'true';
 
       const count = db.prepare('SELECT * FROM inventory_counts WHERE id = ?').get(id) as any;
@@ -8548,6 +8660,16 @@ DIRECTIVAS CRÍTICAS:
     const { id } = req.params;
     const { item_ids, reason } = req.body;
     try {
+      const verifiedUser = (req as any).verifiedUser;
+      if (!verifiedUser) {
+        return res.status(401).json({ error: "Sesión requerida." });
+      }
+      const uRole = String(verifiedUser.role || '').toLowerCase();
+      const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+      if (!isAdmin) {
+        return res.status(403).json({ error: "No autorizado. Solo administradores pueden solicitar recuentos de discrepancias." });
+      }
+
       const count = db.prepare('SELECT id, status FROM inventory_counts WHERE id = ?').get(id) as any;
       if (!count) {
         return res.status(404).json({ error: "Sesión de conteo no encontrada." });
@@ -8571,7 +8693,6 @@ DIRECTIVAS CRÍTICAS:
       db.prepare(`UPDATE inventory_counts SET status = 'en_progreso' WHERE id = ?`).run(id);
 
       try {
-        const auditUser = (req as any).auditUser || {};
         insertSystemAuditLog({
           eventType: 'INVENTORY_RECOUNT_REQUESTED',
           category: 'INVENTORY_COUNT',
@@ -8581,9 +8702,9 @@ DIRECTIVAS CRÍTICAS:
           entityType: 'conteo_fisico',
           entityId: Number(id),
           entityName: `Control Físico #${id}`,
-          userId: auditUser.userId || 1,
-          userName: auditUser.userName || 'admin',
-          userRole: auditUser.userRole || 'admin',
+          userId: verifiedUser.id,
+          userName: verifiedUser.username,
+          userRole: verifiedUser.role || 'admin',
           reason: reason || 'Reconteo de discrepancias solicitado por administración',
           afterData: { count_id: id, items_count: item_ids.length, item_ids },
           status: 'success'
@@ -8608,8 +8729,20 @@ DIRECTIVAS CRÍTICAS:
         return res.status(400).json({ error: "Estado no permitido." });
       }
 
-      const userRole = req.headers['x-user-role'] || req.query.user_role || '';
-      const isAdmin = userRole === 'admin' || userRole === 'administrador' || userRole === 'propietario' || userRole === 'dueño' || userRole === 'jefe';
+      const verifiedUser = (req as any).verifiedUser;
+      if (!verifiedUser) {
+        return res.status(401).json({ error: "Sesión requerida." });
+      }
+      const uRole = String(verifiedUser.role || '').toLowerCase();
+      const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+
+      if (['cerrado', 'aprobado'].includes(status) && !isAdmin) {
+        return res.status(403).json({ error: "No autorizado: Solo un administrador verificado puede cerrar o aprobar sesiones de control físico." });
+      }
+
+      if (auto_apply === true && !isAdmin) {
+        return res.status(403).json({ error: "No autorizado: Solo administradores pueden aplicar ajustes automáticos de stock." });
+      }
 
       // Separación estricta: 'completado' o 'finalizado' solo preparan el informe. NUNCA modifican el inventario.
       if (status === 'cerrado' && auto_apply === true && isAdmin) {
@@ -9080,13 +9213,17 @@ DIRECTIVAS CRÍTICAS:
   // Liquidar/Cerrar periodo de acumulación y reiniciar caja del vendedor a cero (Solo Administrador / Propietario)
   app.post("/api/cash-accounts/:sellerId/settle", (req, res) => {
     const sellerId = Number(req.params.sellerId);
-    const { admin_id, admin_username, delivered_amount, notes } = req.body;
+    const { delivered_amount, notes } = req.body;
     
-    // Secure backend check: Strictly restrict to admin, administrador or propietario
-    const userRole = req.headers['x-user-role'] || req.query.user_role;
-    const userId = Number(req.headers['x-user-id'] || req.query.user_id);
+    // Secure backend check: Strictly restrict to verified admin, administrador or propietario
+    const verifiedUser = (req as any).verifiedUser;
+    if (!verifiedUser) {
+      return res.status(401).json({ error: "Sesión requerida." });
+    }
+    const uRole = String(verifiedUser.role || '').toLowerCase();
+    const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
 
-    if (userRole !== 'admin' && userRole !== 'administrador' && userRole !== 'propietario') {
+    if (!isAdmin) {
       return res.status(403).json({ error: "Acceso denegado: Solo el administrador o propietario puede liquidar o resetear cuentas de caja." });
     }
 
@@ -9112,7 +9249,7 @@ DIRECTIVAS CRÍTICAS:
 
       let settlementId: number | bigint = 0;
       const transaction = db.transaction(() => {
-        // Create settlement log
+        // Create settlement log with authenticated verified admin
         const resSet = db.prepare(`
           INSERT INTO cash_settlements 
           (seller_id, seller_username, admin_id, admin_username, period_start, period_end, calculated_amount, delivered_amount, difference, notes, sale_ids, status, created_at)
@@ -9120,8 +9257,8 @@ DIRECTIVAS CRÍTICAS:
         `).run(
           sellerId,
           sellerAcc.seller_username,
-          admin_id || 1,
-          admin_username || 'admin',
+          verifiedUser.id,
+          verifiedUser.username,
           startPeriod,
           calculated,
           delivered,
@@ -9158,7 +9295,7 @@ DIRECTIVAS CRÍTICAS:
       const salesTickets = pendingMovements.filter(m => m.type === 'venta').map(m => m.sale_id ? `#${m.sale_id}` : 'Venta').join(', ');
       const expensesList = pendingMovements.filter(m => m.type === 'retiro_manual').map(m => `Retiro/Gasto: ${m.notes || ''} (${m.amount} BOB)`).join('; ');
       
-      let auditNotesStr = `Liquidación de caja de ${sellerAcc.seller_username} por admin/propietario ${admin_username || 'admin'}. `;
+      let auditNotesStr = `Liquidación de caja de ${sellerAcc.seller_username} por admin/propietario ${verifiedUser.username || 'admin'}. `;
       if (salesTickets) auditNotesStr += `Tickets incluidos: ${salesTickets}. `;
       if (expensesList) auditNotesStr += `Gastos/Retiros incluidos: ${expensesList}. `;
       auditNotesStr += `Obs: ${notes || 'Liquidación recibida conforme.'}`;
@@ -9172,9 +9309,9 @@ DIRECTIVAS CRÍTICAS:
         entity_type: "caja_vendedor",
         entity_id: String(sellerId),
         entity_name: sellerAcc.seller_username,
-        user_id: admin_id || 1,
-        user_name: admin_username || 'admin',
-        user_role: userRole || 'admin',
+        user_id: verifiedUser.id,
+        user_name: verifiedUser.username,
+        user_role: verifiedUser.role || 'admin',
         before_data: JSON.stringify({ current_balance: calculated }),
         after_data: JSON.stringify({ current_balance: 0.0 }),
         changed_fields: JSON.stringify({ current_balance: [calculated, 0.0] }),
