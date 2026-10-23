@@ -1,0 +1,288 @@
+[
+  {
+    "product_id": "7",
+    "sku": "7",
+    "name": "Samsung/sony 8gb",
+    "category": "FLASH",
+    "s28_counted": 116,
+    "s29_counted": 57,
+    "current_stock": 55,
+    "difference": 2,
+    "sold_between_28_and_29": 77,
+    "arrived_between_28_and_29": 0,
+    "expected_from_ledger": 39,
+    "recent_sales_details": [
+      {
+        "sale_id": 387,
+        "qty": 30
+      },
+      {
+        "sale_id": 6,
+        "qty": 20
+      },
+      {
+        "sale_id": 68,
+        "qty": 10
+      }
+    ],
+    "arrivals_count": 6,
+    "audit_logs_count": 43
+  },
+  {
+    "product_id": "8",
+    "sku": "8",
+    "name": "Sony/samsung 16gb",
+    "category": "FLASH",
+    "s28_counted": 130,
+    "s29_counted": 117,
+    "current_stock": 107,
+    "difference": 10,
+    "sold_between_28_and_29": 63,
+    "arrived_between_28_and_29": 0,
+    "expected_from_ledger": 67,
+    "recent_sales_details": [
+      {
+        "sale_id": 51,
+        "qty": 10
+      },
+      {
+        "sale_id": 58,
+        "qty": 10
+      },
+      {
+        "sale_id": 68,
+        "qty": 10
+      }
+    ],
+    "arrivals_count": 5,
+    "audit_logs_count": 39
+  },
+  {
+    "product_id": "11",
+    "sku": "11",
+    "name": "Interruptor de 1 boton",
+    "category": "Accesorios del hogar",
+    "s28_counted": 2,
+    "s29_counted": 13,
+    "current_stock": 12,
+    "difference": 1,
+    "sold_between_28_and_29": 0,
+    "arrived_between_28_and_29": 10,
+    "expected_from_ledger": 12,
+    "recent_sales_details": [
+      {
+        "sale_id": 295,
+        "qty": 1
+      },
+      {
+        "sale_id": 316,
+        "qty": 5
+      },
+      {
+        "sale_id": 69,
+        "qty": 10
+      }
+    ],
+    "arrivals_count": 3,
+    "audit_logs_count": 16
+  },
+  {
+    "product_id": "24",
+    "sku": "24",
+    "name": "philips 32gb",
+    "category": "Usb",
+    "s28_counted": null,
+    "s29_counted": 0,
+    "current_stock": 1,
+    "difference": -1,
+    "sold_between_28_and_29": 0,
+    "arrived_between_28_and_29": 0,
+    "expected_from_ledger": null,
+    "recent_sales_details": [
+      {
+        "sale_id": 330,
+        "qty": 1
+      }
+    ],
+    "arrivals_count": 0,
+    "audit_logs_count": 5
+  },
+  {
+    "product_id": "40",
+    "sku": "41",
+    "name": "hp 32gb v150",
+    "category": "Usb",
+    "s28_counted": 11,
+    "s29_counted": 12,
+    "current_stock": 11,
+    "difference": 1,
+    "sold_between_28_and_29": 0,
+    "arrived_between_28_and_29": 0,
+    "expected_from_ledger": 11,
+    "recent_sales_details": [
+      {
+        "sale_id": 123,
+        "qty": 3
+      },
+      {
+        "sale_id": 248,
+        "qty": 1
+      },
+      {
+        "sale_id": 261,
+        "qty": 1
+      }
+    ],
+    "arrivals_count": 3,
+    "audit_logs_count": 11
+  },
+  {
+    "product_id": "45",
+    "sku": "47",
+    "name": "hp carton 8gb",
+    "category": "Usb",
+    "s28_counted": 2,
+    "s29_counted": 0,
+    "current_stock": 2,
+    "difference": -2,
+    "sold_between_28_and_29": 0,
+    "arrived_between_28_and_29": 0,
+    "expected_from_ledger": 2,
+    "recent_sales_details": [
+      {
+        "sale_id": 338,
+        "qty": 10
+      },
+      {
+        "sale_id": 343,
+        "qty": 5
+      },
+      {
+        "sale_id": 344,
+        "qty": 20
+      }
+    ],
+    "arrivals_count": 6,
+    "audit_logs_count": 35
+  },
+  {
+    "product_id": "46",
+    "sku": "48",
+    "name": "hp carton 16gb",
+    "category": "Usb",
+    "s28_counted": null,
+    "s29_counted": 0,
+    "current_stock": 70,
+    "difference": -70,
+    "sold_between_28_and_29": 0,
+    "arrived_between_28_and_29": 0,
+    "expected_from_ledger": null,
+    "recent_sales_details": [
+      {
+        "sale_id": 272,
+        "qty": 6
+      },
+      {
+        "sale_id": 284,
+        "qty": 4
+      },
+      {
+        "sale_id": 324,
+        "qty": 70
+      }
+    ],
+    "arrivals_count": 3,
+    "audit_logs_count": 25
+  },
+  {
+    "product_id": "85",
+    "sku": "91",
+    "name": "msd sandisk extreme 64gb",
+    "category": "Usb",
+    "s28_counted": 3,
+    "s29_counted": 2,
+    "current_stock": 3,
+    "difference": -1,
+    "sold_between_28_and_29": 0,
+    "arrived_between_28_and_29": 0,
+    "expected_from_ledger": 3,
+    "recent_sales_details": [],
+    "arrivals_count": 0,
+    "audit_logs_count": 4
+  },
+  {
+    "product_id": "112",
+    "sku": "118",
+    "name": "sd sandisk extreme pro 256gb v90",
+    "category": "Usb",
+    "s28_counted": null,
+    "s29_counted": 0,
+    "current_stock": 1,
+    "difference": -1,
+    "sold_between_28_and_29": 0,
+    "arrived_between_28_and_29": 0,
+    "expected_from_ledger": null,
+    "recent_sales_details": [
+      {
+        "sale_id": 345,
+        "qty": 1
+      }
+    ],
+    "arrivals_count": 0,
+    "audit_logs_count": 5
+  },
+  {
+    "product_id": "116",
+    "sku": "122",
+    "name": "sd sandisk ultra 64gb",
+    "category": "Usb",
+    "s28_counted": 1,
+    "s29_counted": 0,
+    "current_stock": 2,
+    "difference": -2,
+    "sold_between_28_and_29": 1,
+    "arrived_between_28_and_29": 0,
+    "expected_from_ledger": 0,
+    "recent_sales_details": [
+      {
+        "sale_id": 162,
+        "qty": 1
+      },
+      {
+        "sale_id": 348,
+        "qty": 1
+      },
+      {
+        "sale_id": 377,
+        "qty": 1
+      }
+    ],
+    "arrivals_count": 0,
+    "audit_logs_count": 7
+  },
+  {
+    "product_id": "149",
+    "sku": "206",
+    "name": "Dji osmo mobile 8p activated",
+    "category": "audifonos",
+    "s28_counted": null,
+    "s29_counted": 0,
+    "current_stock": 1,
+    "difference": -1,
+    "sold_between_28_and_29": 0,
+    "arrived_between_28_and_29": 0,
+    "expected_from_ledger": null,
+    "recent_sales_details": [
+      {
+        "sale_id": 247,
+        "qty": 1
+      },
+      {
+        "sale_id": 323,
+        "qty": 1
+      }
+    ],
+    "arrivals_count": 0,
+    "audit_logs_count": 6
+  }
+]

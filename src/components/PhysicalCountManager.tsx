@@ -232,9 +232,9 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
           if (isSanitized) {
             return {
               ...it,
-              product_name: prodObj?.name || it.product_name,
-              product_sku: prodObj?.sku || it.product_sku || 'N/A',
-              product_category: prodObj?.category || it.product_category || 'General',
+              product_name: it.product_name || prodObj?.name || 'Producto',
+              product_sku: it.product_sku || prodObj?.sku || 'N/A',
+              product_category: it.product_category || prodObj?.category || 'General',
               system_stock: undefined,
               live_stock: undefined,
               counted_stock: physicalQty,
@@ -244,16 +244,26 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
             };
           }
 
-          const liveStock = prodObj?.stock !== undefined ? prodObj.stock : (it.live_stock ?? it.expected_quantity ?? 0);
-          const diff = physicalQty - liveStock;
+          // Priorizar stock autoritativo del servidor (live_stock / expected_quantity) sobre el caché del frontend
+          const authoritativeServerStock = (it.live_stock !== undefined && it.live_stock !== null)
+            ? Number(it.live_stock)
+            : (it.expected_quantity !== undefined && it.expected_quantity !== null)
+              ? Number(it.expected_quantity)
+              : (it.system_stock !== undefined && it.system_stock !== null)
+                ? Number(it.system_stock)
+                : (prodObj?.stock !== undefined ? Number(prodObj.stock) : 0);
+
+          const diff = (it.difference !== undefined && it.difference !== null)
+            ? Number(it.difference)
+            : (physicalQty - authoritativeServerStock);
 
           return {
             ...it,
-            product_name: prodObj?.name || it.product_name,
-            product_sku: prodObj?.sku || it.product_sku || 'N/A',
-            product_category: prodObj?.category || it.product_category || 'General',
-            system_stock: liveStock,
-            live_stock: liveStock,
+            product_name: it.product_name || prodObj?.name || 'Producto',
+            product_sku: it.product_sku || prodObj?.sku || 'N/A',
+            product_category: it.product_category || prodObj?.category || 'General',
+            system_stock: authoritativeServerStock,
+            live_stock: authoritativeServerStock,
             counted_stock: physicalQty,
             difference: diff,
             is_checked: isChecked,
@@ -1481,8 +1491,8 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
                         </div>
                       )}
 
-                      {/* Lista de productos en revisión */}
-                      <div className="max-h-[240px] overflow-y-auto border border-slate-200 dark:border-slate-800 rounded-xl divide-y divide-slate-100 dark:divide-slate-800">
+                      {/* Lista de productos en revisión adaptada para móviles y escritorio */}
+                      <div className="max-h-[360px] sm:max-h-[300px] overflow-y-auto border border-slate-200 dark:border-slate-800 rounded-xl divide-y divide-slate-100 dark:divide-slate-800">
                         {reviewItems.length === 0 ? (
                           <div className="p-4 text-center text-xs text-slate-400 font-medium">
                             No hay productos en este filtro.
@@ -1491,45 +1501,52 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
                           reviewItems.map(it => {
                             const sys = it.system_stock ?? it.live_stock ?? 0;
                             const physical = it.counted_stock ?? 0;
-                            const diff = physical - sys;
+                            const diff = it.difference !== undefined && it.difference !== null ? it.difference : (physical - sys);
                             const hasDiff = diff !== 0;
 
                             return (
-                              <div key={it.id} className={`p-2 flex items-center justify-between text-xs gap-2 transition ${
+                              <div key={it.id} className={`p-2.5 sm:p-2 flex flex-col sm:flex-row sm:items-center sm:justify-between text-xs gap-2 sm:gap-2 transition ${
                                 hasDiff ? 'bg-rose-500/5 dark:bg-rose-950/20' : ''
                               }`}>
-                                {hasDiff && (
-                                  <input
-                                    type="checkbox"
-                                    checked={selectedRecountIds.includes(it.id)}
-                                    onChange={() => {
-                                      setSelectedRecountIds(prev => 
-                                        prev.includes(it.id) ? prev.filter(id => id !== it.id) : [...prev, it.id]
-                                      );
-                                    }}
-                                    title="Marcar para reconteo"
-                                    className="w-4 h-4 rounded text-purple-600 focus:ring-purple-500 border-slate-300 dark:border-slate-700 cursor-pointer shrink-0"
-                                  />
-                                )}
-                                <div className="min-w-0 flex-1">
-                                  <div className="font-bold text-slate-800 dark:text-white uppercase truncate text-xs flex items-center gap-1.5">
-                                    <span className="truncate">{it.product_name}</span>
-                                    {it.had_movements_during_count === 1 && (
-                                      <span className="shrink-0 px-1 py-0.2 bg-amber-500/20 text-amber-700 dark:text-amber-300 text-[8px] font-bold rounded">
-                                        ⚡ Mov. durante conteo
-                                      </span>
-                                    )}
-                                  </div>
-                                  <div className="text-[9px] text-slate-400 font-mono">
-                                    SKU: {it.product_sku} {it.product_category ? `• ${it.product_category}` : ''}
+                                {/* Fila superior en celulares / lado izquierdo en PC: Nombre completo y metadatos */}
+                                <div className="flex items-start gap-2 min-w-0 flex-1">
+                                  {hasDiff && (
+                                    <input
+                                      type="checkbox"
+                                      checked={selectedRecountIds.includes(it.id)}
+                                      onChange={() => {
+                                        setSelectedRecountIds(prev => 
+                                          prev.includes(it.id) ? prev.filter(id => id !== it.id) : [...prev, it.id]
+                                        );
+                                      }}
+                                      title="Marcar para reconteo"
+                                      className="w-4 h-4 rounded text-purple-600 focus:ring-purple-500 border-slate-300 dark:border-slate-700 cursor-pointer shrink-0 mt-0.5"
+                                    />
+                                  )}
+                                  <div className="min-w-0 flex-1">
+                                    <div className="font-bold text-slate-800 dark:text-white uppercase text-xs flex flex-wrap items-center gap-1.5 leading-snug break-words">
+                                      <span>{it.product_name}</span>
+                                      {it.had_movements_during_count === 1 && (
+                                        <span className="shrink-0 px-1.5 py-0.5 bg-amber-500/20 text-amber-700 dark:text-amber-300 text-[8px] font-bold rounded">
+                                          ⚡ Mov. durante conteo
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="text-[10px] sm:text-[9px] text-slate-400 font-mono mt-0.5">
+                                      SKU: {it.product_sku} {it.product_category ? `• ${it.product_category}` : ''}
+                                    </div>
                                   </div>
                                 </div>
-                                <div className="flex items-center gap-2 shrink-0 text-right font-mono text-[10px]">
-                                  <span className="text-slate-500">POS: <strong>{sys}</strong></span>
-                                  <span className="px-1.5 py-0.5 bg-slate-100 dark:bg-slate-800 rounded font-bold text-slate-800 dark:text-white">
-                                    Físico: {physical}
-                                  </span>
-                                  <span className={`px-2 py-0.5 rounded text-[10px] font-black w-24 text-center ${
+
+                                {/* Fila inferior en celulares / lado derecho en PC: Cantidades POS, Físico y Estado */}
+                                <div className="flex items-center justify-between sm:justify-end gap-2 shrink-0 font-mono text-[10px] pt-1.5 sm:pt-0 border-t border-slate-100 sm:border-t-0 dark:border-slate-800/60 pl-6 sm:pl-0">
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-slate-500">POS: <strong>{sys}</strong></span>
+                                    <span className="px-1.5 py-0.5 bg-slate-100 dark:bg-slate-800 rounded font-bold text-slate-800 dark:text-white">
+                                      Físico: {physical}
+                                    </span>
+                                  </div>
+                                  <span className={`px-2 py-0.5 rounded text-[10px] font-black min-w-[90px] sm:w-24 text-center shrink-0 ${
                                     diff === 0 
                                       ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20' 
                                       : diff > 0 
@@ -2255,34 +2272,38 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
                   const hasDiff = diff !== 0;
 
                   return (
-                    <div key={it.id} className={`p-2 flex items-center justify-between text-xs gap-2 transition ${
+                    <div key={it.id} className={`p-2.5 sm:p-2 flex flex-col sm:flex-row sm:items-center sm:justify-between text-xs gap-2 sm:gap-2 transition ${
                       hasDiff ? 'bg-rose-500/5 dark:bg-rose-950/20' : ''
                     }`}>
+                      {/* Lado superior en celular / izquierdo en PC: Nombre completo y metadatos */}
                       <div className="min-w-0 flex-1">
-                        <div className="font-bold text-slate-800 dark:text-white uppercase truncate text-xs flex items-center gap-1.5">
-                          <span className="truncate">{it.product_name}</span>
+                        <div className="font-bold text-slate-800 dark:text-white uppercase text-xs flex flex-wrap items-center gap-1.5 leading-snug break-words">
+                          <span>{it.product_name}</span>
                           {it.recount_requested === 1 && (
-                            <span className="shrink-0 px-1 py-0.2 bg-purple-500/20 text-purple-700 dark:text-purple-300 text-[8px] font-bold rounded">
+                            <span className="shrink-0 px-1.5 py-0.5 bg-purple-500/20 text-purple-700 dark:text-purple-300 text-[8px] font-bold rounded">
                               Recontado
                             </span>
                           )}
                           {it.had_movements_during_count === 1 && (
-                            <span className="shrink-0 px-1 py-0.2 bg-amber-500/20 text-amber-700 dark:text-amber-300 text-[8px] font-bold rounded">
+                            <span className="shrink-0 px-1.5 py-0.5 bg-amber-500/20 text-amber-700 dark:text-amber-300 text-[8px] font-bold rounded">
                               ⚡ Mov. durante conteo
                             </span>
                           )}
                         </div>
-                        <div className="text-[9px] text-slate-400 font-mono">
+                        <div className="text-[10px] sm:text-[9px] text-slate-400 font-mono mt-0.5">
                           SKU: {it.product_sku} {it.product_category ? `• ${it.product_category}` : ''}
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-2 shrink-0 text-right font-mono text-[10px]">
-                        <span className="text-slate-500">POS: <strong>{sys}</strong></span>
-                        <span className="px-1.5 py-0.5 bg-slate-100 dark:bg-slate-800 rounded font-bold text-slate-800 dark:text-white">
-                          Físico: {physical}
-                        </span>
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-black w-24 text-center ${
+                      {/* Lado inferior en celular / derecho en PC: Cantidades POS, Físico y Diferencia */}
+                      <div className="flex items-center justify-between sm:justify-end gap-2 shrink-0 font-mono text-[10px] pt-1.5 sm:pt-0 border-t border-slate-100 sm:border-t-0 dark:border-slate-800/60">
+                        <div className="flex items-center gap-2">
+                          <span className="text-slate-500">POS: <strong>{sys}</strong></span>
+                          <span className="px-1.5 py-0.5 bg-slate-100 dark:bg-slate-800 rounded font-bold text-slate-800 dark:text-white">
+                            Físico: {physical}
+                          </span>
+                        </div>
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-black min-w-[90px] sm:w-24 text-center shrink-0 ${
                           diff === 0 
                             ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20' 
                             : diff > 0 
