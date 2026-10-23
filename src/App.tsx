@@ -23,7 +23,8 @@ import PWAInstallModal from './components/PWAInstallModal';
 import { SupervisorUnlockModal } from './components/SupervisorUnlockModal';
 import { Menu, X, Home, ShoppingCart, Clock, Receipt, PackageSearch, 
     Folder, ClipboardCheck, Undo2, LayoutDashboard, TrendingUp, 
-    Users, Smartphone, LogOut, Sun, Moon, Sparkles, ArrowLeftRight, User, Settings, Landmark, Activity, History, Loader2, Store, Cpu, Download, RefreshCw, Check, Zap, ShieldCheck, Maximize, Minimize, KeyRound, AlertTriangle
+    Users, Smartphone, LogOut, Sun, Moon, Sparkles, ArrowLeftRight, User, Settings, Landmark, Activity, History, Loader2, Store, Cpu, Download, RefreshCw, Check, Zap, ShieldCheck, Maximize, Minimize, KeyRound, AlertTriangle,
+    ChevronLeft, ChevronRight, PanelLeftClose, PanelLeftOpen
 } from 'lucide-react';
 
 const lazyWithRetries = (componentImport: () => Promise<any>) =>
@@ -295,6 +296,21 @@ function AppLayout() {
     const lowStockCount = products ? products.filter(p => p.stock <= p.stock_alarm).length : 0;
     const [localWorkers, setLocalWorkers] = useState<any[]>([]);
     const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+    const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+        try {
+            return localStorage.getItem('gtr_sidebar_collapsed') === 'true';
+        } catch {
+            return false;
+        }
+    });
+
+    const toggleSidebar = () => {
+        setSidebarCollapsed(prev => {
+            const next = !prev;
+            try { localStorage.setItem('gtr_sidebar_collapsed', String(next)); } catch {}
+            return next;
+        });
+    };
     const [showDevicesModal, setShowDevicesModal] = useState(false);
     const [deviceLatencies, setDeviceLatencies] = useState<{ [key: string]: number }>({
         balanza: 14,
@@ -666,11 +682,104 @@ function AppLayout() {
         );
     };
 
+    const renderCollapsedNavItem = (targetView: any, label: string, Icon: any, gatePermissionKey?: string) => {
+        const isActive = view === targetView;
+        if (gatePermissionKey && !hasPermission(user, gatePermissionKey)) {
+            return null;
+        }
+        return (
+            <button
+                key={targetView}
+                onClick={() => setView(targetView)}
+                title={label}
+                aria-label={label}
+                className={`w-11 h-11 mx-auto rounded-2xl flex items-center justify-center relative group transition-all duration-200 cursor-pointer touch-target shrink-0 ${
+                    isActive 
+                        ? 'bg-blue-600 text-white shadow-md shadow-blue-500/25 dark:bg-sky-500 dark:text-slate-950 font-black' 
+                        : 'text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 hover:text-slate-900 dark:hover:text-white'
+                }`}
+            >
+                <Icon size={18} />
+                {(targetView === 'inventario' || targetView === 'productos') && user?.role === 'admin' && lowStockCount > 0 && (
+                    <span className="absolute -top-1 -right-1 bg-rose-500 text-white font-black text-[9px] w-4 h-4 rounded-full flex items-center justify-center animate-pulse shrink-0 shadow-sm">
+                        {lowStockCount > 9 ? '9+' : lowStockCount}
+                    </span>
+                )}
+                {targetView === 'conteo_fisico' && inventoryLock?.activeCount?.status === 'completado' && (
+                    <span className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-amber-500 rounded-full animate-ping" />
+                )}
+            </button>
+        );
+    };
+
+    const collapsedSidebarContent = (
+        <div className="flex flex-col justify-between h-full bg-white dark:bg-[#0c111e] select-none border-r border-slate-200/60 dark:border-slate-850/40 py-3 px-2">
+            <div className="flex flex-col items-center gap-3">
+                <div className="flex flex-col items-center gap-2">
+                    <button
+                        onClick={toggleSidebar}
+                        className="w-10 h-10 rounded-xl bg-blue-600 hover:bg-blue-700 flex items-center justify-center text-white shadow-lg shadow-blue-500/20 active:scale-95 transition-all cursor-pointer"
+                        title="Expandir barra lateral"
+                        aria-label="Expandir barra lateral"
+                    >
+                        <PanelLeftOpen size={18} />
+                    </button>
+                    <OfflineStatusHUD variant="compact" />
+                </div>
+
+                <div className="w-8 h-px bg-slate-200 dark:bg-slate-800" />
+
+                <div className="flex flex-col gap-1 w-full items-center overflow-y-auto max-h-[calc(100vh-210px)] scrollbar-none py-1">
+                    {renderCollapsedNavItem('inicio', 'Inicio', Home)}
+                    {renderCollapsedNavItem('pos', 'Vender / Terminal POS', ShoppingCart)}
+                    {renderCollapsedNavItem('historial_ventas', 'Historial de Ventas', Receipt, 'view_sales')}
+                    {renderCollapsedNavItem('ventas_pendientes', 'Créditos / Cuentas por Cobrar', Clock, 'manage_credits')}
+                    {renderCollapsedNavItem('productos', 'Inventario de Productos', PackageSearch, 'view_inventory')}
+                    {renderCollapsedNavItem('departamentos', 'Departamentos', Folder, 'view_inventory')}
+                    {renderCollapsedNavItem('conteo_fisico', 'Control Físico de Inventario', ClipboardCheck)}
+                    {renderCollapsedNavItem('devoluciones', 'Devoluciones y Mermas', Undo2, 'view_inventory')}
+                    {renderCollapsedNavItem('reportes', 'Dashboard y Reportes', LayoutDashboard, 'view_reports')}
+                    {renderCollapsedNavItem('analisis', 'Analítica y Proyecciones', TrendingUp, 'view_reports')}
+                    {renderCollapsedNavItem('auditoria', 'Auditoría del Sistema', History, 'view_audit')}
+                    {renderCollapsedNavItem('cajas', 'Cajas & Ingresos', Landmark, 'manage_caja')}
+                    {renderCollapsedNavItem('configuraciones', 'Configuraciones', Settings)}
+                    {isAdminUser(user) && renderCollapsedNavItem('diagnostico', 'Diagnósticos & IA', Activity, 'view_diagnostics')}
+                    {canAccessForensicAudit(user) && renderCollapsedNavItem('auditoria_forense', 'Auditoría Forense IA', ShieldCheck, 'access_forensic_audit')}
+                    {user?.role === 'admin' && renderCollapsedNavItem('usuarios', 'Usuarios', Users)}
+                </div>
+            </div>
+
+            <div className="flex flex-col items-center gap-2 pt-2 border-t border-slate-200/60 dark:border-slate-800">
+                <button
+                    onClick={() => setDarkMode(!darkMode)}
+                    className="w-10 h-10 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 flex items-center justify-center hover:scale-105 active:scale-95 transition cursor-pointer"
+                    title={darkMode ? "Modo Claro" : "Modo Oscuro"}
+                    aria-label="Cambiar tema"
+                >
+                    {darkMode ? <Sun size={16} className="text-amber-400" /> : <Moon size={16} />}
+                </button>
+                <button
+                    onClick={async () => {
+                        const confirmClose = window.confirm("¿Seguro que deseas salir del terminal de caja fiscal?");
+                        if (confirmClose) {
+                            await setUser(null);
+                        }
+                    }}
+                    className="w-10 h-10 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-500 flex items-center justify-center hover:scale-105 active:scale-95 transition cursor-pointer"
+                    title="Cerrar sesión"
+                    aria-label="Cerrar sesión"
+                >
+                    <LogOut size={16} />
+                </button>
+            </div>
+        </div>
+    );
+
     const sidebarContent = (
         <div className="flex flex-col justify-between h-full bg-white dark:bg-[#0c111e] h-screen select-none border-r border-slate-200/60 dark:border-slate-850/40">
             <div>
                 {/* Header logo container */}
-                <div className="p-5 border-b border-slate-100 dark:border-slate-850/60 flex items-center justify-between">
+                <div className="p-4 sm:p-5 border-b border-slate-100 dark:border-slate-850/60 flex items-center justify-between">
                     <div className="flex items-center gap-2.5">
                         <div className="w-8 h-8 rounded-xl bg-blue-600 flex items-center justify-center text-white shadow-xl shadow-blue-500/15">
                             <Store size={16} className="animate-pulse" />
@@ -682,17 +791,27 @@ function AppLayout() {
                             </div>
                         </div>
                     </div>
-                    {hasPermission(user, 'access_ai') && (
-                        <button 
-                            onClick={() => {
-                                safeDispatchEvent('open-ai-quick-commands');
-                            }}
-                            className="w-8 h-8 rounded-full bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/40 dark:hover:bg-indigo-900/50 flex items-center justify-center text-indigo-600 dark:text-indigo-400 border border-indigo-550/15 cursor-pointer hover:scale-105 transition-all duration-200 shadow-sm"
-                            title="Llamar a la IA"
+                    <div className="flex items-center gap-1.5">
+                        {hasPermission(user, 'access_ai') && (
+                            <button 
+                                onClick={() => {
+                                    safeDispatchEvent('open-ai-quick-commands');
+                                }}
+                                className="w-8 h-8 rounded-full bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/40 dark:hover:bg-indigo-900/50 flex items-center justify-center text-indigo-600 dark:text-indigo-400 border border-indigo-550/15 cursor-pointer hover:scale-105 transition-all duration-200 shadow-sm"
+                                title="Llamar a la IA"
+                            >
+                                <Sparkles size={13} className="text-indigo-500 animate-pulse" />
+                            </button>
+                        )}
+                        <button
+                            onClick={toggleSidebar}
+                            className="hidden md:flex w-8 h-8 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 items-center justify-center text-slate-500 dark:text-slate-400 transition cursor-pointer"
+                            title="Colapsar barra lateral"
+                            aria-label="Colapsar barra lateral"
                         >
-                            <Sparkles size={13} className="text-indigo-500 animate-pulse" />
+                            <PanelLeftClose size={15} />
                         </button>
-                    )}
+                    </div>
                 </div>
 
                 {/* Exquisitely Exposed Theme Switcher */}
@@ -1116,9 +1235,9 @@ function AppLayout() {
     return (
         <div className={`flex h-screen w-full select-none ${darkMode ? 'dark bg-[#070a10] text-[#cacfd2]' : 'bg-neutral-50/40 text-slate-900'}`}>
             
-            {/* Desktop persistent sidebar drawer */}
-            <div className="hidden lg:block lg:w-[260px] h-full shrink-0">
-                {isKioskLocked ? kioskSidebarContent : sidebarContent}
+            {/* Desktop and Tablet persistent sidebar drawer */}
+            <div className={`hidden md:block ${sidebarCollapsed ? 'w-[70px]' : 'w-[260px]'} h-full shrink-0 transition-all duration-200 z-30`}>
+                {isKioskLocked ? kioskSidebarContent : (sidebarCollapsed ? collapsedSidebarContent : sidebarContent)}
             </div>
 
             {/* Mobile Animated Dropdown Menu Panel (displayed downwards nicely) */}
@@ -1343,10 +1462,11 @@ function AppLayout() {
                 )}
 
                 {/* Mobile Top bar header */}
-                {!isKioskLocked && (<header className="lg:hidden h-14 bg-white dark:bg-[#0c111e] border-b border-slate-200/60 dark:border-slate-850/40 px-4 flex items-center justify-between shrink-0 select-none z-[50] relative">
+                {!isKioskLocked && (<header className="md:hidden h-12 sm:h-14 landscape-compact-header bg-white dark:bg-[#0c111e] border-b border-slate-200/60 dark:border-slate-850/40 px-3 sm:px-4 flex items-center justify-between shrink-0 select-none z-[50] relative safe-area-top">
                     <button 
                         onClick={() => setMobileSidebarOpen(!mobileSidebarOpen)}
-                        className="p-2 text-slate-600 dark:text-slate-350 hover:bg-slate-50 dark:hover:bg-slate-850 rounded-xl cursor-pointer transition-colors duration-150 relative z-[60]"
+                        className="p-2 text-slate-600 dark:text-slate-350 hover:bg-slate-50 dark:hover:bg-slate-850 rounded-xl cursor-pointer transition-colors duration-150 relative z-[60] touch-target"
+                        aria-label="Abrir menú"
                     >
                         <motion.div
                             animate={{ rotate: mobileSidebarOpen ? 90 : 0 }}
@@ -1357,28 +1477,30 @@ function AppLayout() {
                     </button>
                     
                     <div className="flex items-center gap-2">
-                        <div className="w-6 h-6 rounded-lg bg-indigo-650 flex items-center justify-center text-white">
+                        <div className="w-6 h-6 rounded-lg bg-indigo-650 flex items-center justify-center text-white shadow-xs">
                             <Sparkles size={11} />
                         </div>
                         <span className="font-sans font-black text-slate-850 dark:text-white text-sm tracking-tight leading-none uppercase">GTR POS</span>
                         <OfflineStatusHUD variant="compact" />
                     </div>
 
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex items-center gap-1">
                         {hasPermission(user, 'access_ai') && (
                             <button 
                                 onClick={() => {
                                     safeDispatchEvent('open-ai-quick-commands');
                                 }}
-                                className="w-9 h-9 rounded-full bg-slate-50 dark:bg-[#070b13] border dark:border-slate-800/80 flex items-center justify-center text-indigo-600 dark:text-indigo-400 cursor-pointer hover:scale-105 transition-all shadow-sm"
+                                className="w-8 h-8 rounded-full bg-slate-50 dark:bg-[#070b13] border dark:border-slate-800/80 flex items-center justify-center text-indigo-600 dark:text-indigo-400 cursor-pointer hover:scale-105 transition-all shadow-sm touch-target"
                                 title="Llamar a la IA"
+                                aria-label="Llamar a la IA"
                             >
                                 <Sparkles size={13} className="text-indigo-500 animate-pulse" />
                             </button>
                         )}
                         <button 
                             onClick={() => setDarkMode(!darkMode)}
-                            className="p-2 bg-slate-50 dark:bg-[#070b13] border dark:border-slate-800/80 rounded-xl text-slate-650 dark:text-slate-300 cursor-pointer"
+                            className="p-2 bg-slate-50 dark:bg-[#070b13] border dark:border-slate-800/80 rounded-xl text-slate-650 dark:text-slate-300 cursor-pointer touch-target"
+                            aria-label="Cambiar tema"
                         >
                             {darkMode ? <Sun size={14} className="text-yellow-400" /> : <Moon size={14} />}
                         </button>
@@ -1420,7 +1542,7 @@ function AppLayout() {
                 )}
 
                 {/* Main page view content display */}
-                <main className={`flex-grow flex-1 relative ${isKioskLocked ? 'pb-16 lg:pb-0' : ''} ${view === 'pos' ? 'overflow-hidden' : 'overflow-hidden'}`}>
+                <main className={`flex-grow flex-1 relative ${isKioskLocked ? 'pb-16 md:pb-0' : 'pb-14 md:pb-0'} ${view === 'pos' ? 'overflow-hidden' : 'overflow-hidden'}`}>
                     <AnimatePresence mode="wait">
                         <motion.div
                             key={view}
@@ -1454,12 +1576,83 @@ function AppLayout() {
                     </AnimatePresence>
                 </main>
 
-                {/* Touch-optimized Bottom Navigation Bar for Kiosk Mobile */}
-                {isKioskLocked && (
-                    <div className="lg:hidden fixed bottom-0 left-0 right-0 h-16 bg-white dark:bg-[#0c111e] border-t border-slate-200/80 dark:border-slate-850/80 flex justify-around items-center z-50 px-2 shadow-2xl select-none">
+                {/* Mobile Bottom Navigation Bar (Non-kiosk mobile phones) */}
+                {!isKioskLocked && (
+                    <nav className="md:hidden landscape-hide fixed bottom-0 left-0 right-0 h-14 bg-white/95 dark:bg-[#0c111e]/95 backdrop-blur-md border-t border-slate-200/80 dark:border-slate-850/80 flex justify-around items-center z-40 px-1 safe-area-bottom shadow-lg select-none">
+                        <button
+                            onClick={() => setView('inicio')}
+                            className={`flex flex-col items-center justify-center gap-0.5 flex-1 h-full touch-target transition-colors cursor-pointer ${
+                                view === 'inicio' 
+                                    ? 'text-blue-600 dark:text-[#38bdf8] font-black' 
+                                    : 'text-slate-500 dark:text-slate-400'
+                            }`}
+                        >
+                            <Home size={18} />
+                            <span className="text-[9.5px] font-black uppercase tracking-tight">Inicio</span>
+                        </button>
                         <button
                             onClick={() => setView('pos')}
-                            className={`flex flex-col items-center justify-center gap-1 flex-1 py-1 transition-colors ${
+                            className={`flex flex-col items-center justify-center gap-0.5 flex-1 h-full touch-target transition-colors cursor-pointer ${
+                                view === 'pos' 
+                                    ? 'text-blue-600 dark:text-[#38bdf8] font-black' 
+                                    : 'text-slate-500 dark:text-slate-400'
+                            }`}
+                        >
+                            <ShoppingCart size={18} />
+                            <span className="text-[9.5px] font-black uppercase tracking-tight">Vender</span>
+                        </button>
+                        <button
+                            onClick={() => {
+                                if (hasPermission(user, 'manage_credits')) {
+                                    setView('cuentas_por_cobrar');
+                                } else {
+                                    setView('historial_ventas');
+                                }
+                            }}
+                            className={`flex flex-col items-center justify-center gap-0.5 flex-1 h-full touch-target transition-colors cursor-pointer ${
+                                view === 'cuentas_por_cobrar' || view === 'ventas_pendientes' || view === 'historial_ventas'
+                                    ? 'text-blue-600 dark:text-[#38bdf8] font-black' 
+                                    : 'text-slate-500 dark:text-slate-400'
+                            }`}
+                        >
+                            <Receipt size={18} />
+                            <span className="text-[9.5px] font-black uppercase tracking-tight">Ventas/CxC</span>
+                        </button>
+                        <button
+                            onClick={() => {
+                                if (hasPermission(user, 'view_inventory')) {
+                                    setView('productos');
+                                } else if (hasPermission(user, 'manage_caja')) {
+                                    setView('cajas');
+                                } else {
+                                    setView('conteo_fisico');
+                                }
+                            }}
+                            className={`flex flex-col items-center justify-center gap-0.5 flex-1 h-full touch-target transition-colors cursor-pointer ${
+                                view === 'productos' || view === 'inventario' || view === 'cajas' || view === 'conteo_fisico'
+                                    ? 'text-blue-600 dark:text-[#38bdf8] font-black' 
+                                    : 'text-slate-500 dark:text-slate-400'
+                            }`}
+                        >
+                            <PackageSearch size={18} />
+                            <span className="text-[9.5px] font-black uppercase tracking-tight">Stock/Caja</span>
+                        </button>
+                        <button
+                            onClick={() => setMobileSidebarOpen(true)}
+                            className="flex flex-col items-center justify-center gap-0.5 flex-1 h-full touch-target text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 transition-colors cursor-pointer"
+                        >
+                            <Menu size={18} />
+                            <span className="text-[9.5px] font-black uppercase tracking-tight">Más</span>
+                        </button>
+                    </nav>
+                )}
+
+                {/* Touch-optimized Bottom Navigation Bar for Kiosk Mobile */}
+                {isKioskLocked && (
+                    <div className="md:hidden landscape-hide fixed bottom-0 left-0 right-0 h-16 bg-white dark:bg-[#0c111e] border-t border-slate-200/80 dark:border-slate-850/80 flex justify-around items-center z-50 px-2 safe-area-bottom shadow-2xl select-none">
+                        <button
+                            onClick={() => setView('pos')}
+                            className={`flex flex-col items-center justify-center gap-1 flex-1 py-1 transition-colors touch-target ${
                                 view === 'pos' 
                                     ? 'text-blue-600 dark:text-[#38bdf8]' 
                                     : 'text-slate-500 dark:text-slate-400 hover:text-blue-500'
@@ -1470,7 +1663,7 @@ function AppLayout() {
                         </button>
                         <button
                             onClick={() => setView('cajas')}
-                            className={`flex flex-col items-center justify-center gap-1 flex-1 py-1 transition-colors ${
+                            className={`flex flex-col items-center justify-center gap-1 flex-1 py-1 transition-colors touch-target ${
                                 view === 'cajas' 
                                     ? 'text-blue-600 dark:text-[#38bdf8]' 
                                     : 'text-slate-500 dark:text-slate-400 hover:text-blue-500'
@@ -1481,7 +1674,7 @@ function AppLayout() {
                         </button>
                         <button
                             onClick={() => setView('historial_ventas')}
-                            className={`flex flex-col items-center justify-center gap-1 flex-1 py-1 transition-colors ${
+                            className={`flex flex-col items-center justify-center gap-1 flex-1 py-1 transition-colors touch-target ${
                                 view === 'historial_ventas' 
                                     ? 'text-blue-600 dark:text-[#38bdf8]' 
                                     : 'text-slate-500 dark:text-slate-400 hover:text-blue-500'
@@ -1492,7 +1685,7 @@ function AppLayout() {
                         </button>
                         <button
                             onClick={() => setView('conteo_fisico')}
-                            className={`flex flex-col items-center justify-center gap-1 flex-1 py-1 transition-colors ${
+                            className={`flex flex-col items-center justify-center gap-1 flex-1 py-1 transition-colors touch-target ${
                                 view === 'conteo_fisico' 
                                     ? 'text-blue-600 dark:text-[#38bdf8]' 
                                     : 'text-slate-500 dark:text-slate-400 hover:text-blue-500'
@@ -1504,7 +1697,7 @@ function AppLayout() {
                         <button
                             type="button"
                             onClick={() => setIsSupervisorModalOpen(true)}
-                            className="flex flex-col items-center justify-center gap-1 flex-1 py-1 text-amber-500 hover:text-amber-600 cursor-pointer"
+                            className="flex flex-col items-center justify-center gap-1 flex-1 py-1 text-amber-500 hover:text-amber-600 cursor-pointer touch-target"
                             title="Desbloqueo de Supervisor"
                         >
                             <ShieldCheck size={18} />
@@ -1518,7 +1711,7 @@ function AppLayout() {
                                     setUser(null);
                                 }
                             }}
-                            className="flex flex-col items-center justify-center gap-1 flex-1 py-1 text-rose-500 hover:text-rose-600 cursor-pointer"
+                            className="flex flex-col items-center justify-center gap-1 flex-1 py-1 text-rose-500 hover:text-rose-600 cursor-pointer touch-target"
                         >
                             <LogOut size={18} />
                             <span className="text-[9px] font-black uppercase tracking-wider">Salir</span>

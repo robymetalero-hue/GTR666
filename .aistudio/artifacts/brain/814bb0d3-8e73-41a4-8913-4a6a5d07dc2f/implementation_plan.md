@@ -1,138 +1,72 @@
-# GTR666 — Plan Quirúrgico de Corrección de Fallas Pendientes
+# GTR666 — Plan de Implementación: Fase 1 (Navegación General y Usabilidad Responsiva)
 
-Plan de resolución puntual y quirúrgico para subsanar las 6 fallas identificadas en el sistema en producción GTR POS (`robymetalero-hue/GTR666`), respetando estrictamente la inmutabilidad de la base de datos, precios y funciones operativas existentes.
+Plan quirúrgico para la Fase 1 del proyecto de optimización responsiva en GTR POS (`robymetalero-hue/GTR666`), respetando estrictamente la inmutabilidad de bases de datos, APIs, reglas comerciales, permisos y lógica operativa existente.
 
 ---
 
 ## Decisiones Confirmadas por el Usuario
 
-1. **Aislamiento de Entorno sin Cabeceras HTTP**:
-   - Si `APP_ENV` no está definida en el servidor, el entorno por defecto será **producción** si `NODE_ENV === 'production'`, y **sandbox** en cualquier otro caso.
-   - Se eliminan por completo las evaluaciones de `Host`, `x-forwarded-host` y `Referer` en la decisión de la base de datos.
-2. **Permisos de Clientes (`view_clients`)**:
-   - Habilitado por defecto (`true`) para el rol vendedor en `DEFAULT_PERMISSIONS` y en la consola de permisos, garantizando que el POS mantenga su capacidad operativa de buscar y asociar clientes a las ventas.
-3. **Manejo de `jwt_secret` en Firestore**:
-   - Auditar y preparar script seguro de eliminación del documento en Firestore sin alterar ni rotar la clave local (`.server_jwt_secret` / SQLite) y sin publicar reglas que interrumpan la sincronización activa.
+1. **Celulares Verticales**:
+   - Barra de navegación inferior fija ergonómica para acceso rápido con el pulgar a las vistas principales (Inicio, POS, Historial, Inventario/Cajas, Más).
+   - Encabezado superior compacto con branding, estado de conexión (OfflineStatusHUD), cambio de tema y acceso a IA.
+2. **Tabletas (768px a 1024px)**:
+   - Barra lateral colapsable a barra delgada de iconos (~68px de ancho) con botón de alternar (toggle) para maximizar el área de trabajo en pantallas táctiles medianas sin perder acceso visual.
 
 ---
 
-## Detalle de Correcciones Quirúrgicas por Módulo
+## Alcance Detallado de la Fase 1
 
-### 1. Aislamiento de Bases de Datos (`server.ts` ~línea 195)
-- **Diagnóstico**: Las líneas 207–211 aún utilizaban `host.includes('ais-dev')`, `referer.includes('ais-dev')` y `host.includes('ais-pre')`, permitiendo que peticiones HTTP con encabezados `Host` o `Referer` falsificados influyeran en el aislamiento.
-- **Acción**:
-  - Eliminar toda dependencia de `req.headers.host`, `req.headers['x-forwarded-host']` y `req.headers.referer`.
-  - La variable `isSandbox` se resolverá exclusivamente con:
-    ```ts
-    let isSandbox = false;
-    if (process.env.APP_ENV === 'sandbox' || process.env.APP_ENV === 'development') {
-      isSandbox = true;
-    } else if (process.env.APP_ENV === 'production') {
-      isSandbox = false;
-    } else {
-      isSandbox = process.env.NODE_ENV !== 'production';
-    }
-    ```
-  - Preservar `dbAsyncLocalStorage` y los archivos SQLite existentes inalterados.
+### 1. Optimizaciones en `src/index.css`
+- **Soporte de Viewport Dinámico (`100dvh`)**:
+  - Prevenir saltos de altura y desbordamientos cuando el teclado virtual aparece en iOS/Android.
+- **Áreas Táctiles Mínimas (Regla de 44px)**:
+  - Garantizar que botones de acción, interruptores y campos de entrada tengan un target táctil mínimo de 44px o clase táctil ergonómica sin inflar visualmente el diseño.
+- **Contención de Desplazamiento Horizontal**:
+  - Reglas estrictas contra scroll horizontal involuntario en el contenedor principal (`overflow-x: hidden`).
+- **Adaptación Paisaje (Landscape) para Móviles**:
+  - Clases utilitarias para detectar pantallas de baja altura (`@media (max-height: 500px)`) para reducir alturas de encabezados y márgenes.
 
----
-
-### 2. Seguridad de Firestore y JWT (`firebaseSync.ts`, `authSecurity.ts`, `firestore.rules`)
-- **Diagnóstico**: El secreto `jwt_secret` pudo haberse sincronizado a Firestore en despliegues pasados y las reglas vigentes en `firestore.rules` permiten `allow read: if true;` en `/settings/{settingId}`.
-- **Acción**:
-  - Crear script de auditoría y remediación `scripts/audit_and_purge_jwt_secret.ts` que se conecte a Firestore con el SDK existente y elimine el documento `jwt_secret` de las colecciones `settings` y `sandbox_settings` si existiese, sin tocar la base local SQLite ni regenerar el secreto.
-  - En `firestore.rules`, restringir la lectura del documento `jwt_secret`:
-    ```
-    match /settings/{settingId} {
-      allow read: if settingId != 'jwt_secret';
-      allow create, update: if (isAuthenticated() || isSandbox('settings') || hasIntegrityProof());
-      allow delete: if false;
-    }
-    ```
-  - Mantener las reglas preparadas sin desplegar a producción sin previa comprobación.
-
----
-
-### 3. Permisos de Clientes y Auditoría (`server.ts`, `src/utils/permissions.ts`, `src/views/PermissionsConsole.tsx`)
-- **Diagnóstico**:
-  - `/api/clients` exige `view_clients`, el cual no existía en `DEFAULT_PERMISSIONS` ni en `PermissionsConsole.tsx`.
-  - `/api/system-audit` consultaba `view_audit_logs` o `system_audit`, mientras la consola define `view_audit`.
-- **Acción**:
-  - En `src/utils/permissions.ts`:
-    - Agregar `view_clients: true` a `DEFAULT_PERMISSIONS`.
-    - Normalizar `view_clients`:
-      ```ts
-      normalized.view_clients = perms.view_clients !== undefined ? !!perms.view_clients : (perms.clients !== undefined ? !!perms.clients : true);
-      ```
-    - Normalizar `view_audit`:
-      ```ts
-      const auditVal = perms.view_audit !== undefined ? !!perms.view_audit : (perms.view_audit_logs !== undefined ? !!perms.view_audit_logs : false);
-      normalized.view_audit = auditVal;
-      normalized.view_audit_logs = auditVal;
-      ```
-  - En `src/views/PermissionsConsole.tsx`:
-    - Incluir el ítem `view_clients` en el grupo de ventas/clientes para visualización y configuración en UI.
-  - En `server.ts` (`/api/system-audit`):
-    - Validar `isAdmin || !!userPerms.view_audit || !!userPerms.view_audit_logs`.
+### 2. Optimizaciones en `src/App.tsx`
+- **Barra de Navegación Inferior (Mobile Bottom Bar)**:
+  - Visible en pantallas móviles (`< 768px` o `< lg` cuando no se use sidebar).
+  - Incluye accesos directos con micro-animaciones según permisos del usuario:
+    - `Inicio`
+    - `POS (Punto de Venta)` (botón central destacado)
+    - `Historial` (o `CxC` según rol)
+    - `Inventario` (o `Cajas` según rol)
+    - `Menú / Más` (abre el panel desplegable completo hacia arriba o modal con animación suave).
+  - En modo horizontal móvil (`landscape` con altura `< 500px`), se oculta automáticamente o se compacta para priorizar el catálogo y datos.
+- **Sidebar Adaptable para Tabletas (`768px - 1024px` y Desktop)**:
+  - Estado `sidebarCollapsed` con memoria en `localStorage`.
+  - Cuando está colapsada: ancho de `68px`, mostrando los iconos centrados con badges e indicadores activos, ganando casi 200px de espacio horizontal para tablas y catálogos.
+  - Cuando está expandida: ancho de `260px` con texto completo y agrupaciones.
+  - Botón de alternancia sutil en el pie o encabezado del sidebar.
+- **Encabezado Superior Compacto**:
+  - Reducción de altura a 44px–48px en móviles y 40px en landscape móvil (`max-height: 500px`).
+  - Botones táctiles accesibles con espacio adecuado entre sí (sin superposición de botones de tema, IA y menú).
+- **Banners Informativos Adaptables**:
+  - El banner de sandbox y avisos administrativos se adaptan con `flex-wrap` y padding compacto para no ocupar más del 15% de la pantalla en dispositivos pequeños.
+- **Padding Inferior del Contenido**:
+  - En móviles con bottom bar activa, agregar un padding inferior seguro (`pb-16` / `pb-[calc(4rem+env(safe-area-inset-bottom))]`) al contenedor de vistas para que ningún botón de acción (como el total o botón de cobro) quede tapado.
 
 ---
 
-### 4. Exposición de Costos en Historiales (`server.ts`)
-- **Diagnóstico**:
-  - En `/api/stock-arrivals`: `canViewCosts` incluía `userPerms.increase_stock`. El usuario con permiso de aumentar existencias no debe ver costos de compra.
-  - En `/api/inventory-audit` y `/api/products/:id/price-history`: Si un log tiene `price_before`, `price_after`, o datos serializados en `before_data`/`after_data` que corresponden a costos, se entregaban íntegros.
-- **Acción**:
-  - En `GET /api/stock-arrivals`:
-    - Corregir a: `const canViewCosts = isAdmin || !!userPerms.view_costs || !!userPerms.financial_reports;` (eliminando `increase_stock`).
-    - Para usuarios sin `canViewCosts`, enviar `arrival_price: null`.
-  - En `GET /api/products/:id/price-history` e `inventory-audit`:
-    - Sanitizar profundamente los registros cuando `!canViewCosts`:
-      - Si el evento es `cambio_costo`, excluirlo del listado.
-      - Para otros eventos, remover o reemplazar campos de costo de `before_data`, `after_data` y `changed_fields`.
-  - En `GET /api/products/:id/stock-history`:
-    - Mantener `price: null` en ingresos para usuarios sin permisos de costo.
+## Matriz de Verificación Obligatoria de Fase 1
+
+| Dispositivo / Orientación | Resolución | Aspectos a Verificar |
+|---|---|---|
+| Celular Compacto (Vertical) | 360 × 800 | Bottom bar ergonómica, header compacto, menú completo abre sin desbordar |
+| Celular Estándar (Vertical) | 390 × 844 | Safe-area inferior, navegación fluida entre POS e Inicio, sin scroll horizontal |
+| Celular (Horizontal / Landscape) | 800 × 360 | Altura máxima aprovechada, header ultra compacto, sin bloqueos de pantalla |
+| Celular Grande (Horizontal) | 844 × 390 | Contenido legible, controles accesibles, navegación utilizable |
+| Tableta (Vertical) | 768 × 1024 | Sidebar colapsable en modo compacto de iconos, ganancia de espacio |
+| Tableta (Horizontal) | 1024 × 768 | Sidebar expandible/colapsable fluido, área de trabajo amplia |
+| Laptop / Desktop | 1366 × 768 | Sidebar estándar, espaciado cómodo, navegación por teclado y mouse |
+| Monitor Full HD | 1920 × 1080 | Jerarquía visual nítida, sin estiramientos extraños ni pérdida de escala |
 
 ---
 
-### 5. Control Físico de Inventario (`PUT /api/inventory-counts/:id/status`)
-- **Diagnóstico**: Se protegieron `cerrado` y `aprobado`, pero un operario podía cancelar sesiones activas pasando `status = 'cancelado'`.
-- **Acción**:
-  - Exigir que la cancelación (`status === 'cancelado'`) solo pueda realizarse por:
-    - Un administrador verificado (`isAdmin`), o
-    - El propio usuario que inició la sesión (`Number(count.user_id) === Number(verifiedUser.id)`), impidiendo que un empleado cancele auditorías ajenas.
-  - Conservar el flujo normal de conteo (`en_progreso`, `pausado`, `finalizado`) y la ocultación BLIND.
-
----
-
-### 6. Acceso a Caja y Auditoría Forense (`server.ts`)
-- **Diagnóstico**:
-  - `requireForensicAuditAccess`: leía `req.headers['x-user-role']` y `req.headers['x-user-username']`.
-  - `GET /api/cash-accounts`: leía `req.headers['x-user-role']` y `req.headers['x-user-id']`.
-  - `GET /api/cash-accounts/:sellerId/movements`: leía `req.headers['x-user-role']` y `req.headers['x-user-id']`.
-- **Acción**:
-  - En `requireForensicAuditAccess`:
-    - Leer exclusivamente `(req as any).verifiedUser`. Si no hay sesión o no es administrador/usuario con permiso `access_forensic_audit`, rechazar con 403.
-  - En `GET /api/cash-accounts`:
-    - Usar `verifiedUser.role` y `verifiedUser.id`. Si el rol es `vendedor`, retornar únicamente su propia caja. Si es admin, retornar todas las cuentas.
-  - En `GET /api/cash-accounts/:sellerId/movements`:
-    - Usar `verifiedUser`. Si `!isAdmin` y `verifiedUser.id !== sellerId`, responder 403.
-
----
-
-## Matriz de Pruebas y Verificación
-
-1. **Prueba de Aislamiento**: Peticiones con `Host` o `Referer` arbitrarios no deben cambiar la base SQLite en uso.
-2. **Prueba de Permisos**:
-   - Vendedor con `view_clients: true` consulta `/api/clients` exitosamente (200 OK).
-   - Vendedor sin permiso recibe 403.
-   - Consulta a `/api/system-audit` con `view_audit: true` accede correctamente; sin él, 403.
-3. **Prueba de Costos**:
-   - Usuario con solo `increase_stock` en `/api/stock-arrivals` ve cantidades y fechas pero `arrival_price: null`.
-   - `/api/products/:id/price-history` no entrega eventos de costo a usuarios sin permiso.
-4. **Prueba de Cajas y Auditoría Forense**:
-   - Peticiones enviando `x-user-role: admin` sin token válido son rechazadas (401/403).
-   - Un cajero autenticado no puede acceder a `/api/cash-accounts/:otroId/movements`.
-5. **Prueba de Auditoría de Inventario**:
-   - Intento de cancelar auditoría ajena con usuario estándar retorna 403.
-6. **Compilación y Lint**:
-   - `tsc --noEmit` y `npm run build` sin errores.
+## Restricciones Inmutables
+- CERO cambios en bases de datos, SQLite, Firestore o endpoints backend.
+- CERO cambios en lógica comercial, tipo de cambio, permisos o cálculos matemáticos.
+- Verificación limpia con `npm run lint` y `npm run build`.
