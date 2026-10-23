@@ -1,4 +1,5 @@
 process.env.TZ = 'America/La_Paz';
+process.env.APP_ENV = process.env.APP_ENV || 'production';
 
 import "dotenv/config";
 import express from "express";
@@ -193,15 +194,19 @@ async function startServer() {
   app.use(express.urlencoded({ limit: "100mb", extended: true }));
 
   // Sandbox vs Production Environment Isolation Gate
-  // Server-authoritative isolation: HTTP headers (Host, x-forwarded-host, Referer, x-app-environment) are strictly ignored.
+  // Accede inequívocamente a producción para dspos.app o cuando APP_ENV=production
   app.use((req, res, next) => {
+    const rawHost = String(req.headers['x-forwarded-host'] || req.headers['host'] || req.hostname || '').toLowerCase();
+    const isDsposDomain = rawHost.includes('dspos.app');
+    const isDevDomain = rawHost.includes('ais-dev');
+
     let isSandbox = false;
-    if (process.env.APP_ENV === 'sandbox' || process.env.APP_ENV === 'development') {
+    if (process.env.APP_ENV === 'sandbox' || (!isDsposDomain && isDevDomain)) {
       isSandbox = true;
-    } else if (process.env.APP_ENV === 'production') {
+    } else if (process.env.APP_ENV === 'production' || isDsposDomain) {
       isSandbox = false;
     } else {
-      isSandbox = process.env.NODE_ENV !== 'production';
+      isSandbox = process.env.NODE_ENV === 'development' && !isDsposDomain;
     }
 
     (req as any).isSandbox = isSandbox;

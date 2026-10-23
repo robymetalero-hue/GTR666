@@ -1,72 +1,57 @@
-# GTR666 — Plan de Implementación: Fase 1 (Navegación General y Usabilidad Responsiva)
+# Plan de Implementación: Restauración de Base de Datos de Producción y Acceso en dspos.app
 
-Plan quirúrgico para la Fase 1 del proyecto de optimización responsiva en GTR POS (`robymetalero-hue/GTR666`), respetando estrictamente la inmutabilidad de bases de datos, APIs, reglas comerciales, permisos y lógica operativa existente.
-
----
-
-## Decisiones Confirmadas por el Usuario
-
-1. **Celulares Verticales**:
-   - Barra de navegación inferior fija ergonómica para acceso rápido con el pulgar a las vistas principales (Inicio, POS, Historial, Inventario/Cajas, Más).
-   - Encabezado superior compacto con branding, estado de conexión (OfflineStatusHUD), cambio de tema y acceso a IA.
-2. **Tabletas (768px a 1024px)**:
-   - Barra lateral colapsable a barra delgada de iconos (~68px de ancho) con botón de alternar (toggle) para maximizar el área de trabajo en pantallas táctiles medianas sin perder acceso visual.
+Restablecer el entorno de producción (`dspos.app`), recuperar la base de datos activa `gtr_pos.db` con los 156 productos y usuarios existentes a partir del respaldo maestro `gtr_pos.db.bak`, asegurar la detección confiable de `dspos.app` y sincronizar con Firestore sin alterar las credenciales del usuario `admin`.
 
 ---
 
-## Alcance Detallado de la Fase 1
+## 1. Revisión de Diagnóstico
 
-### 1. Optimizaciones en `src/index.css`
-- **Soporte de Viewport Dinámico (`100dvh`)**:
-  - Prevenir saltos de altura y desbordamientos cuando el teclado virtual aparece en iOS/Android.
-- **Áreas Táctiles Mínimas (Regla de 44px)**:
-  - Garantizar que botones de acción, interruptores y campos de entrada tengan un target táctil mínimo de 44px o clase táctil ergonómica sin inflar visualmente el diseño.
-- **Contención de Desplazamiento Horizontal**:
-  - Reglas estrictas contra scroll horizontal involuntario en el contenedor principal (`overflow-x: hidden`).
-- **Adaptación Paisaje (Landscape) para Móviles**:
-  - Clases utilitarias para detectar pantallas de baja altura (`@media (max-height: 500px)`) para reducir alturas de encabezados y márgenes.
+1. **Causa de productos vacíos (0 productos) y error de credenciales**:
+   - En el servidor, el archivo `gtr_pos.db` (base de datos SQLite de producción) no existía físicamente en el disco.
+   - El respaldo completo `gtr_pos.db.bak` (7.7 MB) contiene intactos los 156 productos, todos los clientes, ventas y los 5 usuarios del sistema (`admin`, `roby`, `maria`, `jenny`, `vendedor_test`).
+   - Al faltar `gtr_pos.db`, las llamadas dirigidas a producción inicializaban un archivo SQLite en blanco, resultando en 0 productos y credenciales inválidas para `admin`.
 
-### 2. Optimizaciones en `src/App.tsx`
-- **Barra de Navegación Inferior (Mobile Bottom Bar)**:
-  - Visible en pantallas móviles (`< 768px` o `< lg` cuando no se use sidebar).
-  - Incluye accesos directos con micro-animaciones según permisos del usuario:
-    - `Inicio`
-    - `POS (Punto de Venta)` (botón central destacado)
-    - `Historial` (o `CxC` según rol)
-    - `Inventario` (o `Cajas` según rol)
-    - `Menú / Más` (abre el panel desplegable completo hacia arriba o modal con animación suave).
-  - En modo horizontal móvil (`landscape` con altura `< 500px`), se oculta automáticamente o se compacta para priorizar el catálogo y datos.
-- **Sidebar Adaptable para Tabletas (`768px - 1024px` y Desktop)**:
-  - Estado `sidebarCollapsed` con memoria en `localStorage`.
-  - Cuando está colapsada: ancho de `68px`, mostrando los iconos centrados con badges e indicadores activos, ganando casi 200px de espacio horizontal para tablas y catálogos.
-  - Cuando está expandida: ancho de `260px` con texto completo y agrupaciones.
-  - Botón de alternancia sutil en el pie o encabezado del sidebar.
-- **Encabezado Superior Compacto**:
-  - Reducción de altura a 44px–48px en móviles y 40px en landscape móvil (`max-height: 500px`).
-  - Botones táctiles accesibles con espacio adecuado entre sí (sin superposición de botones de tema, IA y menú).
-- **Banners Informativos Adaptables**:
-  - El banner de sandbox y avisos administrativos se adaptan con `flex-wrap` y padding compacto para no ocupar más del 15% de la pantalla en dispositivos pequeños.
-- **Padding Inferior del Contenido**:
-  - En móviles con bottom bar activa, agregar un padding inferior seguro (`pb-16` / `pb-[calc(4rem+env(safe-area-inset-bottom))]`) al contenedor de vistas para que ningún botón de acción (como el total o botón de cobro) quede tapado.
+2. **Detección de entorno**:
+   - En peticiones dirigidas a `dspos.app`, el servidor debe enrutar inequívocamente a producción (`gtr_pos.db` y colecciones principales de Firestore), reconociendo tanto la variable `APP_ENV=production` como el dominio de producción `dspos.app`.
 
 ---
 
-## Matriz de Verificación Obligatoria de Fase 1
+## 2. Cambios Propuestos
 
-| Dispositivo / Orientación | Resolución | Aspectos a Verificar |
-|---|---|---|
-| Celular Compacto (Vertical) | 360 × 800 | Bottom bar ergonómica, header compacto, menú completo abre sin desbordar |
-| Celular Estándar (Vertical) | 390 × 844 | Safe-area inferior, navegación fluida entre POS e Inicio, sin scroll horizontal |
-| Celular (Horizontal / Landscape) | 800 × 360 | Altura máxima aprovechada, header ultra compacto, sin bloqueos de pantalla |
-| Celular Grande (Horizontal) | 844 × 390 | Contenido legible, controles accesibles, navegación utilizable |
-| Tableta (Vertical) | 768 × 1024 | Sidebar colapsable en modo compacto de iconos, ganancia de espacio |
-| Tableta (Horizontal) | 1024 × 768 | Sidebar expandible/colapsable fluido, área de trabajo amplia |
-| Laptop / Desktop | 1366 × 768 | Sidebar estándar, espaciado cómodo, navegación por teclado y mouse |
-| Monitor Full HD | 1920 × 1080 | Jerarquía visual nítida, sin estiramientos extraños ni pérdida de escala |
+### Módulo de Base de Datos (`database.ts`)
+- **Restauración y Salvaguarda Automática**:
+  - Copiar y restaurar inmediatamente `gtr_pos.db` a partir de `gtr_pos.db.bak` (7.7 MB).
+  - En `getProdDb()`, implementar un mecanismo de auto-recuperación seguro: si `gtr_pos.db` no existe o tiene un tamaño inferior al umbral mínimo, restaurarlo automáticamente desde el respaldo de seguridad más reciente (`gtr_pos.db.bak` o `snapshot_*`) antes de conectar, previniendo que producción quede en blanco.
+  - Asegurar la ejecución de pragmas SQLite de alto rendimiento (`journal_mode = WAL`, `synchronous = NORMAL`).
+
+### Módulo de Servidor y Detección de Dominio (`server.ts`)
+- **Resolución de Entorno Confiable**:
+  - En el middleware de selección de entorno, evaluar:
+    1. Si `process.env.APP_ENV === 'production'`, el entorno es **producción**.
+    2. Si el encabezado `Host` o `x-forwarded-host` corresponde a `dspos.app` (o subdominios de producción), asignar entorno **producción** (`isSandbox = false`).
+    3. Si `process.env.APP_ENV === 'sandbox'` o dominios de desarrollo (`ais-dev-*`), asignar **sandbox** (`isSandbox = true`).
+  - Garantizar que las solicitudes a `dspos.app` operen sobre `gtr_pos.db` y las colecciones de Firestore `users`, `products`, `sales`, etc.
+
+### Sincronización con Firestore (`firebaseSync.ts`)
+- Ejecutar verificación de integridad y sincronización de los 156 productos y cuentas de usuario en las colecciones de producción de Firestore.
+- Asegurar que la colección `products` mantenga la correspondencia 1:1 con `gtr_pos.db`.
+
+### Autenticación y Acceso
+- Mantener intacto el hash de contraseña existente para el usuario `admin`.
+- Probar la validación de inicio de sesión con `admin` sobre la base de producción recuperada.
 
 ---
 
-## Restricciones Inmutables
-- CERO cambios en bases de datos, SQLite, Firestore o endpoints backend.
-- CERO cambios en lógica comercial, tipo de cambio, permisos o cálculos matemáticos.
-- Verificación limpia con `npm run lint` y `npm run build`.
+## 3. Plan de Verificación
+
+### Pruebas Automatizadas
+1. **Verificación de Base de Datos de Producción**:
+   - Ejecutar script Node.js para consultar `gtr_pos.db`:
+     - Confirmar que la tabla `products` contiene 156 productos con precios, stock y categorías.
+     - Confirmar que la tabla `users` contiene a `admin`, `roby`, `maria` y `jenny`.
+2. **Prueba de Middleware de Dominio**:
+   - Realizar petición HTTP simulando `Host: dspos.app` y verificar que el encabezado de respuesta `X-App-Environment` retorne `production`.
+3. **Prueba de Endpoint `/api/products` en Producción**:
+   - Realizar llamada HTTP a `/api/products` bajo el entorno de producción y confirmar que retorna la lista completa de productos.
+4. **Compilación de la Aplicación**:
+   - Ejecutar `compile_applet` para validar que el servidor y cliente compilan sin errores.

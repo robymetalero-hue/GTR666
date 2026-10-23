@@ -45,10 +45,15 @@ export function isCurrentContextSandbox(): boolean {
   if (store !== undefined) {
     return store.isSandbox;
   }
+  if (process.env.APP_ENV === 'production') {
+    return false;
+  }
+  if (process.env.APP_ENV === 'sandbox') {
+    return true;
+  }
   return Boolean(
     process.env.K_SERVICE?.startsWith('ais-dev') || 
-    process.env.APP_URL?.includes('ais-dev') || 
-    process.env.NODE_ENV !== 'production'
+    process.env.APP_URL?.includes('ais-dev')
   );
 }
 
@@ -57,6 +62,56 @@ export const sandboxDbPath = path.resolve(process.cwd(), 'gtr_pos_sandbox.db');
 
 export function getActiveDbPath(): string {
   return isCurrentContextSandbox() ? sandboxDbPath : prodDbPath;
+}
+
+export function ensureProdDbExists(): void {
+  const minValidBytes = 200 * 1024; // 200KB min size
+  let needsRestore = false;
+  if (!fs.existsSync(prodDbPath)) {
+    needsRestore = true;
+  } else {
+    try {
+      const stats = fs.statSync(prodDbPath);
+      if (stats.size < minValidBytes) {
+        needsRestore = true;
+      }
+    } catch {
+      needsRestore = true;
+    }
+  }
+
+  if (needsRestore) {
+    console.warn('[Production Auto-Recovery] gtr_pos.db is missing or below valid threshold. Initiating auto-recovery...');
+    const bakPath = path.resolve(process.cwd(), 'gtr_pos.db.bak');
+    if (fs.existsSync(bakPath)) {
+      try {
+        fs.copyFileSync(bakPath, prodDbPath);
+        console.log('[Production Auto-Recovery] Successfully restored gtr_pos.db from gtr_pos.db.bak');
+        return;
+      } catch (err: any) {
+        console.error('[Production Auto-Recovery] Error copying from gtr_pos.db.bak:', err.message);
+      }
+    }
+
+    // Try finding latest healthy snapshot in backups/
+    const backupsDir = path.resolve(process.cwd(), 'backups');
+    if (fs.existsSync(backupsDir)) {
+      try {
+        const snapshots = fs.readdirSync(backupsDir)
+          .filter(f => f.startsWith('snapshot_') && f.endsWith('.db'))
+          .map(f => ({ name: f, path: path.join(backupsDir, f), size: fs.statSync(path.join(backupsDir, f)).size }))
+          .filter(f => f.size >= minValidBytes)
+          .sort((a, b) => b.size - a.size);
+        if (snapshots.length > 0) {
+          fs.copyFileSync(snapshots[0].path, prodDbPath);
+          console.log(`[Production Auto-Recovery] Successfully restored gtr_pos.db from snapshot: ${snapshots[0].name}`);
+          return;
+        }
+      } catch (snapErr: any) {
+        console.error('[Production Auto-Recovery] Error reading backups directory:', snapErr.message);
+      }
+    }
+  }
 }
 
 function setupDbPragmas(databaseInstance: Database.Database) {
@@ -77,6 +132,7 @@ let sandboxDbInstance: Database.Database | null = null;
 
 export function getProdDb(): Database.Database {
   if (!prodDbInstance) {
+    ensureProdDbExists();
     prodDbInstance = new Database(prodDbPath, { timeout: 10000 });
     setupDbPragmas(prodDbInstance);
   }
@@ -85,8 +141,18 @@ export function getProdDb(): Database.Database {
 
 export function getSandboxDb(): Database.Database {
   if (!sandboxDbInstance) {
-    // If sandbox db does not exist, clone production db initially so sandbox has current products and configuration
-    if (!fs.existsSync(sandboxDbPath) && fs.existsSync(prodDbPath)) {
+    ensureProdDbExists();
+    // If sandbox db does not exist or is smaller than healthy threshold, clone production db initially
+    const minValidBytes = 200 * 1024;
+    let needsClone = !fs.existsSync(sandboxDbPath);
+    if (!needsClone) {
+      try {
+        if (fs.statSync(sandboxDbPath).size < minValidBytes && fs.existsSync(prodDbPath) && fs.statSync(prodDbPath).size >= minValidBytes) {
+          needsClone = true;
+        }
+      } catch {}
+    }
+    if (needsClone && fs.existsSync(prodDbPath)) {
       try {
         fs.copyFileSync(prodDbPath, sandboxDbPath);
         console.log('[Sandbox Isolation] Cloned initial gtr_pos.db snapshot to gtr_pos_sandbox.db');
