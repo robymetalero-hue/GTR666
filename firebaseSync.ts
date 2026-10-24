@@ -722,14 +722,18 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
             deletedIdsSet = new Set(deletedRows.map(r => String(r.record_id)));
           } catch (e) {}
 
-          // Pre-capture local verified stock map to implement the ANTI-OVERWRITE STOCK SHIELD
+          // Pre-capture local verified stock and updated_at map to implement the ANTI-OVERWRITE STOCK SHIELD
           const localProductStocksMap = new Map<number, number>();
+          const localProductUpdatedMap = new Map<number, string>();
           if (table === 'products') {
             try {
-              const currentProds = db.prepare('SELECT id, stock FROM products').all() as any[];
+              const currentProds = db.prepare('SELECT id, stock, updated_at FROM products').all() as any[];
               for (const p of currentProds) {
                 if (p.id !== undefined && p.stock !== null && p.stock !== undefined) {
                   localProductStocksMap.set(Number(p.id), Number(p.stock));
+                  if (p.updated_at) {
+                    localProductUpdatedMap.set(Number(p.id), String(p.updated_at));
+                  }
                 }
               }
             } catch (_) {}
@@ -780,14 +784,19 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
               try {
                 const prodIdNum = Number(data.id);
                 const localStock = localProductStocksMap.get(prodIdNum);
+                const localUpdatedStr = localProductUpdatedMap.get(prodIdNum);
                 const remoteStock = Number(data.stock);
 
-                // Shield against remote zero stomping:
-                // If remote stock is 0 or NaN, but local SQLite has a verified positive quantity (> 0),
-                // NEVER let a remote zero stomp on genuine local inventory!
-                if (!isNaN(remoteStock) && remoteStock > 0) {
-                  data.stock = remoteStock;
-                } else if (localStock !== undefined && localStock > 0) {
+                const localUpdated = localUpdatedStr ? new Date(localUpdatedStr).getTime() : 0;
+                const remoteUpdated = data.updated_at || data._tx_timestamp ? new Date(data.updated_at || data._tx_timestamp).getTime() : 0;
+
+                // ANTI-PHANTOM & STRICT LEDGER RULE:
+                // If local stock is 0 (sold out or confirmed zero) and local update is equal or newer than remote,
+                // NEVER allow a stale positive remote stock to resurrect phantom units!
+                if (localStock === 0 && localUpdated >= remoteUpdated) {
+                  data.stock = 0;
+                } else if (localUpdated > remoteUpdated && localStock !== undefined && !isNaN(localStock)) {
+                  // Local record is newer than remote Firestore snapshot: local stock wins
                   data.stock = localStock;
                 } else if (!isNaN(remoteStock)) {
                   data.stock = remoteStock;

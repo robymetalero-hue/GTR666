@@ -81,36 +81,7 @@ export function ensureProdDbExists(): void {
   }
 
   if (needsRestore) {
-    console.warn('[Production Auto-Recovery] gtr_pos.db is missing or below valid threshold. Initiating auto-recovery...');
-    const bakPath = path.resolve(process.cwd(), 'gtr_pos.db.bak');
-    if (fs.existsSync(bakPath)) {
-      try {
-        fs.copyFileSync(bakPath, prodDbPath);
-        console.log('[Production Auto-Recovery] Successfully restored gtr_pos.db from gtr_pos.db.bak');
-        return;
-      } catch (err: any) {
-        console.error('[Production Auto-Recovery] Error copying from gtr_pos.db.bak:', err.message);
-      }
-    }
-
-    // Try finding latest healthy snapshot in backups/
-    const backupsDir = path.resolve(process.cwd(), 'backups');
-    if (fs.existsSync(backupsDir)) {
-      try {
-        const snapshots = fs.readdirSync(backupsDir)
-          .filter(f => f.startsWith('snapshot_') && f.endsWith('.db'))
-          .map(f => ({ name: f, path: path.join(backupsDir, f), size: fs.statSync(path.join(backupsDir, f)).size }))
-          .filter(f => f.size >= minValidBytes)
-          .sort((a, b) => b.size - a.size);
-        if (snapshots.length > 0) {
-          fs.copyFileSync(snapshots[0].path, prodDbPath);
-          console.log(`[Production Auto-Recovery] Successfully restored gtr_pos.db from snapshot: ${snapshots[0].name}`);
-          return;
-        }
-      } catch (snapErr: any) {
-        console.error('[Production Auto-Recovery] Error reading backups directory:', snapErr.message);
-      }
-    }
+    console.warn('[Database Integrity Guard] gtr_pos.db file check triggered. Blind automatic backup restoration is disabled to prevent stale stock overwrites. Fresh data will be populated from verified cloud storage or authorized admin restore.');
   }
 }
 

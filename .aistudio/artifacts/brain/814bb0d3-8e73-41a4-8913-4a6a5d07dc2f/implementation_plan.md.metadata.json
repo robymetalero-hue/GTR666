@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan de implementación para restaurar la base de datos de producción gtr_pos.db con sus 156 productos, configurar la detección de entorno para dspos.app, sincronizar con Firestore y verificar el acceso del usuario admin sin alterar su contraseña.",
-  "updatedAt":  "2026-10-23T13:10:51.692854448Z",
+  "summary":  "Plan de trabajo completo para eliminar unidades fantasma, blindar la sincronización local-nube basada en timestamps y prohibir restauraciones destructivas de backups sin autorización expresa de administrador.",
+  "updatedAt":  "2026-10-24T10:23:48.221661907Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

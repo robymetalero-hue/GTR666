@@ -8960,7 +8960,7 @@ DIRECTIVAS CRÍTICAS:
       }
 
       try {
-        syncAfterWrite({ inventory_counts: [Number(id)] });
+        syncAfterWrite(["inventory_counts", "inventory_count_items"]);
       } catch (syncErr: any) {
         console.warn("[Sync Warning] Could not sync inventory_counts status update:", syncErr.message);
       }
@@ -9088,7 +9088,7 @@ DIRECTIVAS CRÍTICAS:
       });
 
       transaction();
-      syncAfterWrite(["products", "inventory_audit_logs", "inventory_counts"]);
+      syncAfterWrite(["products", "inventory_audit_logs", "inventory_counts", "inventory_count_items"]);
       res.json({ success: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
