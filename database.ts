@@ -951,13 +951,19 @@ const seedUser = (username: string, email: string, pass: string) => {
   });
   const securePass = isPasswordHashed(pass) ? pass : hashPassword(pass);
   if (!exists) {
-    db.prepare('INSERT INTO users (username, password, role, permissions, email) VALUES (?, ?, ?, ?, ?)')
-      .run(username, securePass, 'admin', permissions, email);
+    const totalUserCount = (db.prepare('SELECT count(*) as count FROM users').get() as any)?.count || 0;
+    if (totalUserCount === 0) {
+      db.prepare('INSERT INTO users (username, password, role, permissions, email) VALUES (?, ?, ?, ?, ?)')
+        .run(username, securePass, 'admin', permissions, email);
+    }
   } else {
-    // Ensure email, permissions, and hashed password are upgraded for seed users
+    // CRITICAL: NEVER overwrite existing custom password!
+    // Only upgrade plaintext password to scrypt if legacy unhashed password exists
     const currentPass = exists.password;
-    const finalPass = isPasswordHashed(currentPass) ? currentPass : hashPassword(currentPass || pass);
-    db.prepare('UPDATE users SET email = ?, password = ?, permissions = ? WHERE username = ?').run(email, finalPass, permissions, username);
+    if (currentPass && !isPasswordHashed(currentPass)) {
+      const finalPass = hashPassword(currentPass);
+      db.prepare('UPDATE users SET password = ? WHERE username = ?').run(finalPass, username);
+    }
   }
 };
 

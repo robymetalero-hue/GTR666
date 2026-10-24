@@ -655,7 +655,7 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
       SYNC_TABLES.map(async (table) => {
         try {
           let snapshot;
-          if (table === 'firestore_transaction_ledger') {
+          if (table === 'firestore_transaction_ledger' || table === 'system_audit_logs' || table === 'inventory_audit_logs') {
             snapshot = await getDocs(query(collection(firestore, getCollectionName(table)), limit(100)));
           } else {
             snapshot = await getDocs(collection(firestore, getCollectionName(table)));
