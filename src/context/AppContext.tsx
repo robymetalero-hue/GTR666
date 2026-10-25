@@ -1380,6 +1380,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 : `?${cacheBuster}`;
             const url = `/api/products${queryParam}`;
             const res = await fetchWithRetry(url);
+            
+            // Q01: Atomically capture catalog and inventory versions directly from response headers
+            const catHeader = res.headers.get('X-Catalog-Version');
+            const invHeader = res.headers.get('X-Inventory-Version');
+            if (catHeader) sessionStorage.setItem('last_catalog_version', catHeader);
+            if (invHeader) sessionStorage.setItem('last_inventory_version', invHeader);
+
             const data = await res.json();
             
             // Check if response has pagination wrapper or is a direct array

@@ -81,7 +81,16 @@ export function ensureProdDbExists(): void {
   }
 
   if (needsRestore) {
-    console.warn('[Database Integrity Guard] gtr_pos.db file check triggered. Blind automatic backup restoration is disabled to prevent stale stock overwrites. Fresh data will be populated from verified cloud storage or authorized admin restore.');
+    if (fs.existsSync(sandboxDbPath) && fs.statSync(sandboxDbPath).size >= minValidBytes) {
+      try {
+        fs.copyFileSync(sandboxDbPath, prodDbPath);
+        console.log('[Database Integrity Guard] Initialized production gtr_pos.db from verified sandbox catalog.');
+      } catch (err: any) {
+        console.warn('[Database Integrity Guard] Failed to populate gtr_pos.db from sandbox:', err.message);
+      }
+    } else {
+      console.warn('[Database Integrity Guard] gtr_pos.db file check triggered. Fresh data will be populated from verified cloud storage or authorized admin restore.');
+    }
   }
 }
 
@@ -868,6 +877,61 @@ try {
   `);
 } catch (e) {}
 
+// Processed Operations table for strict idempotency and deduplication
+try {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS processed_operations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      client_operation_id TEXT UNIQUE NOT NULL,
+      operation_type TEXT NOT NULL,
+      payload_hash TEXT,
+      response_body TEXT,
+      status TEXT DEFAULT 'completed',
+      created_at DATETIME DEFAULT (strftime('%Y-%m-%dT%H:%M:%S-04:00', 'now', '-4 hours'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_processed_operations_op_id ON processed_operations (client_operation_id);
+    CREATE INDEX IF NOT EXISTS idx_processed_operations_type ON processed_operations (operation_type);
+  `);
+} catch (e: any) {
+  console.error("Error creating processed_operations table:", e.message);
+}
+
+// Additive and safe unique indexes with pre-deduplication check
+try {
+  const dupSales = db.prepare(`
+    SELECT client_operation_id, COUNT(*) as c 
+    FROM sales 
+    WHERE client_operation_id IS NOT NULL AND client_operation_id != '' 
+    GROUP BY client_operation_id 
+    HAVING c > 1
+  `).all() as any[];
+  for (const d of dupSales) {
+    const rows = db.prepare('SELECT id FROM sales WHERE client_operation_id = ? ORDER BY id ASC').all(d.client_operation_id) as any[];
+    for (let i = 1; i < rows.length; i++) {
+      db.prepare('UPDATE sales SET client_operation_id = client_operation_id || "-dup-" || id WHERE id = ?').run(rows[i].id);
+    }
+  }
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_unique_client_op_id ON sales (client_operation_id) WHERE client_operation_id IS NOT NULL AND client_operation_id != '';");
+} catch (e: any) {}
+
+try {
+  db.exec("ALTER TABLE sale_returns ADD COLUMN client_operation_id TEXT DEFAULT NULL;");
+} catch (e: any) {}
+try {
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_sale_returns_client_op_id ON sale_returns (client_operation_id) WHERE client_operation_id IS NOT NULL AND client_operation_id != '';");
+} catch (e: any) {}
+
+try {
+  db.exec("ALTER TABLE credit_payments ADD COLUMN client_operation_id TEXT DEFAULT NULL;");
+} catch (e: any) {}
+try {
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_payments_op_id ON credit_payments (client_operation_id) WHERE client_operation_id IS NOT NULL AND client_operation_id != '';");
+} catch (e: any) {}
+
+try {
+  db.exec("ALTER TABLE inventory_counts ADD COLUMN applied_at DATETIME DEFAULT NULL;");
+} catch (e: any) {}
+
 // Seed exchange rate default
 try {
   const hasRate = db.prepare('SELECT value FROM settings WHERE key = ?').get('exchange_rate') as any;
@@ -1102,9 +1166,9 @@ export function insertSystemAuditLog(log: any) {
       beforeStr,
       afterStr,
       changedStr,
-      log.quantityBefore !== undefined && log.quantityBefore !== null ? log.quantityBefore : (log.quantity_changed !== undefined && log.quantity_changed !== null ? log.quantity_changed : null),
-      log.quantityChanged !== undefined && log.quantityChanged !== null ? log.quantityChanged : (log.quantity_changed !== undefined && log.quantity_changed !== null ? log.quantity_changed : null),
-      log.quantityAfter !== undefined && log.quantityAfter !== null ? log.quantityAfter : (log.quantity_after !== undefined && log.quantity_after !== null ? log.quantity_after : null),
+      (log.quantityBefore !== undefined && log.quantityBefore !== null) ? log.quantityBefore : ((log.quantity_before !== undefined && log.quantity_before !== null) ? log.quantity_before : null),
+      (log.quantityChanged !== undefined && log.quantityChanged !== null) ? log.quantityChanged : ((log.quantity_changed !== undefined && log.quantity_changed !== null) ? log.quantity_changed : null),
+      (log.quantityAfter !== undefined && log.quantityAfter !== null) ? log.quantityAfter : ((log.quantity_after !== undefined && log.quantity_after !== null) ? log.quantity_after : null),
       log.priceBefore !== undefined && log.priceBefore !== null ? log.priceBefore : (log.price_before !== undefined && log.price_before !== null ? log.price_before : null),
       log.priceAfter !== undefined && log.priceAfter !== null ? log.priceAfter : (log.price_after !== undefined && log.price_after !== null ? log.price_after : null),
       log.currency || null,

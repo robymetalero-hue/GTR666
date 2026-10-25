@@ -196,8 +196,6 @@ export const APPEND_ONLY_TABLES = [
   'exchange_rate_audit',
   'caja_cierres',
   'stock_arrivals',
-  'pending_sales',
-  'pending_sale_items',
   'accounts_receivable',
   'credit_payments',
   'pending_sale_payments',
@@ -358,15 +356,30 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
         }
 
         if (firestoreMaxId >= 0) {
-          if (localMaxId <= firestoreMaxId) {
-            lastSyncedMaxIdCache[tableName] = firestoreMaxId;
-            return;
+          // S05: Detect and push any gap transactions with id <= firestoreMaxId not yet confirmed in transaction ledger
+          let missedRows: any[] = [];
+          try {
+            missedRows = db.prepare(`
+              SELECT * FROM ${tableName} 
+              WHERE id <= ? 
+                AND id NOT IN (
+                  SELECT CAST(record_id AS INTEGER) 
+                  FROM firestore_transaction_ledger 
+                  WHERE table_name = ?
+                )
+            `).all(firestoreMaxId, tableName) as any[];
+          } catch (_) {
+            missedRows = [];
           }
 
-          rows = db.prepare(`SELECT * FROM ${tableName} WHERE id > ?`).all(firestoreMaxId) as any[];
+          const newRows = localMaxId > firestoreMaxId
+            ? (db.prepare(`SELECT * FROM ${tableName} WHERE id > ?`).all(firestoreMaxId) as any[])
+            : [];
+
+          rows = [...missedRows, ...newRows];
 
           if (rows.length === 0) {
-            lastSyncedMaxIdCache[tableName] = firestoreMaxId;
+            lastSyncedMaxIdCache[tableName] = Math.max(localMaxId, firestoreMaxId);
             return;
           }
 
@@ -795,13 +808,16 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
                 // NEVER allow a stale positive remote stock to resurrect phantom units!
                 if (localStock === 0 && localUpdated >= remoteUpdated) {
                   data.stock = 0;
+                  if (localUpdatedStr) data.updated_at = localUpdatedStr;
                 } else if (localUpdated > remoteUpdated && localStock !== undefined && !isNaN(localStock)) {
                   // Local record is newer than remote Firestore snapshot: local stock wins
                   data.stock = localStock;
+                  if (localUpdatedStr) data.updated_at = localUpdatedStr;
                 } else if (!isNaN(remoteStock)) {
                   data.stock = remoteStock;
                 } else if (localStock !== undefined) {
                   data.stock = localStock;
+                  if (localUpdatedStr) data.updated_at = localUpdatedStr;
                 }
               } catch (e: any) {
                 console.warn('[Sync Stock] Error preserving product stock:', e.message);
@@ -865,6 +881,17 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
               } catch (e: any) {
                 console.warn('[Sync ExchangeRate Shield] Warning checking rate timestamps:', e.message);
               }
+            }
+
+            // S04: Guard against SKU collision deleting existing primary key
+            if (table === 'products' && data.sku) {
+              try {
+                const existingProduct = db.prepare("SELECT id FROM products WHERE sku = ?").get(data.sku) as any;
+                if (existingProduct && data.id !== undefined && Number(existingProduct.id) !== Number(data.id)) {
+                  console.warn(`[Sync SKU Shield] Product SKU collision detected for '${data.sku}': preserving local primary key #${existingProduct.id} over incoming #${data.id}.`);
+                  data.id = existingProduct.id;
+                }
+              } catch (_) {}
             }
 
             let keys = Object.keys(data);

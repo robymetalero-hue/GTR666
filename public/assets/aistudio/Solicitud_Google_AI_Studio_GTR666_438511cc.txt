@@ -1,0 +1,363 @@
+SOLICITUD PARA GOOGLE AI STUDIO — GTR666
+REVISIÓN DEL CICLO COMPLETO Y PREPARACIÓN DE CORRECCIONES LOCALIZADAS
+
+Necesito que revises a profundidad los problemas de inventario, ítems fantasma y cálculos de mi aplicación GTR666. Es un sistema comercial en producción: una corrección debe integrarse con todos los caminos afectados y conservar las operaciones que ya funcionan. No basta con corregir el síntoma visible ni con que desaparezca un mensaje del diagnóstico.
+
+REPOSITORIO Y EVIDENCIA DE REFERENCIA
+
+Repositorio de la revisión: https://github.com/robymetalero-hue/GTR666
+Rama observada en la auditoría: main
+Commit auditado: 9526eebdc58404290454215482bd0523572268b0
+Fecha de la auditoría: 24 de octubre de 2026, Bolivia.
+
+El paquete GTR666_auditoria_ciclo_20261024.zip contiene:
+- GTR666_revision_inventario_20261024.md: informe ampliado con escenarios, ubicaciones, causas, solución propuesta y matriz de aceptación.
+- audit_cycle.cjs: ejecutor principal de 53 escenarios.
+- cycle-results.json: resultados de referencia.
+- reproduce_inventory.cjs: diez reproducciones preliminares.
+- reproduction-results.json: resultados de esas reproducciones.
+- reviewed-source-manifest.json: SHA de las 31 fuentes fijadas para la revisión.
+- README.md: instrucciones y límites de las pruebas.
+
+Ese ZIP es una auditoría reproducible: NO es un parche, NO contiene una base comercial y NO debe instalarse como una versión de la aplicación. El informe completo está incorporado al final de esta solicitud para que dispongas de sus problemas, escenarios, ubicaciones y correcciones propuestas aunque no puedas abrir un ZIP. Los scripts y los JSON originales siguen siendo la evidencia ejecutable adicional.
+
+ALCANCE DE ESTA SOLICITUD
+
+Valida la auditoría de forma independiente sobre el código que tienes disponible y prepara un plan y un parche propuesto, localizado y revisable, en una rama o copia aislada. Esta solicitud no autoriza desplegar, publicar, reemplazar la base comercial, cambiar cantidades reales, borrar historial ni aplicar modificaciones directamente sobre producción.
+
+Antes de editar, identifica el repositorio y el commit de tu espacio de trabajo. Si no coinciden con la referencia, compara las rutas afectadas y determina qué hallazgos siguen presentes, cuáles ya se corrigieron y qué regresiones pudieron introducir los cambios. Los números de línea del informe son referencias del commit auditado: localiza la función o ruta equivalente en la versión actual. No sustituyas código nuevo por una versión antigua para que coincida con el informe.
+
+No modifiques la aplicación desplegada durante el diagnóstico. Las pruebas que escriben deben usar exclusivamente SQLite temporal o en memoria, copias aisladas, simulaciones o un entorno de pruebas con servicios separados. No ejecutes suites que recurren a la base de producción cuando no encuentran una base de pruebas. No ejecutes package_verified_db.cjs sobre una carpeta comercial ni los scripts de reparación/restauración como método de comprobación.
+
+CICLO QUE DEBES SEGUIR
+
+Revisa la cadena completa de cada operación: formulario o cola del dispositivo → solicitud → identidad/permisos del servidor → validación → transacción SQLite → cambio de existencias → detalle/documento → caja/crédito/puntos → auditoría → réplica → caché/versiones → consulta y reporte → reinicio y recuperación.
+
+Incluye alta e importación de productos, stock inicial, compras e ingresos repetidos, edición y ajustes, venta normal, pedidos y reservas, edición/cancelación/finalización de pendientes, contingencia sin conexión y su aprobación/rechazo, devoluciones parciales y completas, crédito/abonos, conteos físicos y recuentos, conciliación forense, cierres de caja/turno, sincronización manual/automática/forzada, respaldos y rutas de IA que escriben inventario.
+
+REGLAS DE CONSISTENCIA
+
+1. Cada movimiento debe tener una identidad estable y aplicarse una sola vez. Una respuesta perdida, un doble envío, un reintento o un reinicio no pueden duplicar unidades, dinero, devoluciones, puntos o pagos.
+2. Si falla una parte esencial de la operación, revierte todas sus escrituras. No devuelvas error dejando stock cambiado y auditoría, dinero o detalle sin registrar.
+3. Valida cantidades enteras, positivas y finitas para artículos vendidos por unidad; IDs reales; demanda total por producto si aparece en varias líneas; importes y monedas válidas. Haz las comprobaciones decisivas dentro de la transacción.
+4. Una edición de nombre, foto o precio no debe reponer el stock de un formulario antiguo. Omitir stock debe conservarlo. Un ajuste real necesita intención explícita, motivo y control de versión.
+5. El saldo físico contable debe coincidir con un punto inicial comprobado más ingresos/devoluciones/ajustes autorizados menos ventas. El disponible debe excluir reservas activas. Finalizar un pedido no puede descontar dos veces.
+6. Una observación física y su referencia esperada deben corresponder al mismo momento. Conserva movimientos posteriores y exige recuento cuando no puedas determinar qué movimientos estaban incluidos. No rellenes referencias históricas con stock de hoy.
+7. El costo, tasa y moneda históricos deben conservarse. No mezcles moneda de deuda con BOB de caja. No reembolses más del neto atribuible a las unidades devueltas ni dejes deuda como si la devolución no existiera.
+8. No inventes historia, ajustes, unidades, saldos iniciales o causas. La historia incompleta debe dar “evidencia insuficiente”, no cero ni una conciliación certificada.
+9. Un hash o una coincidencia de agregados no prueban inventario físico correcto. Una sincronización solicitada no equivale a una sincronización confirmada.
+10. Conserva SQLite, Express, React, Firestore, las rutas y los flujos existentes. Evita reemplazos completos de server.ts, reestructuraciones generales y cambios de interfaz o ticket ajenos a estas correcciones.
+
+ENTREGA DE VALIDACIÓN, ANTES DE DEFINIR EL PARCHE
+
+Construye una tabla de hallazgos con:
+ID de evidencia; estado en el commit actual (confirmado/corregido/no reproducido/condicionado); escenario reproducible; esperado y observado; archivo y función/ruta con líneas actuales; causa; impacto en otros módulos; corrección concreta; prueba que la verifica.
+
+Agrupa por causa: los 40 incumplimientos de la batería no son necesariamente 40 causas independientes ni una estadística de incidentes reales. La ejecución de referencia tuvo 53 escenarios, 13 controles que cumplen, 40 incumplimientos y cero errores del ejecutor. Un control adicional realiza 500 operaciones dentro de esa batería. Las diez reproducciones preliminares tienen solapamientos y su resultado “REPRODUCED” confirma un defecto; no significa que la solución esté probada.
+
+Distingue explícitamente:
+- Pruebas de rutas reales con servicios simulados.
+- S06: intercalado determinista de comprobaciones; no HTTP concurrente real.
+- S07: dos SQLite escritoras independientes; debes comprobar si esa topología existe en el despliegue.
+- F10 y S08: fallos inyectados deliberadamente.
+- O02–O04: bandeja ya existente; no confundir con la recepción sobre esquema nuevo, que falla en O01.
+- Q01: orden controlado de respuestas del cliente, sin navegador real.
+- D01: respaldo WAL sobre archivos temporales propios.
+
+No presentes como reproducido algo que solo leíste, ni como probado lo que tu entorno no permita ejecutar. Si un resultado no coincide, documenta la diferencia de versión, datos o supuestos.
+
+PREPARACIÓN DEL PARCHE
+
+Después de validar dependencias e impacto, prepara cambios pequeños por causa y un diff revisable. No te limites a redactar recomendaciones genéricas: indica qué código cambiarás, cómo preservas compatibilidad y cómo verificas la integración. Conserva los controles que ya pasan.
+
+Prioriza:
+A. Detener restauraciones por umbrales y conciliaciones que deshacen movimientos válidos; conservar historial al reiniciar turnos; obtener respaldos consistentes bajo WAL.
+B. Validación, operación única y transacción completa para ingresos, ajustes, ventas, devoluciones y abonos.
+C. Conteos: GET de solo lectura, referencias temporales coherentes, pertenencia sesión/ítem, unicidad revisada, aplicación única y recuentos pendientes.
+D. Ventas pendientes/offline: las mismas garantías del POS, reservas y disponibilidad, estados terminales, relación pedido/venta, detalle y dinero completos.
+E. Cálculo monetario: descuentos y residuos por línea, devolución neta, costo/tasa históricos, crédito y puntos; conservar Bs 0,50 según la regla del POS y precisión monetaria de USD.
+F. Réplica y caché: versiones junto con los datos, identidad estable, marcas de eliminación, confirmación por operación y pendientes durables; verificar la autoridad de escritura si hay más de una instancia.
+G. Auditoría/reportes: altas y ajustes incluidos una sola vez, cierres históricos comparables, utilidad con devolución del costo correspondiente y pérdidas visibles.
+
+Si agregas índices únicos, revisa duplicados existentes antes de crearlos: no borres ni fusiones conteos, ventas o pagos automáticamente. Si hace falta un cambio de esquema, propón una migración aditiva, condiciones previas y reversión; no recrees tablas productivas para forzar una restricción.
+
+Usa funciones pequeñas compartidas para que las rutas alternativas no sigan cálculos distintos. Mantén la autorización administrativa de contingencia y el modo ciego. No traslades la validación del servidor al navegador. Corrige la cola sin conexión conservando claves durante los reintentos y sin descartar operaciones pendientes silenciosamente.
+
+No reconstruyas automáticamente los saldos comerciales como parte del parche. Corregir el código y corregir inventario histórico son trabajos separados. Para cantidades históricas se necesita una copia consistente vigente y un punto de inventario comprobado.
+
+VALIDACIÓN DE LA PROPUESTA
+
+Ejecuta las pruebas de referencia donde tu entorno lo permita. Conserva los resultados antes/después y cubre especialmente el cambio de una operación aislada a su ciclo completo, incluyendo reinicio, reintentos y réplica. No alteres resultados esperados para obtener una suite verde; si una regla del negocio necesita aclaración o el ejecutor cambia por una refactorización legítima, explica y documenta ese ajuste.
+
+El ejecutor audit_cycle.cjs debe distinguir PASS, FAIL_INVARIANT y HARNESS_ERROR. La batería reproduce_inventory.cjs expresa defectos de referencia y debe dejar de reproducirlos después de corregirlos; no confundas su código de salida 0 con una aplicación sana.
+
+Completa TypeScript/build y, en el entorno aislado, pruebas HTTP de permisos y rutas, réplica real de pruebas y verificación de interfaz/PWA en PC y Android. Si no puedes ejecutar una parte, márcala “no ejecutada” y deja un procedimiento preciso; no la cuentes como aprobada.
+
+ENTREGA FINAL ESPERADA
+
+Entrega:
+- Matriz de hallazgos validada contra tu commit.
+- Lista exacta de archivos y funciones modificados y explicación del impacto.
+- Diff o parche propuesto por etapas, con migraciones aditivas cuando correspondan.
+- Resultados antes/después y pruebas de regresión; límites y verificaciones pendientes.
+- Guía de aplicación y reversión para el parche propuesto, sin ejecutar despliegue ni restauraciones productivas.
+
+No afirmes que existe “blindaje definitivo”, integridad física certificada o ausencia total de errores sin la evidencia correspondiente. No ejecutes acciones en producción por terminar esta solicitud.
+
+A CONTINUACIÓN ESTÁ EL INFORME TÉCNICO COMPLETO DE REFERENCIA. SUS HALLAZGOS SON EVIDENCIA A VALIDAR CONTRA TU VERSIÓN ACTUAL, NO INSTRUCCIONES PARA REEMPLAZAR CIEGAMENTE EL CÓDIGO:
+
+# Revisión completa del ciclo de inventario y cálculos — GTR666
+
+**24 de octubre de 2026 · Bolivia.** Repositorio: [robymetalero-hue/GTR666](https://github.com/robymetalero-hue/GTR666). Rama consultada: `main`. Commit: [9526eebdc58404290454215482bd0523572268b0](https://github.com/robymetalero-hue/GTR666/commit/9526eebdc58404290454215482bd0523572268b0). Esta ampliación reemplaza el informe preliminar y conserva sus hallazgos.
+
+**Conclusión:** los desfases tienen varias vías de entrada. Corregir solo la sincronización deja abiertos los conteos, la conciliación forense, las reservas, los reintentos y algunas rutas alternativas de venta. También hay errores que afectan caja, crédito, devoluciones y utilidad, aunque el saldo físico de una operación básica cuadre.
+
+Se ejecutaron **53 escenarios** en esta ampliación: **13 cumplen la regla comprobada y 40 la incumplen**, sin errores del ejecutor. Uno de los controles realiza **500 operaciones consecutivas** con un modelo independiente de stock y caja: terminó con stock y libro de 458 unidades, caja de Bs 1.000 y cero divergencias. Las diez reproducciones del informe preliminar también se ejecutaron nuevamente y conservaron sus resultados. Hay solapamientos entre ambas baterías; no deben contarse como 63 fallas independientes.
+
+Estos números describen casos de prueba elegidos para investigar riesgos. No son porcentajes de fallos de las ventas reales ni 40 causas independientes. Algunas pruebas modelan condiciones específicas que se distinguen más adelante.
+
+**Esta entrega contiene diagnóstico, reproducciones y una propuesta de corrección. No contiene un parche funcional aplicado.** No se modificaron GitHub, la aplicación desplegada, la base comercial ni Firestore.
+
+## Alcance y método
+
+Se fijaron 31 archivos de referencia al commit indicado y se verificó que sus bytes coinciden con los SHA del árbol de GitHub. El análisis siguió las rutas que crean, descuentan, restauran, reservan, ajustan o replican existencias y sus efectos sobre dinero e historial.
+
+| Parte del ciclo | Revisión realizada |
+|---|---|
+| Alta e importación | Stock inicial, compras, edición completa de ficha, importación masiva, identidad de SKU |
+| Venta normal | Validación de cantidades, precios, stock, transacción, reintentos, costo y tasa históricos |
+| Pedidos pendientes | Compromiso de unidades, cambios, eliminación, abonos, finalización, réplica de detalles |
+| Venta sin conexión | Cola, ingreso al servidor, aprobación, duplicados, cantidades, crédito y caja |
+| Devoluciones | Cantidad máxima, reintentos parciales, descuento original, moneda, deuda y réplica |
+| Control físico | Alcance, referencias temporales, ventas durante el conteo, aprobación única, recuento y modo ciego |
+| Auditoría y reportes | Reconstrucción del libro, períodos, conciliación, utilidad, moneda y consistencia declarada |
+| Sincronización | Upserts, borrados, IDs, versiones, escrituras intercaladas, réplicas incompletas |
+| Caché del dispositivo | Asociación entre la lista descargada y la versión que se marca como vigente |
+| Recuperación | Copias con WAL, restauraciones por umbrales y script de empaquetado |
+
+Las pruebas ejecutan manejadores y funciones reales extraídos de las fuentes, el esquema real y la función real de auditoría. Usan SQLite temporal o en memoria mediante Node 24; Firestore, autenticación HTTP y notificaciones están simulados. La copia WAL se probó exclusivamente con archivos temporales propios.
+
+No se inició el servidor ni se ejecutaron los scripts de pruebas existentes que pueden abrir una base por ruta y recurrir a producción si no encuentran una base de pruebas. No se probaron HTTP real, PC/Android, impresora, Firestore real, despliegue, lint ni build completo. Tampoco se confirmó qué commit o topología está ejecutando producción.
+
+## Reglas que debe cumplir todo el ciclo
+
+1. **Conservación de unidades.** Saldo físico final = saldo inicial comprobado + ingresos + devoluciones físicas + ajustes autorizados − ventas confirmadas. Cada operación se cuenta una sola vez.
+2. **Disponibilidad.** Disponible para vender = físico contable − unidades reservadas en pedidos activos. Una reserva no es otra compra ni otra venta.
+3. **Transacción completa.** Si una operación falla, no puede dejar stock cambiado y dinero, detalle o auditoría sin registrar.
+4. **Reintento sin duplicación.** El mismo identificador de operación produce el mismo resultado sin volver a mover unidades, puntos o dinero.
+5. **Identidad estable.** Un SKU colisionado o una fecha remota no pueden sustituir silenciosamente la identidad de un producto.
+6. **Referencias temporales coherentes.** Físico observado y stock esperado deben corresponder al mismo momento. El cierre de un período pasado no se compara con stock de hoy.
+7. **Dinero consistente.** Total, descuento, devolución, deuda y caja usan la moneda y tasa históricas de la operación; las devoluciones no superan el importe neto atribuible a lo devuelto.
+8. **Evidencia suficiente.** Un historial incompleto impide certificar o imponer un stock calculado. Un hash o una igualdad de sumas no prueban por sí solos el inventario físico.
+
+## Hallazgos que afectan directamente las existencias
+
+**1. La conciliación forense puede deshacer un conteo aprobado.** En A01, una creación de 15 y una venta de 7 dejaron 8. Se aprobaron 7 unidades físicas y el stock pasó correctamente a 7. El motor ignoró el ajuste cuyo texto de referencia comienza con “Conciliación”; reconstruyó 8 y su función de conciliación volvió a imponer **8**.
+
+La exclusión está en [forensicAuditEngine.ts:145](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/forensicAuditEngine.ts#L145) y la escritura en [reconcileProductDiscrepancy:1045](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/forensicAuditEngine.ts#L1045). El mismo motor, sin un alta histórica comprobable, puede partir de cero, descontar ventas y escribir valores negativos: A02 llevó un stock de 8 a **−7**.
+
+**Corrección:** reconocer cada movimiento por tipo e identidad, no excluirlo por el comienzo de una descripción. Exigir un saldo inicial o un punto de referencia validado y continuidad suficiente antes de permitir una conciliación. Los ajustes físicos aprobados deben entrar una sola vez en el libro. La función de diagnóstico no debe modificar stock de forma implícita ni presentarse como certificación cuando faltan datos.
+
+**2. Persisten las fallas de referencias del conteo.** Las reproducciones preliminares confirmaron de nuevo:
+
+- GET amplía una sesión al consultarla y crea líneas con referencia inicial cero.
+- Stock 8, físico 7 y referencia cero pueden terminar en **15** al aprobar.
+- Snapshot 15, venta de 5 antes de registrar el físico y físico 9 pueden terminar en **4**.
+- El cierre con `auto_apply` puede aplicar el mismo delta dos veces: 15 → 17 → **19**.
+- El PUT de ítems no comprueba simultáneamente ítem y sesión; una URL de sesión activa puede modificar una línea de otra sesión cerrada.
+- El esquema admite varias líneas para la misma sesión/producto.
+
+Fuentes: [lectura del conteo](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/server.ts#L8513), [captura del físico](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/server.ts#L8638), [cierre alternativo](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/server.ts#L8784), [aprobación](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/server.ts#L8975) y [esquema](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/database.ts#L650).
+
+**Corrección:** GET de solo lectura, alcance fijado al crear la sesión, referencia de apertura conservada para auditoría y referencia del sistema ligada al registro físico. Aplicar una única diferencia contra esa última referencia, preservando movimientos posteriores. Un movimiento que no pueda ubicarse respecto de la observación física exige recuento del ítem. Ambas rutas de aprobación deben usar la misma transacción y una marca única de aplicación. No rellenar snapshots históricos con stock actual.
+
+**3. La edición de ficha puede reponer ventas o dejar un cambio parcial.** El formulario guarda el stock que tenía cuando se abrió. Si había 15, se venden 7 y se guarda después, puede reponer **15**. Omitir el campo stock lo convierte en cero. Además, F10 inyectó un fallo al insertar la auditoría: la API rechazó el ajuste, pero el stock quedó en **16**, en vez de conservar 15.
+
+Fuentes: [formulario de inventario](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/src/views/Inventory.tsx#L1335) y [PUT del producto](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/server.ts#L2995).
+
+**Corrección:** editar metadatos/precios no debe reenviar un ajuste de existencias. Un ajuste real requiere intención, motivo, versión revisada y operación única. Los campos omitidos se conservan. Stock y registros de la operación deben quedar en la misma transacción.
+
+**4. Un pedido puede comprometer mercancía sin reducir lo vendible.** En P01 había 10 unidades, se guardó un pedido de 8 y la venta normal todavía aceptó otras 3. El pedido no descuenta ni existe una comprobación efectiva de reservas en la validación de venta.
+
+P02 confirmó que guardar un pedido programa la réplica de la cabecera, pero no sus líneas. P05 permitió reescribir un pedido ya completado. Fuentes: [alta/edición de pendientes](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/server.ts#L5980) y [finalización](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/server.ts#L6133).
+
+**Corrección recomendada:** conservar `products.stock` como saldo físico contable y calcular/responder el reservado y el disponible usando las líneas de pedidos activos. El POS valida el disponible dentro de la transacción. Crear o editar un pedido cambia la reserva; cancelarlo la libera; finalizarlo descuenta el físico una sola vez y libera esa reserva en la misma transacción. Esto evita descontar dos veces y mantiene coherente el conteo físico. El módulo debe mostrar con claridad físico, reservado y disponible. Se pueden reutilizar las tablas existentes y añadir índices y un enlace estable entre pedido y venta.
+
+**5. Las líneas antiguas y los pedidos borrados reaparecen al replicar.** S01 guardó una línea de 2 unidades, editó el pedido para dejar una de 1 y ejecutó push/pull. Volvieron ambas: **2 líneas y 3 unidades**, en lugar de una línea y una unidad. S02 eliminó un pedido; tras el ciclo de réplica reaparecieron cabecera y detalle.
+
+Las tablas de pedidos se tratan como si solo recibieran altas y el push no elimina los documentos ausentes sin una operación de borrado. [APPEND_ONLY_TABLES](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/firebaseSync.ts#L192) y [push de tablas](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/firebaseSync.ts#L284).
+
+**Corrección:** registrar y replicar cambios y eliminaciones por identidad. Las tablas mutables no pueden usar solamente el máximo ID para decidir si están sincronizadas. Preservar las marcas de borrado hasta que se confirme su propagación.
+
+**6. La aprobación sin conexión tiene validaciones distintas de la venta normal.** En una cola existente, O02 aprobó dos líneas de 6 con stock 10 y terminó en **−2**, sin solicitar forzado. O03 aceptó una cantidad negativa y elevó stock de 10 a **15**. La disponibilidad se comprueba por línea antes de los descuentos y no se vuelve a validar correctamente dentro de la transacción.
+
+Además, O01 demostró que recibir una venta offline con una base creada por el esquema actual falla con `no such column: price_bob`: se consultan columnas que ese esquema no crea. Fuente: [recepción de contingencia](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/server.ts#L6411) y [aprobación offline](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/server.ts#L6609).
+
+O02–O04 ejercitan una bandeja existente mediante datos ficticios; no se afirma que el formulario actual pueda completar ese ingreso sobre la base nueva que falla en O01.
+
+**Corrección:** validar enteros positivos y finitos, existencia de productos y demanda agregada por producto dentro de la transacción. Reutilizar las garantías de la venta normal, mantener la autorización administrativa de contingencia y corregir la consulta al catálogo vigente.
+
+**7. Las protecciones de réplica no bastan para conservar identidad e historia.** S03 conservó stock cero pero retrocedió su fecha de las 10:00 a las 08:00. La reproducción preliminar confirmó que otro pull de las 09:00 puede entonces aceptar 7 unidades antiguas. S04 recibió un producto remoto con otro ID y un SKU ya existente: `INSERT OR REPLACE` sustituyó el producto local por la identidad remota y dejó stock **30**.
+
+S05 dejó una venta con ID menor sin subir porque ya existía un ID mayor en la nube. El máximo ID no demuestra que todos los anteriores estén presentes.
+
+Fuentes: [selección y upsert del pull](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/firebaseSync.ts#L783) y [incremental por máximo ID](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/firebaseSync.ts#L334).
+
+**Corrección:** stock y revisión temporal elegidos deben permanecer juntos. Una colisión ID/SKU debe generar conflicto, no sustituir otro registro. La réplica necesita confirmación por operación o versión; no inferir continuidad por el mayor ID.
+
+**8. Más de un escritor exige resolver la autoridad de inventario.** S06 modeló dos comprobaciones de idempotencia intercaladas antes de sus transacciones: se grabaron dos ventas con la misma clave. El índice de `sales.client_operation_id` es no único. S07 modeló dos instancias con SQLite independientes: ambas vendieron 7 de un stock inicial de 15; la nube terminó en **8 y una venta**, cuando debían conservarse **1 y dos ventas**.
+
+Fuentes: [preconsulta de idempotencia](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/server.ts#L5447), [índice no único](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/database.ts#L473) y [escritura de documentos](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/firebaseSync.ts#L462).
+
+Son escenarios condicionados: no se verificó que producción tenga esa topología. Antes de afirmar que el problema está cerrado debe comprobarse dónde vive la base persistente y cuántas instancias escriben. Si hay varias SQLite independientes, añadir fechas no evita perder movimientos. Se requiere una autoridad de escritura o un control transaccional de versión y IDs globales.
+
+## Hallazgos que afectan dinero, cálculos y confianza en los reportes
+
+| Área | Evidencia reproducida | Cambio necesario |
+|---|---|---|
+| Devolución USD | F01: venta USD 1 a tasa 10; al devolver queda Bs 3,04 en caja en lugar de cero | Recuperar la tasa histórica en la consulta y usarla durante toda la reversión |
+| Descuento y devolución | F02: se cobraron Bs 16 por dos líneas/unidades con bruto 20; se reembolsaron 20 | Distribuir descuento/redondeo neto por línea y devolver solo el neto atribuible |
+| Reintento de devolución | F03: el mismo reintento parcial devuelve dos unidades y dos importes | Clave única, huella del contenido y resultado previo en la misma transacción |
+| Crédito devuelto | F04: se devolvió todo y permaneció deuda 80 | Separar devolución física, reducción de deuda y eventual reintegro de dinero realmente cobrado |
+| Historial de devolución | F05: `sale_returns` no figura en la réplica explícita de la devolución | Incluir todos los IDs devueltos por la transacción; hoy se pierden al desestructurar el resultado |
+| Crédito USD | F06: abono de USD 5 sobre deuda USD, tasa 10, suma Bs 5 a caja en lugar de 50 | Definir y validar moneda del abono; conservar su tasa e importe base |
+| Reintento de abono | F07: una misma operación de 10 termina con 20 pagados | Deduplicación transaccional de pagos |
+| Puntos | F09: con 2 puntos se acepta una solicitud de canje de 10 | Validar saldo real y consumo dentro de la transacción; no limitarse a recortar a cero |
+| Pendiente finalizado | P03: hay venta y descuento de stock, pero caja inmediata 0 | Registrar caja y deuda al finalizar; no depender de “reparar” al abrir una consulta |
+| Precio en pendiente | P04: el vendedor puede finalizar a Bs 1 un artículo cuyo precio oficial es 10 | Aplicar la misma autorización y cálculo que en POS |
+| Abonos acumulados | P06: la cabecera registra 100 pagados, pero el detalle suma 130 | Rechazar o ajustar explícitamente el exceso antes de registrar pagos y conservar igualdad cabecera/detalle |
+| Crédito offline | O04: se registra caja 100 y deuda 100 sin haber recibido un abono | Guardar y respetar abono inicial, moneda, vencimiento y puntos de la contingencia |
+| Utilidad y devolución | R01: después de devolver una de dos unidades, utilidad 0 en vez de 5 | Revertir ingreso neto y costo histórico de lo devuelto, no restar todo el reembolso a la utilidad |
+| Pérdidas | R02: resultado económico −10 se muestra como cero | Conservar resultados negativos; no ocultarlos con `Math.max(0,...)` |
+| Diagnóstico de moneda | R03: entrada USD 10 a tasa 10 devuelve BOB 10 / USD 1 | Hacer explícita la moneda de entrada y probar la misma función que usa la transacción real |
+
+Fuentes principales: [devoluciones](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/server.ts#L5154), [abonos](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/server.ts#L5874), [finalización de pendiente](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/server.ts#L6253), [caja offline](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/server.ts#L6768), [utilidad del reporte](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/server.ts#L7487) y [rutina de diagnóstico matemático](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/src/utils/fiscalMath.ts#L88).
+
+En devoluciones, la consulta de venta original no selecciona `exchange_rate`, pero luego intenta usarlo; cae al valor 6,96. En utilidad, se resta el reembolso completo a un margen que ya dedujo el costo de las unidades originales, sin devolver ese costo al cálculo.
+
+El redondeo a Bs 0,50 debe conservarse según la regla del POS; USD mantiene su precisión monetaria. Una corrección de precisión no debe redondear prematuramente el costo unitario de memorias baratas. Se necesita una definición explícita de precisión por campo, importes monetarios calculados de forma consistente y asignación exacta de residuos en descuentos/devoluciones. El nombre `subtotal_minor` no convierte por sí solo un importe REAL en centavos.
+
+## Auditoría, recuperación y dispositivos
+
+**Historial y períodos.** A04 detectó que un producto creado con 15 dentro del período puede tener cierre calculado cero. A06 calculó correctamente cierre pasado de 15, pero lo comparó con stock posterior de 8 y declaró una discrepancia de −7. A03 registró “cantidad anterior” −7 cuando se suministró 15 mediante `quantity_before`: la conversión de nombres toma el campo cambiado equivocado. Fuentes: [cálculo por período](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/forensicAuditEngine.ts#L768) y [mapeo de auditoría](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/database.ts#L1105).
+
+**Reinicio de turno.** A05 ejecutó la ruta de reinicio sobre datos ficticios: eliminó la venta y conservó su detalle huérfano. Esto rompe devoluciones, informes y reconstrucciones que usan JOIN con la cabecera. [shifts/reset](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/server.ts#L7924). Cerrar o reiniciar un turno debe marcarlo/cambiar el período, conservando comprobantes e historial.
+
+**Conteo ciego.** El GET principal sí elimina los campos sensibles comprobados en C12. Sin embargo, B01 recibe `status: diferencia` al registrar un físico. Aunque la interfaz lo oculte, la respuesta permite inferir el resultado. El PUT debe responder estado neutral y mantener separación entre datos del auditor y del administrador.
+
+**Verificación que afirma reparar sin volver a medir.** S08 simuló que push/pull resuelven sin transferir datos, como puede ocurrir con salidas tempranas o errores absorbidos. La nube siguió en 9 y SQLite en 15, pero la API declaró integridad y reparación exitosas asignando los agregados locales a las variables remotas. [integrity-check](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/server.ts#L7288). Una verificación debe releer ambos lados y comunicar pendientes/fallos; no convertir una intención en evidencia.
+
+**Caché y versión de inventario.** Q01 reprodujo una descarga de stock 8 seguida de una consulta separada de versión después de otra venta, que ya corresponde a stock 7. El cliente etiquetó el contenido viejo con la versión nueva y la siguiente actualización se omitió por considerarlo vigente. [fetchProducts](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/src/context/AppContext.tsx#L1353). La versión debe viajar junto con la lista obtenida del mismo estado consistente; también se deben descartar respuestas antiguas cuando llegan fuera de orden.
+
+**Respaldo con WAL.** D01 ejecutó la función real de snapshot sobre una base temporal: una fila confirmada permanecía en WAL; copiar solo el archivo principal produjo un respaldo con cero filas. [createLocalDbSnapshot](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/server.ts#L4345). Usar la API de backup de SQLite o un mecanismo consistente de snapshot; validar esquema, integridad y relaciones al restaurar. Una copia de archivo bajo WAL no garantiza contener todas las operaciones confirmadas.
+
+**Restauraciones y scripts.** Siguen en el código los bloques de restauración por umbrales al inicio y cada 15 minutos, y la eliminación de marcas de borrado. Se activan solo si existen los archivos de respaldo correspondientes; no se comprobó su existencia en producción. Vender mucho o tener pocos productos no prueba corrupción. [restauración de arranque](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/server.ts#L11205).
+
+El script [package_verified_db.cjs](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/package_verified_db.cjs#L6) sustituye la base de producción por una de pruebas si se ejecuta desde esa carpeta. No aparece llamado desde los scripts de `package.json`; no se afirma que se haya ejecutado automáticamente. Debe producir una salida separada y rechazar el destino productivo.
+
+La herramienta de IA también contiene eliminación por SKU/nombre sin el mismo registro de borrado que la API normal ([removeProductFromInventory](https://github.com/robymetalero-hue/GTR666/blob/9526eebdc58404290454215482bd0523572268b0/server.ts#L10391)). Debe usar las mismas reglas, con identificación exacta; una coincidencia parcial no debe seleccionar silenciosamente varios productos.
+
+Los textos de reportes forenses deben distinguir datos comprobados, historia incompleta e hipótesis. Afirmar “integridad física validada” por una igualdad matemática o incluir narraciones causales preescritas no equivale a haber verificado esos hechos.
+
+## Qué ya funciona y debe conservarse
+
+Los controles C01–C13 pasan: altas/ingresos/ventas/devoluciones básicas, 500 operaciones sin divergencia, deduplicación secuencial de una venta normal, rechazo de cantidad negativa y precio alterado para vendedor, rollback completo por insuficiencia en una venta con varias líneas, tope acumulado de devolución, costo y tasa históricos, crédito BOB simple, protección secuencial de finalización/aprobación y los campos principales del GET ciego. La marca normal de eliminación también impide reinsertar un producto durante un pull.
+
+Esto permite hacer cambios localizados conservando esas garantías. No justifica sustituir el servidor completo ni reconstruir stock histórico automáticamente.
+
+## Plan de corrección sin reestructurar la aplicación
+
+**Paquete 1 — Eliminar escrituras que deshacen operaciones válidas.** Localizar los bloques de restauración por umbrales y convertirlos en diagnóstico de solo lectura; conservar restauraciones administrativas explícitas. Proteger la conciliación forense hasta corregir su libro y validar continuidad. Cambiar reinicio de turno por cierre lógico. Sustituir copias WAL por backup consistente. No borrar marcas ni comprobantes para “reparar”.
+
+**Paquete 2 — Una operación, una transacción.** Añadir funciones pequeñas reutilizables para validación de cantidades/importes, aplicación de movimientos y deduplicación. Reutilizar `processed_operations` con clave, tipo, huella de contenido y resultado. Rechazar una clave reutilizada con contenido distinto. La comprobación, registro único, stock, detalle, dinero y auditoría esencial deben confirmar o revertir juntos. Revisar duplicados existentes antes de crear índices únicos; no eliminarlos automáticamente. Validar cantidades enteras, finitas y positivas, IDs existentes y totales calculados en el servidor.
+
+**Paquete 3 — Conteo físico coherente.** GET sin escrituras; referencias de apertura y captura separadas; pertenencia sesión/ítem; unicidad; recuentos pendientes excluidos de aplicación; ambas rutas de cierre con una sola función y comprobación de estado dentro de su transacción. Cada ajuste se aplica una vez. No inventar referencias para sesiones antiguas. Los movimientos ambiguos requieren revisión del ítem sin detener todas las ventas. Mantener respuestas ciegas neutrales también al guardar.
+
+**Paquete 4 — Igualar rutas de venta.** Reutilizar las garantías de la venta normal en pendiente y aprobación offline mediante una función transaccional pequeña, conservando sus flujos y respuestas. Agregar la demanda por producto para comprobar disponibilidad; implementar reservas de pendientes; congelar terminales; enlazar pedido y venta. Registrar caja/crédito/puntos y todas las filas que deben replicarse. Corregir las consultas offline al esquema real y preservar el abono inicial.
+
+**Paquete 5 — Cálculo monetario compartido.** Usar una misma función probada para cálculo del servidor y vista previa del POS: moneda, tasa, líneas, descuentos, puntos y redondeo. Persistir el neto atribuible a cada línea y sus residuos, junto con costo y tasa históricos. Las devoluciones revierten ese neto y costo, reducen deuda cuando corresponde y solo devuelven dinero cobrado. Los abonos conservan moneda/tasa y no registran más de lo aceptado. El crédito offline registra lo recibido, no toda la deuda como caja. Los reportes muestran pérdidas y el costo reversible de devoluciones.
+
+**Paquete 6 — Réplica verificable y caché consistente.** Mantener stock y revisión juntos; bloquear colisiones de identidad; registrar eliminaciones de cabeceras y detalles; sustituir el criterio de máximo ID por operaciones/versiones confirmadas. Añadir una cola local pequeña de réplica pendiente dentro de la transacción para reintentar después de reinicios y no depender de promesas que se descartan. Confirmar qué instancia es autoridad de escritura. Devolver lista y versión en una misma lectura; nunca marcar una descarga vieja como nueva por una consulta posterior. La API de integridad relee el remoto después de intentar sincronizar.
+
+**Paquete 7 — Auditoría honesta y validación final.** Arreglar mapeo de campos y períodos, incluir altas/ajustes una sola vez y comparar cierres históricos con evidencia de ese momento. Separar “sin evidencia suficiente” de “saldo correcto”. Ejecutar las baterías antes/después del parche y luego pruebas HTTP, Firestore, PWA y permisos en un entorno aislado. Completar TypeScript/build y preparar diff por paquete contra el SHA vigente.
+
+Las modificaciones se concentran en `server.ts`, `database.ts`, `firebaseSync.ts`, `forensicAuditEngine.ts`, las fórmulas monetarias y los formularios/contexto afectados. Se conservan React, Express, SQLite, Firestore y las rutas públicas. Los cambios de esquema propuestos son aditivos; no se plantea migrar de plataforma ni recrear automáticamente tablas productivas.
+
+## Matriz completa de esta ampliación
+
+“Falla” indica que el resultado observado incumple la regla del caso; “Cumple” solo cubre esa prueba. El detalle y las condiciones se conservan en `cycle-results.json`.
+
+| ID | Regla comprobada | Estado | Esperado | Observado |
+|---|---|---|---|---|
+| C01 | Alta, ingreso, venta y devolución conservan el balance básico | Cumple | `{"ledger":20,"stock":20}` | `{"ledger":20,"stock":20}` |
+| C02 | Reintento de venta normal descuenta una sola vez | Cumple | `{"sales":1,"stock":8}` | `{"sales":1,"stock":8}` |
+| C03 | Venta con varias líneas del mismo producto revierte todo si falta stock | Cumple | `{"accepted":false,"items":0,"sales":0,"stock":10}` | `{"accepted":false,"items":0,"sales":0,"stock":10}` |
+| C04 | Devolución limita cantidad acumulada al máximo vendido | Cumple | `{"returned":3,"stock":15}` | `{"returned":3,"stock":15}` |
+| C05 | Venta conserva costo y tasa históricos tras cambios posteriores | Cumple | `{"cost":0.5,"exchange_rate":10}` | `{"cost":0.5,"exchange_rate":10}` |
+| C06 | Secuencia determinista de 500 operaciones mantiene stock, libro y caja | Cumple | `{"cash":1000,"ledger":458,"mismatches":0,"stock":458}` | `{"cash":1000,"ledger":458,"mismatches":0,"stock":458}` |
+| C07 | Precio alterado de vendedor se rechaza en venta normal | Cumple | `{"accepted":false,"stock":15}` | `{"accepted":false,"stock":15}` |
+| C08 | Cantidad negativa se rechaza en venta normal | Cumple | `{"accepted":false,"stock":15}` | `{"accepted":false,"stock":15}` |
+| C09 | Abono BOB concuerda con deuda y caja | Cumple | `{"cash":50,"debt":50}` | `{"cash":50,"debt":50}` |
+| C10 | Finalizar pendiente dos veces no descuenta dos veces en un proceso | Cumple | `{"retryAccepted":false,"sales":1,"stock":13}` | `{"retryAccepted":false,"sales":1,"stock":13}` |
+| C11 | Aprobar cola offline dos veces no descuenta dos veces en un proceso | Cumple | `{"retryAccepted":false,"sales":1,"stock":14}` | `{"retryAccepted":false,"sales":1,"stock":14}` |
+| C12 | GET de conteo ciego elimina los campos sensibles principales | Cumple | `{"leaked":[],"sanitized":true}` | `{"leaked":[],"sanitized":true}` |
+| C13 | Marca de eliminación protege el producto frente a pull normal | Cumple | `0` | `0` |
+| F01 | Devolución USD usa la tasa histórica real | Falla | `0` | `3.04` |
+| F02 | Devolver todo no reembolsa más de lo cobrado tras descuentos | Falla | `16` | `20` |
+| F03 | Reintento de devolución parcial no duplica unidades ni dinero | Falla | `{"returned":1,"stock":13}` | `{"returned":2,"stock":14}` |
+| F04 | Devolver toda una venta al crédito cancela la deuda pendiente | Falla | `0` | `80` |
+| F05 | Réplica explícita incluye los registros de devoluciones | Falla | `true` | `false` |
+| F06 | Abono a crédito USD mantiene moneda y conversión a caja | Falla | `50` | `5` |
+| F07 | Reintento de abono conserva un solo pago | Falla | `10` | `20` |
+| F08 | Cantidades de unidades deben ser enteros positivos | Falla | `{"accepted":false,"stock":15}` | `{"accepted":true,"stock":14.5}` |
+| F09 | Canje de puntos no excede el saldo real del cliente | Falla | `false` | `true` |
+| F10 | Error al registrar auditoría revierte el ajuste de producto completo | Falla | `{"accepted":false,"stock":15}` | `{"accepted":false,"stock":16}` |
+| P01 | Pedido pendiente impide vender las unidades ya comprometidas | Falla | `false` | `true` |
+| P02 | Guardar pendiente replica cabecera y detalle | Falla | `true` | `false` |
+| P03 | Finalizar pendiente registra caja inmediatamente | Falla | `20` | `0` |
+| P04 | La ruta pendiente valida el precio de un vendedor igual que POS | Falla | `false` | `true` |
+| P05 | Pedido completado no permite reescribir su detalle | Falla | `false` | `true` |
+| P06 | Abonos de pendiente y crédito final no exceden lo recibido | Falla | `{"paid_amount":100,"payments":100}` | `{"paid_amount":100,"payments":130}` |
+| O01 | Contingencia funciona con una base creada desde el esquema actual | Falla | `200` | `500` |
+| O02 | Aprobación offline no permite stock negativo por filas repetidas | Falla | `{"accepted":false,"stock":10}` | `{"accepted":true,"stock":-2}` |
+| O03 | Cantidad negativa en cola nunca incrementa stock al aprobar | Falla | `{"accepted":false,"stock":10}` | `{"accepted":true,"stock":15}` |
+| O04 | Crédito offline no registra dinero que no fue recibido | Falla | `0` | `100` |
+| A01 | Auditoría respeta una conciliación física aprobada | Falla | `{"approvedStock":7,"ledger":7,"reconciledStock":7}` | `{"approvedStock":7,"ledger":8,"reconciledStock":8}` |
+| A02 | Historia incompleta impide imponer un stock inferido | Falla | `{"rejected":true,"stock":8}` | `{"rejected":false,"stock":-7}` |
+| A03 | Auditoría registra cantidad anterior correctamente con snake_case | Falla | `{"quantity_after":8,"quantity_before":15,"quantity_changed":-7}` | `{"quantity_after":8,"quantity_before":-7,"quantity_changed":-7}` |
+| A04 | Auditoría del período incluye el stock de altas ocurridas dentro del período | Falla | `15` | `0` |
+| A05 | Reiniciar turno conserva ventas y relaciones históricas | Falla | `{"items":1,"orphans":0,"sales":1}` | `{"items":1,"orphans":1,"sales":0}` |
+| A06 | Auditar un período pasado no compara su cierre con stock posterior | Falla | `0` | `1` |
+| R01 | Utilidad tras devolución parcial conserva el costo que volvió a inventario | Falla | `5` | `0` |
+| R02 | Reporte conserva pérdidas en lugar de convertirlas en cero | Falla | `-10` | `0` |
+| R03 | Diagnóstico matemático usa moneda de entrada USD correctamente | Falla | `{"BOB":100,"USD":10}` | `{"BOB":10,"USD":1}` |
+| B01 | Conteo ciego no revela diferencia al registrar el físico | Falla | `"contado"` | `"diferencia"` |
+| S01 | Reeditar pedido no recupera líneas borradas desde Firestore | Falla | `{"qty":1,"rows":1}` | `{"qty":3,"rows":2}` |
+| S02 | Pedido eliminado no reaparece al sincronizar | Falla | `{"items":0,"orders":0}` | `{"items":1,"orders":1}` |
+| S03 | Pull normal conserva juntos stock y fecha de la versión elegida | Falla | `{"stock":0,"updated_at":"2026-10-24T10:00:00-04:00"}` | `{"stock":0,"updated_at":"2026-10-24T08:00:00-04:00"}` |
+| S04 | SKU remoto colisionado no reemplaza la identidad de un producto | Falla | `[{"id":1,"sku":"SKU-1","stock":8}]` | `[{"id":999,"sku":"SKU-1","stock":30}]` |
+| S05 | Push incremental no omite un hueco de IDs anterior al máximo remoto | Falla | `["1","2"]` | `["2"]` |
+| S06 | Idempotencia resiste dos comprobaciones previas intercaladas | Falla | `{"sales":1,"stock":13}` | `{"sales":2,"stock":11}` |
+| S07 | Dos SQLite escritoras independientes no pierden ventas al compartir Firestore | Falla | `{"cloudStock":1,"sales":2}` | `{"cloudStock":8,"sales":1}` |
+| S08 | Verificación posterior no afirma reparación si la réplica no cambió | Falla | `false` | `true` |
+| Q01 | Caché no etiqueta un catálogo viejo con una versión posterior a otra venta | Falla | `7` | `8` |
+| D01 | Snapshot copia todas las escrituras confirmadas mientras SQLite usa WAL | Falla | `1` | `0` |
+
+## Cómo interpretar los casos condicionados
+
+- **S06:** intercalado determinista entre preconsulta y transacción; no se ejecutaron solicitudes HTTP paralelas.
+- **S07:** dos instancias con SQLite independientes y Firestore compartido simulado; topología real pendiente de verificar.
+- **F10 y S08:** inyección deliberada de un fallo de auditoría y de una réplica sin transferencia.
+- **O02–O04:** bandeja ya existente con datos ficticios; la recepción sobre esquema recién creado se prueba por separado en O01.
+- **Q01:** orden controlado de respuestas a la función real del cliente; no es una grabación del navegador productivo.
+- **D01:** escritura confirmada en WAL de una base temporal propia y ejecución de la función real de snapshot.
+
+## Estado de la solución y reparación de datos históricos
+
+El diagnóstico ampliado y las reproducciones están completados para el commit revisado. La implementación del parche, las pruebas integradas y su aplicación siguen pendientes. El paquete adjunto permite comprobar los casos sin instalar dependencias del proyecto ni abrir una base comercial.
+
+La corrección del código evita nuevos desajustes; corregir los saldos ya afectados es un trabajo separado. Antes de modificar cantidades reales se necesita una copia consistente vigente, el historial disponible, el commit desplegado y un punto de inventario comprobado. Cuando falte continuidad, el resultado debe ser “no determinable con los registros actuales”, no cero ni un stock estimado presentado como definitivo.
+
+No se puede prometer ausencia absoluta de errores con una revisión de código. Sí se puede exigir que los cambios pasen las reglas anteriores, cubran cada ruta de escritura y dejen evidencia reproducible cuando una operación no pueda completarse.
+
+

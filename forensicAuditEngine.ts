@@ -38,6 +38,7 @@ export interface ProductForensicAuditResult {
   totalAdjustmentsDec: number;
   totalReturns: number;
   anomaliesDetected: number;
+  hasSufficientHistory: boolean;
   timeline: ProductLedgerEvent[];
   identifiedGaps: Array<{
     timestamp: string;
@@ -148,9 +149,8 @@ export function getProductForensicTimeline(
     FROM inventory_audit_logs
     WHERE product_id = ? 
       AND type NOT IN ('salida_venta', 'ingreso_compra')
-      AND reference NOT LIKE 'Auditoría%'
-      AND reference NOT LIKE 'Conciliación%'
-      AND reference NOT LIKE 'Blindaje%'
+      AND reference NOT LIKE 'Auditoría Forense%'
+      AND reference NOT LIKE 'Auditoría Automática%'
   `;
   const adjParams: any[] = [productId];
   if (options?.startDate) {
@@ -257,11 +257,11 @@ export function getProductForensicTimeline(
 
   // Add adjustments
   for (const adj of adjustments) {
-    // Avoid double counting forensic audit reconciliation logs created by the shield itself
+    // Avoid double counting self-generated forensic audit reconciliation logs
     if (
       adj.reference === 'Auditoría Forense de Stock' || 
       adj.reference === 'Auditoría Automática de Blindaje' ||
-      (adj.reference && (adj.reference.startsWith('Auditoría') || adj.reference.startsWith('Blindaje') || adj.reference.startsWith('Conciliación')))
+      (adj.reference && (adj.reference.startsWith('Auditoría Forense') || adj.reference.startsWith('Auditoría Automática')))
     ) {
       continue;
     }
@@ -385,6 +385,7 @@ export function getProductForensicTimeline(
     totalAdjustmentsDec,
     totalReturns,
     anomaliesDetected: anomaliesCount + (isBalanced ? 0 : 1),
+    hasSufficientHistory: Boolean(createLog) || arrivals.length > 0,
     timeline,
     identifiedGaps
   };
@@ -777,6 +778,46 @@ export function auditDatabaseByPeriod(filter: PeriodAuditFilter): PeriodAuditRes
     }
   }
 
+  // 3b. Pre-fetch after-period movements (to compute historical cutoff stock if auditing a closed past period - A06)
+  const isHistoricalPeriod = endStr < nowBolivia.substring(0, 19);
+
+  let arrAfterMap = new Map<number, number>();
+  let salesAfterMap = new Map<number, number>();
+  let adjsAfterMap = new Map<number, { inc_qty: number; dec_qty: number }>();
+
+  if (isHistoricalPeriod) {
+    const arrAfter = db.prepare(`
+      SELECT product_id, COALESCE(SUM(quantity), 0) as total_qty
+      FROM stock_arrivals
+      WHERE substr(created_at, 1, 19) > ?
+      GROUP BY product_id
+    `).all(endStr) as any[];
+    arrAfterMap = new Map(arrAfter.map(a => [a.product_id, a.total_qty]));
+
+    const salesAfter = db.prepare(`
+      SELECT si.product_id, COALESCE(SUM(si.quantity), 0) as total_qty
+      FROM sale_items si
+      JOIN sales s ON si.sale_id = s.id
+      WHERE substr(s.created_at, 1, 19) > ?
+      GROUP BY si.product_id
+    `).all(endStr) as any[];
+    salesAfterMap = new Map(salesAfter.map(s => [s.product_id, s.total_qty]));
+
+    const adjsAfter = db.prepare(`
+      SELECT 
+        product_id,
+        COALESCE(SUM(CASE WHEN type IN ('ajuste_incremento', 'ingreso_devolucion') THEN quantity ELSE 0 END), 0) as inc_qty,
+        COALESCE(SUM(CASE WHEN type = 'ajuste_decremento' THEN quantity ELSE 0 END), 0) as dec_qty
+      FROM inventory_audit_logs
+      WHERE reference NOT LIKE 'Auditoría%'
+        AND reference NOT LIKE 'Blindaje%'
+        AND reference NOT LIKE 'Conciliación%'
+        AND substr(created_at, 1, 19) > ?
+      GROUP BY product_id
+    `).all(endStr) as any[];
+    adjsAfterMap = new Map(adjsAfter.map(a => [a.product_id, a]));
+  }
+
   // 4. Compute item-by-item balance
   const auditedProducts: PeriodProductAudit[] = [];
   const anomalies: PeriodAuditResult['anomalies'] = [];
@@ -795,7 +836,9 @@ export function auditDatabaseByPeriod(filter: PeriodAuditFilter): PeriodAuditRes
     const cl = createLogMap.get(p.id);
     const initStock = cl ? (Number(cl.quantity_after) || 0) : 0;
     const isCreatedBefore = cl ? (cl.created_at < startStr) : true;
+    const isCreatedInPeriod = cl ? (cl.created_at >= startStr && cl.created_at <= endStr) : false;
     const effectiveInit = isCreatedBefore ? initStock : 0;
+    const creationInPeriodStock = isCreatedInPeriod ? initStock : 0;
 
     const arrB = arrBeforeMap.get(p.id) || 0;
     const saleB = salesBeforeMap.get(p.id) || 0;
@@ -813,11 +856,21 @@ export function auditDatabaseByPeriod(filter: PeriodAuditFilter): PeriodAuditRes
     totalSalesAmount += saleP.total_money;
     totalAdjustmentsCount += adjP.cnt;
 
-    const expectedClosingStock = openingStock + arrP.total_qty - saleP.total_qty + adjP.inc_qty - adjP.dec_qty;
+    // A04: Include creation initial stock if created within this period
+    const expectedClosingStock = openingStock + creationInPeriodStock + arrP.total_qty - saleP.total_qty + adjP.inc_qty - adjP.dec_qty;
     const currentStock = Number(p.stock) || 0;
 
-    // Discrepancy calculation
-    const diff = currentStock - expectedClosingStock;
+    // A06: Reconstruct actual recorded stock as of the cutoff date if auditing a past closed period
+    let recordedClosingStock = currentStock;
+    if (isHistoricalPeriod) {
+      const arrA = arrAfterMap.get(p.id) || 0;
+      const saleA = salesAfterMap.get(p.id) || 0;
+      const adjA = adjsAfterMap.get(p.id) || { inc_qty: 0, dec_qty: 0 };
+      recordedClosingStock = currentStock - arrA + saleA - (adjA.inc_qty - adjA.dec_qty);
+    }
+
+    // Discrepancy calculation against the recorded cutoff stock
+    const diff = recordedClosingStock - expectedClosingStock;
     const isBalanced = diff === 0;
 
     if (isBalanced) {
@@ -832,16 +885,16 @@ export function auditDatabaseByPeriod(filter: PeriodAuditFilter): PeriodAuditRes
         productName: p.name,
         sku: p.sku,
         type: diff > 0 ? 'SOBRE-STOCK_DETECTADO' : 'FALTANTE_INVENTARIO',
-        description: `El producto ${p.name} (SKU: ${p.sku}) tiene ${currentStock} uds en ficha pero el saldo esperado por movimientos es ${expectedClosingStock} uds (Desfase: ${diff > 0 ? '+' : ''}${diff} uds)`,
+        description: `El producto ${p.name} (SKU: ${p.sku}) registró ${recordedClosingStock} uds al cierre pero el saldo esperado por movimientos es ${expectedClosingStock} uds (Desfase: ${diff > 0 ? '+' : ''}${diff} uds)`,
         operator: 'auditoría_sistema',
         expectedStock: expectedClosingStock,
-        recordedStock: currentStock,
+        recordedStock: recordedClosingStock,
         gap: diff,
         recommendation: `Ejecutar conciliación certificada para reajustar ficha de catálogo a ${expectedClosingStock} uds.`
       });
     }
 
-    const hasMovement = arrP.cnt > 0 || saleP.cnt > 0 || adjP.cnt > 0;
+    const hasMovement = arrP.cnt > 0 || saleP.cnt > 0 || adjP.cnt > 0 || isCreatedInPeriod;
 
     if (!filter.onlyDiscrepancies || !isBalanced) {
       auditedProducts.push({
@@ -858,7 +911,7 @@ export function auditDatabaseByPeriod(filter: PeriodAuditFilter): PeriodAuditRes
         periodAdjustmentsInc: adjP.inc_qty,
         periodAdjustmentsDec: adjP.dec_qty,
         expectedClosingStock,
-        closingRecordedStock: currentStock,
+        closingRecordedStock: recordedClosingStock,
         discrepancy: diff,
         isBalanced,
         hasMovementInPeriod: hasMovement
@@ -1055,6 +1108,17 @@ export function reconcileProductDiscrepancy(
 
   const expectedStock = timeline.calculatedLedgerStock;
   const currentStock = Number(p.stock) || 0;
+
+  // A02: Insufficient historical baseline prevents imposing inferred or negative stock
+  if (!timeline.hasSufficientHistory || expectedStock < 0) {
+    return {
+      success: false,
+      rejected: true,
+      message: 'Historia incompleta o sin saldo inicial validado; no se puede imponer stock inferido.',
+      updatedStock: currentStock
+    } as any;
+  }
+
   const diff = expectedStock - currentStock;
 
   if (diff === 0) {
