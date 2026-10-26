@@ -1,116 +1,118 @@
-# Plan de Remediación Crítica: Base de Datos y Caja (GTR POS)
+# Restauración Integral del Historial y Kárdex de Movimientos de Productos
 
-Plan de ingeniería para corregir de forma segura, modular y verificada las fallas críticas de base de datos, idempotencia, matemática monetaria de caja y gestión de stock señaladas en el documento de mejoras de auditoría.
+Este plan describe la arquitectura y estrategia de implementación para restaurar por completo la trazabilidad de productos en GTR POS, unificando compras (`stock_arrivals`), ventas en mostrador (`sale_items`), devoluciones (`sale_returns`), ajustes por conteo físico (`inventory_counts`) y creación de catálogo con cálculo dinámico de saldos anteriores y posteriores.
 
-## Decisiones Críticas y Alcance Confirmado
+## User Review & Critical Decisions
 
 > [!IMPORTANT]
-> Siguiendo la respuesta del usuario, el alcance de esta intervención se enfoca **únicamente en las fallas críticas de base de datos y caja/moneda**, ejecutado **por fases con verificación automatizada por bloque**.
+> Se han incorporado las decisiones confirmadas por el usuario en la fase de clarificación interactiva:
 
-- **Alcance Acordado**: Base de datos, idempotencia (`processed_operations`), arqueo y matemática de caja (`credits`, `sales`, `returns`), conteo físico y disponibilidad de inventario.
-- **Exclusiones Acordadas**: Cambios cosméticos de UI no relacionados con la integridad transaccional de caja y base de datos.
-- **Estrategia**: Cero pérdida de datos comerciales, migración retrocompatible en SQLite y suite de pruebas automatizadas por bloque antes del pase final.
+- **Alcance Transaccional**: Reconstrucción integral multi-fuente a partir de todas las tablas vivas (`stock_arrivals`, `sale_items`, `sales`, `sale_returns`, `inventory_counts`, `inventory_count_items`, `inventory_audit_logs`, `system_audit_logs` y `products`). Ningún producto se mostrará vacío o con `(0)` movimientos si tiene inventario o transacciones registradas.
+- **Formato del Kárdex**: Kárdex cronológico completo que detalla explícitamente el saldo anterior (`quantity_before`), el cambio neto (`quantity_changed`) y el saldo resultante (`quantity_after`) para cada operación.
+- **Seguridad y Permisos de Costo**: Protección estricta de costos unitarios y precios de compra (`price_cost`, `arrival_price`), mostrándolos únicamente a usuarios con rol `admin`/propietario o permiso explícito `view_costs`.
 
 ---
 
-## 1. Visión General del Sistema y Flujo Afectado
+## 1. Overview & Core Concept
+
+- **El Problema**: Al abrir la opción **"Ver Historial"** en la pestaña de Stock/Caja (o expandir los detalles de cualquier artículo como el Samsung S26 Ultra SKU 229 del video), el modal mostraba `TODOS (0)` y *"No se encontraron registros de movimiento para este producto"*. Esto ocurría porque el endpoint `/api/products/:id/audit-history` dependía exclusivamente de la tabla auxiliar `inventory_audit_logs`, la cual no contiene registros de productos creados sin bitácora previa o cuya descarga en la sincronización Firestore está restringida.
+- **La Solución**: Construir un motor de síntesis de kárdex en `/api/products/:id/audit-history` que consolide de forma fidedigna e inmutable todas las operaciones transaccionales reales registradas en SQLite y Firestore, ordenadas cronológicamente y con cálculo inverso del balance vivo de stock.
 
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        ARQUITECTURA DE DATOS Y CAJA                    │
-└────────────────────────────────────────────────────────────────────────┘
-
-    [Cliente POS / PWA]
-            │
-            ▼
-    ┌──────────────────────┐      ┌───────────────────────────────────┐
-    │ POST /api/sales      │ ───► │ Idempotencia: processed_operations│ (Fase 1: T01)
-    │ POST /api/returns    │      │ (Validación de hash y op_id único)│
-    └──────────────────────┘      └───────────────────────────────────┘
-            │
-            ▼
-    ┌──────────────────────┐      ┌───────────────────────────────────┐
-    │ Devoluciones Múltiples│ ───► │ sale_returns (op_id compuesto)    │ (Fase 3: T04, T19)
-    │ Cuentas por Cobrar   │ ───► │ Abonos USD/BOB con tasa de cambio │ (Fase 3: T24)
-    └──────────────────────┘      └───────────────────────────────────┘
-            │
-            ▼
-    ┌──────────────────────┐      ┌───────────────────────────────────┐
-    │ Conteo de Inventario │ ───► │ Delta relativo sobre stock vivo   │ (Fase 2: T02, T03)
-    │ Pedidos y Reservas   │ ───► │ Validación sum(items) y stock neto│ (Fase 4: T15, T16, T25)
-    │ Ventas Offline       │ ───► │ offline_pending_sales (+abono)    │ (Fase 4: T17)
-    └──────────────────────┘      └───────────────────────────────────┘
-            │
-            ▼
-    ┌─────────────────────────────────────────────────────────────────┐
-    │ SQLite Core Engine (gtr_pos.db & gtr_pos_sandbox.db)            │
-    │ Respaldos en caliente con API nativa: db.backup() (Fase 5: T10)  │
-    └─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                      FUENTES TRANSACCIONALES VIVAS (SQLITE / FIRESTORE)           │
+├─────────────────┬──────────────────┬──────────────────┬──────────────────────────┤
+│ Compras/Lotes   │ Ventas Mostrador │ Devoluciones     │ Auditorías Físicas       │
+│ stock_arrivals  │ sale_items+sales │ sale_returns     │ inventory_counts/items   │
+└────────┬────────┴────────┬─────────┴────────┬─────────┴────────────┬─────────────┘
+         │                 │                  │                      │
+         └─────────────────┼──────────────────┴──────────────────────┘
+                           ▼
+     ┌───────────────────────────────────────────────────────────────┐
+     │  MOTOR DE SÍNTESIS DE KÁRDEX FORENSE (/api/products/:id/audit)│
+     │  - Deduplica registros y fusiona referencias de tickets       │
+     │  - Reconstruye matemáticamente: Antes -> Delta -> Después     │
+     │  - Filtra costos según rol del usuario solicitante            │
+     │  - Inyecta evento de Creación Inicial con stock de apertura   │
+     └─────────────────────────────┬─────────────────────────────────┘
+                                   │
+                                   ▼
+     ┌───────────────────────────────────────────────────────────────┐
+     │       INTERFAZ DE USUARIO: MODAL Y TABLA DE HISTORIAL         │
+     │  - Tabs funcionales: Todos | Ingresos | Salidas | Precios     │
+     │  - Desglose visual: Fecha, Usuario, Ticket, Diferencial       │
+     └───────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 2. Plan de Implementación por Fases
+## 2. User Experience & Visual Design
 
-### Fase 1: Unificación de Esquema e Idempotencia en Base de Datos (T01 & T18)
-- **Problema**: En `database.ts`, existen dos sentencias `CREATE TABLE IF NOT EXISTS processed_operations` contradictorias. La primera omite `client_operation_id`, provocando en cada arranque del servidor el error: `SqliteError: no such column: client_operation_id`. Esto anula el control de idempotencia y deja desprotegidas las ventas y cobros ante reintentos.
-- **Acción**:
-  1. Unificar la definición canónica de `processed_operations` en `database.ts` con todas las columnas requeridas: `id`, `client_operation_id UNIQUE NOT NULL`, `operation_type`, `payload_hash`, `response_body`, `status`, `created_at`.
-  2. Implementar una migración segura que detecte si la tabla existente carece de `client_operation_id`, migrando los registros o actualizando la tabla sin destruir datos.
-  3. Aplicar tanto en `gtr_pos.db` como en `gtr_pos_sandbox.db`.
+### Flujo de Usuario
+1. El usuario navega a **Stock / Caja** (`Inventory.tsx`).
+2. En la ficha de cualquier producto (ej. *Samsung S26 Ultra 512GB*), pulsa **"Ver Historial"** o el icono de reloj/kárdex.
+3. Se abre el modal centrado con carga instantánea y datos poblados:
+   - **Encabezado y Metadatos**: SKU, Categoría, Stock actual en vivo y Precio de venta con tipografía monoespaciada tabular (`tabular-nums`).
+   - **Segmented Filter Tabs**:
+     - **Todos ($N$)**: Línea de tiempo completa.
+     - **Ingresos ($N_i$)**: Compras de existencias, devoluciones aprobadas, incrementos físicos y stock inicial.
+     - **Salidas ($N_s$)**: Ventas en mostrador, mermas y decrementos de conteo.
+     - **Precios / Costos ($N_p$)**: Modificaciones históricas de precios de venta y costos de lote.
+     - **Cantidades ($N_c$)**: Todos los movimientos que alteraron el número de unidades físicas.
+4. Cada tarjeta de movimiento muestra:
+   - **Distintivo de Acción**: Icono contextual y etiqueta (ej. *"Venta Realizada"*, *"Compra de Existencias"*, *"Devolución de Cliente"*, *"Creación de Producto"*).
+   - **Referencia y Responsable**: Ticket/factura vinculado (ej. `Venta #104`, `Ingreso #12`) y usuario que autorizó el movimiento.
+   - **Bloque de Trazabilidad Matemática**: `Antes: X pz → Después: Y pz • Dif: ±Z pz`.
+   - **Fecha y Hora**: Formato legible local (Bolivia GMT-4).
 
-### Fase 2: Conteo Físico y Estados de Inventario (T02 & T03)
-- **Problema**:
-  - **T02**: En `server.ts`, la aprobación de conteos calcula `delta = physical - snapshot`. Si se vendieron unidades entre el inicio del conteo y la aprobación, la venta se resta dos veces, corrompiendo el stock hacia abajo.
-  - **T03**: En `firebaseSync.ts`, el filtro de estados locales protege `['cancelado', 'aprobado', 'cerrado']` pero omite `finalizado`, permitiendo que un documento remoto desaprobado reabra un conteo y duplique el ajuste de stock.
-- **Acción**:
-  1. En `server.ts:approveInventoryCount`, calcular el delta de ajuste con respecto al stock vivo actual o fijar el stock físico contado directamente si el proceso fue de conteo ciego validado.
-  2. En `firebaseSync.ts`, incorporar `finalizado` a la lista de estados locales terminales protegidos e impedir que `applied_at` se sobreescriba si el conteo ya impactó el inventario.
-
-### Fase 3: Caja, Devoluciones y Matemática Monetaria (T04, T19 & T24)
-- **Problema**:
-  - **T04**: El índice `idx_sale_returns_client_op_id` es único por fila en `sale_returns`. Al procesar devoluciones con múltiples productos bajo un mismo ticket/petición, la segunda fila choca con la restricción UNIQUE y hace rollback con error 500.
-  - **T24**: En `POST /api/credits/:id/payments`, los abonos en Bolivianos se restan directamente del saldo en Dólares (`remaining - payAmount`), borrando deudas en dólares con centavos de bolivianos.
-  - **T19**: En devoluciones parciales sucesivas, los redondeos unitarios pueden acumular reembolsos superiores al total original efectivamente pagado.
-- **Acción**:
-  1. En `database.ts` y `server.ts`, ajustar la clave de idempotencia de líneas de devolución a nivel de item (`${client_operation_id}_item_${item.id}`) o registrar el `client_operation_id` a nivel de cabecera de devolución.
-  2. En `server.ts`, aplicar la conversión de divisa estricta al abonar a una deuda en USD con BOB: `montoAbonadoUSD = payAmount / exchangeRate`, actualizando la deuda en USD y registrando en caja el ingreso real en BOB.
-  3. En `server.ts`, topear el reembolso acumulado al subtotal neto pagado de la compra original.
-
-### Fase 4: Reservas de Stock, Validación de Pedidos y Caja Offline (T15, T16, T17 & T25)
-- **Problema**:
-  - **T25**: `POST /api/pending-sales` confía en el campo `total` enviado en el cuerpo de la petición sin recalcularlo en el servidor a partir de los ítems.
-  - **T15 & T16**: No se valida la disponibilidad neta (`stock - getReservedStock`) al registrar pedidos ni al aprobar ventas offline, provocando sobregiros de stock.
-  - **T17**: La tabla `offline_pending_sales` no incluye la columna `initial_abono`, por lo que el anticipo cobrado al cliente en una venta a crédito fuera de línea desaparece del arqueo de caja.
-- **Acción**:
-  1. En `database.ts`, añadir la columna `initial_abono REAL DEFAULT 0` a `offline_pending_sales` mediante migración segura.
-  2. En `server.ts`, validar en el backend que `total == round(sum(price * quantity) - discount, 2)` en pedidos pendientes.
-  3. En `server.ts`, verificar disponibilidad real antes de confirmar reservas y aprobar ventas offline.
-  4. Al aprobar ventas offline a crédito con anticipo, ingresar dicho monto real a los movimientos de caja activa.
-
-### Fase 5: Respaldos Físicos Online en SQLite (T10)
-- **Problema**:
-  - Las copias de respaldo mediante `fs.copyFileSync` mientras SQLite opera con WAL pueden generar archivos `.db` incompletos o inconsistentes si hay páginas en el archivo `-wal` que no han sido checkpointed.
-- **Acción**:
-  1. Implementar la rutina de respaldo usando la API nativa asíncrona de better-sqlite3: `db.backup(destinationPath)`.
-  2. Asegurar que las descargas de respaldo desde la UI y los respaldos automáticos utilicen este mecanismo transaccional seguro.
-
-### Fase 6: Batería de Pruebas Automatizadas y Certificación
-- **Acción**:
-  1. Crear una suite de pruebas automatizada dedicada (`tests/txt_critical_fixes_runner.cjs`) que simule y certifique cada una de las correcciones implementadas:
-     - Prueba de arranque e inserción idempotente en `processed_operations`.
-     - Prueba de abono en BOB sobre deuda en USD con conversión de tipo de cambio.
-     - Prueba de devolución multilínea con el mismo ID de cliente.
-     - Prueba de aprobación de conteo físico sin doble descuento de stock.
-     - Prueba de validación de total recalculado en pedidos pendientes.
-     - Prueba de persistencia de anticipo de venta offline en arqueo de caja.
-     - Prueba de integridad de backup con `db.backup()`.
-  2. Ejecutar la suite completa y confirmar 100% de pruebas aprobadas antes del cierre.
+### Directrices Visuales (Frontend Design Constitution)
+- **Cero Pills Estáticas**: Las insignias de estado y metadatos se presentan sin cápsulas de caramelo, utilizando tipografía limpia, jerarquía nítida y separadores sutiles (`·`).
+- **Tabular Figures**: Todos los números, stocks y montos utilizan `font-mono tabular-nums`.
+- **Segmented Buttons**: Botones de filtro interactivos con fondo segmentado sobrio y respuesta inmediata ($\le 200\text{ms}$).
 
 ---
 
-## 3. Decisiones Técnicas y Salvaguardas
+## 3. Key Product Decisions & Trade-Offs
 
-- **Preservación de Datos**: Las bases de datos `gtr_pos.db` y `gtr_pos_sandbox.db` ya cuentan con respaldo frío en `backups/`. Las modificaciones de esquema utilizarán `ALTER TABLE` o tablas temporales con copia idempotente, sin sentencias `DROP TABLE` destructivas.
-- **Transaccionalidad en SQLite**: Toda operación compuesta (ej. venta + caja + stock + auditoría) continuará encapsulada en `db.transaction(...)`.
-- **Aislamiento Sandbox/Producción**: Se mantiene la separación estricta mediante `dbAsyncLocalStorage`.
+- **Decisión 1: Síntesis Dinámica vs. Migración de Filas Estáticas**
+  - *Enfoque*: El endpoint `/api/products/:id/audit-history` generará la respuesta sintetizando directamente las tablas primarias (`stock_arrivals`, `sale_items`, `sale_returns`, etc.) en lugar de depender únicamente de una tabla de log desnormalizada.
+  - *Razón*: Garantiza resiliencia total frente a sincronizaciones parciales de Firestore, importaciones de Excel o purgas de bitácoras. Los movimientos reales jamás se perderán mientras existan las ventas o compras.
+- **Decisión 2: Trazabilidad de Stock Inicial en Creación**
+  - *Enfoque*: Si un producto fue registrado con stock inicial (ej. 1 unidad) pero no cuenta con un log explícito en `inventory_audit_logs`, el sistema sintetiza un evento `'creacion_producto'` usando la fecha de creación del producto y su stock de apertura.
+  - *Razón*: Soluciona exactamente el caso del video, donde un producto recién dado de alta con 1 unidad figuraba con 0 movimientos.
+- **Decisión 3: Enmascaramiento de Costos por Rol**
+  - *Enfoque*: Si el usuario es un cajero estándar, las propiedades `price` en compras y `price_cost` en cambios de costo se envían como `null` y se ocultan en la interfaz visual.
+  - *Razón*: Cumple con las políticas de confidencialidad financiera confirmadas por el usuario.
+
+---
+
+## 4. Technical Architecture & Data Strategy
+
+### Componentes y Rutas Afectadas
+
+1. **`server.ts` (`GET /api/products/:id/audit-history`)**:
+   - Reemplazar la consulta exclusiva a `inventory_audit_logs` por una consulta multi-fuente que integre:
+     - `stock_arrivals` (entradas por compra).
+     - `sale_items` JOIN `sales` JOIN `users` (salidas por venta).
+     - `sale_returns` JOIN `sales` (entradas por devolución).
+     - `inventory_count_items` JOIN `inventory_counts` (ajustes físicos con diferencia no nula).
+     - `inventory_audit_logs` (ajustes manuales deduplicados contra compras/ventas ya procesadas).
+     - `system_audit_logs` (cambios de precios y costos).
+     - Registro inicial del producto (`products.created_at`, stock inicial).
+   - Aplicar el algoritmo de barrido cronológico inverso para calcular consistentemente `quantity_before`, `quantity_after` y `quantity_changed`.
+   - Aplicar control de permisos sobre campos financieros según el token verificado (`verifiedUser`).
+
+2. **`firebaseSync.ts`**:
+   - Ajustar la sincronización de `inventory_audit_logs` y `system_audit_logs` para ordenar por `created_at` descendente o priorizar la integridad local, asegurando que los registros más recientes estén disponibles.
+
+3. **`src/views/Inventory.tsx`**:
+   - Verificar que el modal de historial (`showStockHistoryModal`) y la vista detallada inline (`renderProductHistoryLogs`) consuman de forma idéntica los registros unificados.
+   - Refinar los contadores de las pestañas (`Todos`, `Ingresos`, `Salidas`, `Precios/Costos`, `Cantidades`) para mapear con precisión los tipos de eventos sintetizados.
+
+### Plan de Verificación Automatizada
+
+- **Prueba 1**: Producto con compras, ventas y devoluciones refleja todos los movimientos en sus respectivas pestañas.
+- **Prueba 2**: Producto recién creado con stock inicial muestra el evento de creación inicial con saldo 0 $\rightarrow$ stock inicial.
+- **Prueba 3**: Cajero sin permisos no visualiza costos de compra en el payload ni en la UI.
+- **Prueba 4**: Ejecutar suite completa de no-regresión (`txt_critical_fixes_runner.cjs`, `audit_cycle_runner.cjs`, `verify_pre_production_readiness.cjs`).
+- **Prueba 5**: `compile_applet` y `lint_applet` al 100% limpios.

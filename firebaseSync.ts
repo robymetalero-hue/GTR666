@@ -669,7 +669,11 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
         try {
           let snapshot;
           if (table === 'firestore_transaction_ledger' || table === 'system_audit_logs' || table === 'inventory_audit_logs') {
-            snapshot = await getDocs(query(collection(firestore, getCollectionName(table)), limit(100)));
+            try {
+              snapshot = await getDocs(query(collection(firestore, getCollectionName(table)), orderBy('created_at', 'desc'), limit(150)));
+            } catch (_) {
+              snapshot = await getDocs(query(collection(firestore, getCollectionName(table)), limit(100)));
+            }
           } else {
             snapshot = await getDocs(collection(firestore, getCollectionName(table)));
           }

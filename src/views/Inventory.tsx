@@ -707,11 +707,11 @@ export default function Inventory() {
                                                 {sideDiffText}
                                             </span>
                                             <span className="text-[8px] text-slate-400 dark:text-slate-500 font-mono font-bold mt-0.5">
-                                                Valuado: {log.price !== undefined ? `$${(log.price || 0).toFixed(2)}` : 'N/A'}
+                                                Valuado: {log.price !== undefined && log.price !== null ? `$${(Number(log.price) || 0).toFixed(2)}` : 'Protegido'}
                                             </span>
-                                            {exchangeRate && log.price !== undefined && (
+                                            {exchangeRate && log.price !== undefined && log.price !== null && (
                                                 <span className="text-[7.5px] text-slate-400 font-mono mt-0.5 font-semibold">
-                                                    (Bs. {((log.price || 0) * exchangeRate).toFixed(2)})
+                                                    (Bs. {((Number(log.price) || 0) * exchangeRate).toFixed(2)})
                                                 </span>
                                             )}
                                         </div>
@@ -3639,7 +3639,7 @@ export default function Inventory() {
                                                                 {sideDiffText}
                                                             </span>
                                                             <span className="text-[8px] text-slate-400 dark:text-slate-500 font-mono font-bold mt-0.5">
-                                                                Valuado: {log.price !== undefined ? `$${(log.price || 0).toFixed(2)} USD` : 'N/A'}
+                                                                Valuado: {log.price !== undefined && log.price !== null ? `$${(Number(log.price) || 0).toFixed(2)} USD` : 'Protegido'}
                                                             </span>
                                                         </div>
                                                     )}

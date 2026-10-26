@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan de implementación estructurado por fases para resolver exclusivamente las fallas críticas de base de datos y caja/monetarias identificadas en el archivo de auditoría. Incluye migración idempotente de processed_operations, matemática de conteos físicos, conversión de moneda en cuentas por cobrar, unicidad en devoluciones multilínea, validación de totales y reservas, persistencia de anticipos offline y respaldos nativos con db.backup().",
-  "updatedAt":  "2026-10-26T11:38:25.286312636Z",
+  "summary":  "Plan de implementación para la restauración integral del historial de movimientos de productos (kárdex multi-fuente continuo, saldo anterior/posterior, y control de visibilidad de costos por rol).",
+  "updatedAt":  "2026-10-26T21:03:56.466847748Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

@@ -3321,7 +3321,9 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
       const canViewCosts = isAdmin || !!userPerms.view_costs || !!userPerms.financial_reports;
 
-      // Get all stock arrivals for this product
+      const product = db.prepare('SELECT id, stock, price_unit, updated_at FROM products WHERE id = ?').get(id) as any;
+
+      // 1. Stock arrivals
       const arrivals = db.prepare(`
         SELECT 
           'ingreso' as type,
@@ -3338,7 +3340,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         arrivals.forEach(a => { a.price = null; });
       }
 
-      // Get all sales for this product
+      // 2. Sales
       const sales = db.prepare(`
         SELECT 
           'salida' as type,
@@ -3351,12 +3353,54 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         JOIN sales s ON si.sale_id = s.id
         LEFT JOIN users u ON s.user_id = u.id
         WHERE si.product_id = ?
-      `).all(id);
+      `).all(id) as any[];
 
-      // Combine and sort by date descending
-      const combined = [...arrivals, ...sales].sort((a: any, b: any) => {
-        return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
-      });
+      // 3. Customer returns
+      const returns = db.prepare(`
+        SELECT 
+          'devolucion' as type,
+          sr.quantity,
+          sr.unit_price as price,
+          sr.created_at,
+          'Devolución #' || sr.sale_id as reference,
+          COALESCE(sr.username, COALESCE(u.username, 'Cajero')) as user
+        FROM sale_returns sr
+        LEFT JOIN sales s ON sr.sale_id = s.id
+        LEFT JOIN users u ON sr.user_id = u.id
+        WHERE sr.product_id = ?
+      `).all(id) as any[];
+
+      // 4. Physical inventory counts
+      const counts = db.prepare(`
+        SELECT 
+          CASE WHEN ici.difference > 0 THEN 'ingreso' ELSE 'salida' END as type,
+          abs(ici.difference) as quantity,
+          0 as price,
+          COALESCE(ic.applied_at, COALESCE(ic.completed_at, ici.reviewed_at)) as created_at,
+          'Auditoría #' || ici.inventory_count_id as reference,
+          COALESCE(ic.approved_by_username, COALESCE(ic.auditor_name, ic.username)) as user
+        FROM inventory_count_items ici
+        JOIN inventory_counts ic ON ici.inventory_count_id = ic.id
+        WHERE ici.product_id = ? AND ici.difference IS NOT NULL AND ici.difference != 0
+          AND ic.status IN ('finalizado', 'aprobado', 'completado')
+      `).all(id) as any[];
+
+      // Combine all
+      const combined = [...arrivals, ...sales, ...returns, ...counts];
+
+      if (combined.length === 0 && product && (Number(product.stock) > 0 || product.updated_at)) {
+        combined.push({
+          type: 'ingreso',
+          quantity: Number(product.stock) || 0,
+          price: Number(product.price_unit) || 0,
+          created_at: product.updated_at || getBoliviaISOString(),
+          reference: 'Stock Inicial',
+          user: 'Administrador'
+        });
+      }
+
+      // Sort by date descending
+      combined.sort((a: any, b: any) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
 
       res.json(combined);
     } catch (e: any) {
@@ -3393,129 +3437,14 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     }
   });
 
-  // Product-specific complete audit log endpoint
+  // Product-specific complete audit log endpoint (Multi-Source Forensic Synthesis)
   app.get("/api/products/:id/audit-history", (req, res) => {
     const { id } = req.params;
     try {
-      // Get all inventory movements
-      const invLogs = db.prepare(`
-        SELECT * FROM inventory_audit_logs
-        WHERE product_id = ?
-        ORDER BY created_at DESC
-      `).all(id) as any[];
-
-      // Get system audit logs for this product to match quantities before/after and fetch price history
-      const sysLogs = db.prepare(`
-        SELECT event_type, quantity_before, quantity_changed, quantity_after, price_before, price_after, related_ticket, created_at, user_name, reason, changed_fields
-        FROM system_audit_logs
-        WHERE related_product_id = ? OR (entity_type = 'producto' AND entity_id = ?)
-      `).all(id, id) as any[];
-
-      // Map inventory audit logs to unified format
-      const unifiedLogs = invLogs.map(log => {
-        // Find a matching system audit log to extract details if available
-        const match = sysLogs.find(sys => 
-          (sys.related_ticket === log.reference || (sys.related_product_id === log.product_id && Math.abs(new Date(sys.created_at).getTime() - new Date(log.created_at).getTime()) < 3000)) && 
-          Math.abs(sys.quantity_changed || 0) === Math.abs(log.quantity || 0)
-        );
-
-        let parsedFields = null;
-        if (match && match.changed_fields) {
-          try {
-            parsedFields = typeof match.changed_fields === 'string' ? JSON.parse(match.changed_fields) : match.changed_fields;
-          } catch (e) {}
-        }
-
-        const isInc = ['ingreso_compra', 'ingreso_devolucion', 'ajuste_incremento'].includes(log.type);
-
-        return {
-          id: log.id,
-          type: log.type, // 'ingreso_compra', 'salida_venta', etc.
-          quantity: log.quantity,
-          price: log.price,
-          created_at: log.created_at,
-          reference: log.reference,
-          username: log.username || match?.user_name || 'admin',
-          notes: log.notes || match?.reason || 'Movimiento de inventario',
-          quantity_before: match ? match.quantity_before : null,
-          quantity_after: match ? match.quantity_after : null,
-          quantity_changed: match && match.quantity_changed !== null && match.quantity_changed !== undefined ? match.quantity_changed : (isInc ? log.quantity : -log.quantity),
-          price_before: match ? match.price_before : null,
-          price_after: match ? match.price_after : null,
-          changed_fields: parsedFields
-        };
-      });
-
-      // Strictly only include real missing system inventory adjustments if they have actual quantity changes and are not yet mapped
-      const inventoryEventTypes = ['ingreso_compra', 'ingreso_devolucion', 'ajuste_incremento', 'ajuste_decremento', 'salida_venta', 'INVENTORY_MANUAL_ADJUSTMENT'];
-      const missingSysLogs = sysLogs.filter(sys => {
-        if (!inventoryEventTypes.includes(sys.event_type)) return false;
-        const qtyChanged = Math.abs(sys.quantity_changed || 0);
-        if (qtyChanged <= 0) return false;
-
-        const alreadyMapped = unifiedLogs.some(ul => 
-          (ul.reference === sys.related_ticket || Math.abs(new Date(ul.created_at).getTime() - new Date(sys.created_at).getTime()) < 3000) && 
-          Math.abs(ul.quantity || 0) === qtyChanged
-        );
-        return !alreadyMapped;
-      });
-
-      for (const sys of missingSysLogs) {
-        let parsedFields = null;
-        try {
-          if (sys.changed_fields) {
-            parsedFields = typeof sys.changed_fields === 'string' ? JSON.parse(sys.changed_fields) : sys.changed_fields;
-          }
-        } catch (e) {}
-
-        const isInc = sys.event_type === 'ajuste_incremento' || sys.event_type === 'ingreso_compra' || sys.event_type === 'ingreso_devolucion';
-        const qty = Math.abs(sys.quantity_changed || 0);
-
-        unifiedLogs.push({
-          id: sys.id || `sys-${sys.created_at}`,
-          type: sys.event_type,
-          quantity: qty,
-          price: sys.price_after || sys.price_before || 0,
-          created_at: sys.created_at,
-          reference: sys.related_ticket || 'Ajuste de Inventario',
-          username: sys.user_name || 'admin',
-          notes: sys.reason || 'Movimiento de inventario',
-          quantity_before: sys.quantity_before,
-          quantity_after: sys.quantity_after,
-          quantity_changed: sys.quantity_changed || (isInc ? qty : -qty),
-          price_before: sys.price_before,
-          price_after: sys.price_after,
-          changed_fields: parsedFields
-        });
-      }
-
-      // Sort by created_at descending
-      unifiedLogs.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-
-      // Reconstruct missing quantity_before and quantity_after based on current stock tracing backwards
-      try {
-        const product = db.prepare('SELECT stock FROM products WHERE id = ?').get(id) as any;
-        let runningStock = product ? (product.stock || 0) : 0;
-        
-        for (const log of unifiedLogs) {
-          const isStockChanging = ['ingreso_compra', 'ingreso_devolucion', 'ajuste_incremento', 'ajuste_decremento', 'salida_venta', 'creacion_producto', 'INVENTORY_MANUAL_ADJUSTMENT'].includes(log.type);
-          if (isStockChanging) {
-            const isIncrease = log.quantity_changed !== undefined && log.quantity_changed !== null ? log.quantity_changed > 0 : ['ingreso_compra', 'ingreso_devolucion', 'ajuste_incremento', 'creacion_producto'].includes(log.type);
-            const qty = Number(log.quantity) || 0;
-            
-            if (log.quantity_after === null || log.quantity_after === undefined) {
-              log.quantity_after = runningStock;
-            }
-            if (log.quantity_before === null || log.quantity_before === undefined) {
-              log.quantity_before = isIncrease ? runningStock - qty : runningStock + qty;
-            }
-            
-            // Move runningStock backward in time
-            runningStock = isIncrease ? runningStock - qty : runningStock + qty;
-          }
-        }
-      } catch (calcErr: any) {
-        console.warn("Failed to reconstruct stock history: ", calcErr.message);
+      const prodId = Number(id);
+      const product = db.prepare('SELECT id, name, sku, category, stock, price_unit, price_cost, updated_at FROM products WHERE id = ?').get(id) as any;
+      if (!product) {
+        return res.status(404).json({ error: "Producto no encontrado" });
       }
 
       const verifiedUser = (req as any).verifiedUser;
@@ -3524,11 +3453,297 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
       const canViewCosts = isAdmin || !!userPerms.view_costs || !!userPerms.financial_reports;
 
+      // 1. Stock Arrivals (Purchases / Ingreso de existencias)
+      const arrivals = db.prepare(`
+        SELECT sa.id, sa.product_id, sa.quantity, sa.arrival_price, sa.created_at
+        FROM stock_arrivals sa
+        WHERE sa.product_id = ?
+        ORDER BY sa.created_at DESC
+      `).all(id) as any[];
+
+      // 2. Sales Items (Salidas por venta en mostrador)
+      const sales = db.prepare(`
+        SELECT si.id as item_id, si.sale_id, si.product_id, si.quantity, si.price, si.cost,
+               s.created_at, s.user_id, COALESCE(u.username, 'Cajero') as username, s.notes
+        FROM sale_items si
+        JOIN sales s ON si.sale_id = s.id
+        LEFT JOIN users u ON s.user_id = u.id
+        WHERE si.product_id = ?
+        ORDER BY s.created_at DESC
+      `).all(id) as any[];
+
+      // 3. Customer Returns (Ingresos por devolución)
+      const returns = db.prepare(`
+        SELECT sr.id, sr.sale_id, sr.sale_item_id, sr.product_id, sr.quantity, sr.refund_amount, sr.unit_price, sr.reason,
+               sr.created_at, sr.user_id, COALESCE(sr.username, COALESCE(u.username, 'Cajero')) as username
+        FROM sale_returns sr
+        LEFT JOIN sales s ON sr.sale_id = s.id
+        LEFT JOIN users u ON sr.user_id = u.id
+        WHERE sr.product_id = ?
+        ORDER BY sr.created_at DESC
+      `).all(id) as any[];
+
+      // 4. Physical Inventory Counts (Ajustes de inventario físico)
+      const counts = db.prepare(`
+        SELECT ici.id, ici.inventory_count_id, ici.product_id, ici.physical_quantity,
+               ici.expected_quantity, ici.difference, ici.notes,
+               COALESCE(ic.applied_at, COALESCE(ic.completed_at, ici.reviewed_at)) as created_at,
+               COALESCE(ic.approved_by_username, COALESCE(ic.auditor_name, ic.username)) as username
+        FROM inventory_count_items ici
+        JOIN inventory_counts ic ON ici.inventory_count_id = ic.id
+        WHERE ici.product_id = ? AND ici.difference IS NOT NULL AND ici.difference != 0
+          AND ic.status IN ('finalizado', 'aprobado', 'completado')
+        ORDER BY ic.created_at DESC
+      `).all(id) as any[];
+
+      // 5. Existing inventory_audit_logs
+      const invLogs = db.prepare(`
+        SELECT * FROM inventory_audit_logs
+        WHERE product_id = ?
+        ORDER BY created_at DESC
+      `).all(id) as any[];
+
+      // 6. System audit logs for this product (to capture price/cost modifications, creation, and explicit changes)
+      const sysLogs = db.prepare(`
+        SELECT id, event_type, action, quantity_before, quantity_changed, quantity_after,
+               price_before, price_after, related_ticket, created_at, user_name, reason, changed_fields
+        FROM system_audit_logs
+        WHERE related_product_id = ? OR (entity_type = 'producto' AND entity_id = ?)
+        ORDER BY created_at DESC
+      `).all(id, id) as any[];
+
+      const consumedInvIds = new Set<any>();
+      const rawEntries: any[] = [];
+
+      // Add arrivals
+      for (const arr of arrivals) {
+        const refStr = `Ingreso #${arr.id}`;
+        const matchedInv = invLogs.find(l => 
+          !consumedInvIds.has(l.id) && 
+          (l.reference === refStr || (l.type === 'ingreso_compra' && Math.abs(l.quantity) === Math.abs(arr.quantity) && Math.abs(new Date(l.created_at).getTime() - new Date(arr.created_at).getTime()) < 3500))
+        );
+        if (matchedInv) consumedInvIds.add(matchedInv.id);
+
+        rawEntries.push({
+          id: `arr-${arr.id}`,
+          type: 'ingreso_compra',
+          quantity: Number(arr.quantity) || 0,
+          price: canViewCosts ? (Number(arr.arrival_price) || 0) : null,
+          created_at: arr.created_at || getBoliviaISOString(),
+          reference: refStr,
+          username: matchedInv?.username || 'admin',
+          notes: matchedInv?.notes || 'Compra de existencias / ingreso de lote',
+          price_before: null,
+          price_after: canViewCosts ? (Number(arr.arrival_price) || 0) : null,
+          changed_fields: null
+        });
+      }
+
+      // Add sales
+      for (const s of sales) {
+        const refStr = `Venta #${s.sale_id}`;
+        const matchedInv = invLogs.find(l => 
+          !consumedInvIds.has(l.id) && 
+          (l.reference === refStr || (l.type === 'salida_venta' && Math.abs(l.quantity) === Math.abs(s.quantity) && Math.abs(new Date(l.created_at).getTime() - new Date(s.created_at).getTime()) < 3500))
+        );
+        if (matchedInv) consumedInvIds.add(matchedInv.id);
+
+        rawEntries.push({
+          id: `sale-${s.item_id}`,
+          type: 'salida_venta',
+          quantity: Number(s.quantity) || 0,
+          price: Number(s.price) || 0,
+          created_at: s.created_at || getBoliviaISOString(),
+          reference: refStr,
+          username: s.username || matchedInv?.username || 'Cajero',
+          notes: s.notes ? `Venta mostrador: ${s.notes}` : (matchedInv?.notes || 'Salida por venta en mostrador'),
+          price_before: null,
+          price_after: Number(s.price) || 0,
+          changed_fields: null
+        });
+      }
+
+      // Add customer returns
+      for (const ret of returns) {
+        const refStr = `Devolución #${ret.sale_id}`;
+        const matchedInv = invLogs.find(l => 
+          !consumedInvIds.has(l.id) && 
+          (l.reference === refStr || (l.type === 'ingreso_devolucion' && Math.abs(l.quantity) === Math.abs(ret.quantity) && Math.abs(new Date(l.created_at).getTime() - new Date(ret.created_at).getTime()) < 3500))
+        );
+        if (matchedInv) consumedInvIds.add(matchedInv.id);
+
+        rawEntries.push({
+          id: `ret-${ret.id}`,
+          type: 'ingreso_devolucion',
+          quantity: Number(ret.quantity) || 0,
+          price: Number(ret.unit_price || 0),
+          created_at: ret.created_at || getBoliviaISOString(),
+          reference: refStr,
+          username: ret.username || matchedInv?.username || 'Cajero',
+          notes: ret.reason || matchedInv?.notes || 'Reincorporación de existencias por devolución de cliente',
+          price_before: null,
+          price_after: Number(ret.unit_price || 0),
+          changed_fields: null
+        });
+      }
+
+      // Add physical count adjustments
+      for (const count of counts) {
+        const refStr = `Auditoría #${count.inventory_count_id}`;
+        const matchedInv = invLogs.find(l => 
+          !consumedInvIds.has(l.id) && 
+          ((l.reference && l.reference.includes(String(count.inventory_count_id))) || Math.abs(new Date(l.created_at).getTime() - new Date(count.created_at).getTime()) < 3500)
+        );
+        if (matchedInv) consumedInvIds.add(matchedInv.id);
+
+        const diff = Number(count.difference) || 0;
+        const isInc = diff > 0;
+        rawEntries.push({
+          id: `count-${count.id}`,
+          type: isInc ? 'ajuste_incremento' : 'ajuste_decremento',
+          quantity: Math.abs(diff),
+          price: 0,
+          created_at: count.created_at || getBoliviaISOString(),
+          reference: refStr,
+          username: count.username || matchedInv?.username || 'Auditor',
+          notes: count.notes || `Ajuste de inventario físico (${isInc ? '+' : ''}${diff} pz)`,
+          price_before: null,
+          price_after: null,
+          changed_fields: null
+        });
+      }
+
+      // Add remaining inventory_audit_logs (e.g. manual adjustments, previous creations)
+      for (const log of invLogs) {
+        if (consumedInvIds.has(log.id)) continue;
+        const isInc = ['ingreso_compra', 'ingreso_devolucion', 'ajuste_incremento', 'creacion_producto'].includes(log.type);
+        const qty = Number(log.quantity) || 0;
+
+        rawEntries.push({
+          id: `inv-${log.id}`,
+          type: log.type || (isInc ? 'ajuste_incremento' : 'ajuste_decremento'),
+          quantity: qty,
+          price: (log.type === 'ingreso_compra' && !canViewCosts) ? null : (Number(log.price) || 0),
+          created_at: log.created_at || getBoliviaISOString(),
+          reference: log.reference || 'Ajuste de Inventario',
+          username: log.username || 'admin',
+          notes: log.notes || 'Movimiento de inventario',
+          price_before: null,
+          price_after: (log.type === 'ingreso_compra' && !canViewCosts) ? null : (Number(log.price) || 0),
+          changed_fields: null
+        });
+      }
+
+      // Add system audit logs for price, cost, and explicit changes
+      const priceEventTypes = ['cambio_precio', 'cambio_costo', 'modificacion_producto'];
+      for (const sys of sysLogs) {
+        let parsedFields: any = null;
+        try {
+          if (sys.changed_fields) {
+            parsedFields = typeof sys.changed_fields === 'string' ? JSON.parse(sys.changed_fields) : sys.changed_fields;
+          }
+        } catch (_) {}
+
+        const hasPriceChange = (sys.price_before !== null && sys.price_after !== null && sys.price_before !== sys.price_after) ||
+                               (parsedFields && (parsedFields.price_unit !== undefined || parsedFields.price_bulk !== undefined || parsedFields.price_cost !== undefined));
+
+        if (priceEventTypes.includes(sys.event_type) || hasPriceChange) {
+          const isCost = sys.event_type === 'cambio_costo' || (parsedFields && parsedFields.price_cost !== undefined);
+          if (isCost && !canViewCosts) continue;
+
+          rawEntries.push({
+            id: `sys-${sys.id || sys.created_at}`,
+            type: sys.event_type === 'cambio_costo' ? 'cambio_costo' : 'cambio_precio',
+            quantity: 0,
+            price: sys.price_after || sys.price_before || 0,
+            created_at: sys.created_at || getBoliviaISOString(),
+            reference: sys.related_ticket || (isCost ? 'Ajuste de Costo' : 'Cambio de Precio'),
+            username: sys.user_name || 'admin',
+            notes: sys.reason || sys.action || (isCost ? 'Modificación de costo de adquisición' : 'Modificación de precio de venta'),
+            price_before: sys.price_before,
+            price_after: sys.price_after,
+            changed_fields: parsedFields
+          });
+        }
+      }
+
+      // Ensure creation event exists if initial stock or product creation needs representation
+      const hasCreationEvent = rawEntries.some(e => e.type === 'creacion_producto');
+      if (!hasCreationEvent) {
+        // Look up creation log from sysLogs if available
+        const createSysLog = sysLogs.find(s => s.event_type === 'creacion_producto');
+        let creationDate = createSysLog?.created_at;
+        if (!creationDate) {
+          if (rawEntries.length > 0) {
+            const earliestTime = Math.min(...rawEntries.map(e => new Date(e.created_at).getTime()));
+            creationDate = new Date(earliestTime - 60000).toISOString();
+          } else {
+            creationDate = product.updated_at || getBoliviaISOString();
+          }
+        }
+        const creationAuthor = createSysLog?.user_name || 'admin';
+
+        rawEntries.push({
+          id: `init-${product.id}`,
+          type: 'creacion_producto',
+          quantity: 0, // will be computed in chronological sweep
+          price: Number(product.price_unit) || 0,
+          created_at: creationDate,
+          reference: 'Stock Inicial',
+          username: creationAuthor,
+          notes: 'Alta de producto y registro de stock inicial en catálogo',
+          price_before: null,
+          price_after: Number(product.price_unit) || 0,
+          changed_fields: null
+        });
+      }
+
+      // Sort all entries chronologically from newest to oldest
+      rawEntries.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+      // Chronological sweep backward to compute exact quantity_before, quantity_after, quantity_changed
+      let runningStock = Number(product.stock) || 0;
+      for (let i = 0; i < rawEntries.length; i++) {
+        const entry = rawEntries[i];
+        const isStockChanging = ['ingreso_compra', 'ingreso_devolucion', 'ajuste_incremento', 'ajuste_decremento', 'salida_venta', 'creacion_producto', 'INVENTORY_MANUAL_ADJUSTMENT'].includes(entry.type);
+
+        if (entry.type === 'creacion_producto') {
+          // Base creation event accounts for whatever baseline stock originated the product
+          const initQty = Math.max(0, runningStock);
+          entry.quantity = initQty;
+          entry.quantity_after = runningStock;
+          entry.quantity_before = 0;
+          entry.quantity_changed = initQty;
+          entry.notes = initQty > 0 ? `Alta de producto con ${initQty} unidad(es) de stock inicial` : 'Alta de producto en catálogo';
+          runningStock = 0;
+        } else if (isStockChanging) {
+          const isIncrease = ['ingreso_compra', 'ingreso_devolucion', 'ajuste_incremento'].includes(entry.type) ||
+                             (entry.type === 'INVENTORY_MANUAL_ADJUSTMENT' && entry.quantity_changed > 0);
+          const qty = Number(entry.quantity) || 0;
+
+          entry.quantity_after = runningStock;
+          entry.quantity_before = isIncrease ? runningStock - qty : runningStock + qty;
+          entry.quantity_changed = isIncrease ? qty : -qty;
+
+          runningStock = entry.quantity_before;
+        } else {
+          entry.quantity_after = runningStock;
+          entry.quantity_before = runningStock;
+          entry.quantity_changed = 0;
+        }
+      }
+
+      // Re-sort descending
+      rawEntries.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+      // Cost sanitization for non-financial users
       if (!canViewCosts) {
-        unifiedLogs.forEach((ul: any) => {
-          ul.price = null;
-          ul.price_before = null;
-          ul.price_after = null;
+        rawEntries.forEach((ul: any) => {
+          if (ul.type === 'ingreso_compra' || ul.type === 'cambio_costo') {
+            ul.price = null;
+            ul.price_before = null;
+            ul.price_after = null;
+          }
           if (ul.changed_fields && typeof ul.changed_fields === 'object') {
             delete ul.changed_fields.price_cost;
             delete ul.changed_fields.cost;
@@ -3537,7 +3752,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         });
       }
 
-      res.json(unifiedLogs);
+      res.json(rawEntries);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
