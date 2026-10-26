@@ -4036,13 +4036,24 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   });
 
   // REST API: Backup & Restore (JSON representation of the system databases)
-  app.get("/api/backup/download-db", enforcePermission('admin_settings'), (req, res) => {
+  app.get("/api/backup/download-db", enforcePermission('admin_settings'), async (req, res) => {
     try {
-      const dbPath = path.resolve(process.cwd(), "gtr_pos.db");
-      if (fs.existsSync(dbPath)) {
+      const dbPath = getActiveDbPath();
+      if (!fs.existsSync(dbPath)) {
+        return res.status(404).json({ error: "Database file not found" });
+      }
+      const exportDir = path.resolve(process.cwd(), "backups");
+      if (!fs.existsSync(exportDir)) {
+        fs.mkdirSync(exportDir, { recursive: true });
+      }
+      const tempExport = path.join(exportDir, `export_${Date.now()}.db`);
+      try {
+        await (db as any).backup(tempExport);
+        res.download(tempExport, "gtr_pos.db", () => {
+          try { if (fs.existsSync(tempExport)) fs.unlinkSync(tempExport); } catch (_) {}
+        });
+      } catch (backupErr) {
         res.download(dbPath, "gtr_pos.db");
-      } else {
-        res.status(404).json({ error: "Database file not found" });
       }
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -4387,18 +4398,10 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     try { fs.mkdirSync(BACKUP_DIR, { recursive: true }); } catch (e) {}
   }
 
-  function createLocalDbSnapshot(reason = 'manual') {
+  async function createLocalDbSnapshot(reason = 'manual') {
     try {
       const dbPath = getActiveDbPath();
       if (!fs.existsSync(dbPath)) return null;
-
-      // Only update root backup copy if current DB has a verified healthy catalog
-      try {
-        const prodCount = db.prepare("SELECT count(*) as c FROM products").get() as any;
-        if (prodCount && prodCount.c >= 50) {
-          fs.copyFileSync(dbPath, path.resolve(process.cwd(), 'gtr_pos.db.bak'));
-        }
-      } catch (e) {}
 
       // Form sanitized date string
       const dateStr = new Date().toISOString().replace(/[:.]/g, '-');
@@ -4406,12 +4409,29 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const filename = `snapshot_${dateStr}_${safeReason}.db`;
       const destPath = path.join(BACKUP_DIR, filename);
 
-      // D01: Checkpoint WAL to flush all committed transactions into database file before snapshot
+      // T10: Use native SQLite online backup API to cleanly capture active database and WAL pages
       try {
-        db.pragma('wal_checkpoint(TRUNCATE)');
+        db.pragma('wal_checkpoint(PASSIVE)');
       } catch (_) {}
 
-      fs.copyFileSync(dbPath, destPath);
+      try {
+        await (db as any).backup(destPath);
+      } catch (backupErr: any) {
+        fs.copyFileSync(dbPath, destPath);
+      }
+
+      // Only update root backup copy if current DB has a verified healthy catalog
+      try {
+        const prodCount = db.prepare("SELECT count(*) as c FROM products").get() as any;
+        if (prodCount && prodCount.c >= 50) {
+          const rootBak = path.resolve(process.cwd(), 'gtr_pos.db.bak');
+          try {
+            await (db as any).backup(rootBak);
+          } catch (_) {
+            fs.copyFileSync(destPath, rootBak);
+          }
+        }
+      } catch (e) {}
 
       // Rotate snapshots: maintain last 25 files
       const existingFiles = fs.readdirSync(BACKUP_DIR)
@@ -4453,9 +4473,9 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   }, 4 * 60 * 60 * 1000);
 
   // Endpoint: Create immediate snapshot
-  app.post("/api/backup/create-snapshot", enforcePermission('admin_settings'), (req, res) => {
+  app.post("/api/backup/create-snapshot", enforcePermission('admin_settings'), async (req, res) => {
     try {
-      const snap = createLocalDbSnapshot('manual_admin');
+      const snap = await createLocalDbSnapshot('manual_admin');
       if (snap) {
         res.json({ success: true, snapshot: snap, message: "Instantánea local creada con éxito en el servidor." });
       } else {
@@ -4519,7 +4539,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       }
 
       // 1. Take safety snapshot of current state before restoration
-      createLocalDbSnapshot('pre_restore');
+      await createLocalDbSnapshot('pre_restore');
 
       const DatabaseConstructor = (await import('better-sqlite3')).default;
       const backupDb = new DatabaseConstructor(filePath);
@@ -4641,7 +4661,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const buffer = Buffer.from(base64Data, 'base64');
       fs.writeFileSync(tempPath, buffer);
 
-      createLocalDbSnapshot('pre_upload_restore');
+      await createLocalDbSnapshot('pre_upload_restore');
 
       // Temporarily drop immutable triggers to allow clean restoration of logs/ledger if present in backup
       try {
@@ -4956,7 +4976,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   });
 
   // REST API: Phase 3 Automated Instant Snapshot with Rotation
-  app.post("/api/backup/auto-snapshot", enforcePermission('admin_settings'), (req, res) => {
+  app.post("/api/backup/auto-snapshot", enforcePermission('admin_settings'), async (req, res) => {
     try {
       const integrityCheck = db.pragma('integrity_check(1)') as any[];
       const isHealthy = Array.isArray(integrityCheck) && integrityCheck[0]?.integrity_check === 'ok';
@@ -4964,7 +4984,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         return res.status(500).json({ error: "No se puede generar respaldo: la prueba de integridad de base de datos reportó anomalías." });
       }
 
-      const snap = createLocalDbSnapshot('auto_phase3');
+      const snap = await createLocalDbSnapshot('auto_phase3');
       if (snap) {
         // Enforce max 7 auto snapshots rotation in backup dir
         const files = fs.readdirSync(BACKUP_DIR)
@@ -5243,6 +5263,12 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         const saleDiscount = Number(originalSale.discount) || 0;
         const discountRatio = grossSaleTotal > 0 ? (saleDiscount / grossSaleTotal) : 0;
 
+        // T19: Calculate maximum possible refund remaining on this sale
+        const priorRefundsRow = db.prepare('SELECT COALESCE(SUM(refund_amount), 0) as total_refunded FROM sale_returns WHERE sale_id = ?').get(sale_id) as any;
+        const alreadyRefundedTotal = priorRefundsRow ? Number(priorRefundsRow.total_refunded) : 0;
+        const maxPossibleRefund = Math.max(0, Number(originalSale.total) - alreadyRefundedTotal);
+        let remainingRefundBudget = maxPossibleRefund;
+
         let totalRefundAmount = 0;
         const reconciledItems: any[] = [];
         const refundedProductIds: any[] = [];
@@ -5299,8 +5325,14 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           // F02: Calculate refund value based on net unit price after prorating general discounts
           const grossUnitPrice = Number(saleItem.price) || 0;
           const netUnitPrice = Math.max(0, grossUnitPrice * (1 - discountRatio));
-          const itemRefundValue = Math.round(cappedQty * netUnitPrice * 100) / 100;
+          let itemRefundValue = Math.round(cappedQty * netUnitPrice * 100) / 100;
+          // T19: Cap item refund against remaining budget so cumulative refund never exceeds original sale total
+          itemRefundValue = Math.min(itemRefundValue, remainingRefundBudget);
+          remainingRefundBudget = Math.max(0, remainingRefundBudget - itemRefundValue);
           totalRefundAmount += itemRefundValue;
+
+          // T04: Unique per-item client operation id to avoid collision on multi-item returns
+          const itemClientOpId = clientOpId ? `${clientOpId}_item_${saleItem.id}` : null;
 
           // FASE 4: Registrar en la tabla dedicada `sale_returns` SIN alterar el comprobante original de venta
           const returnInsert = db.prepare(`
@@ -5319,7 +5351,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
             itemRefundValue,
             netUnitPrice,
             item.reason || `Devolución de artículo de la venta #${sale_id}`,
-            clientOpId,
+            itemClientOpId,
             normUserId,
             normUsername,
             sId,
@@ -6019,15 +6051,38 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         return res.status(404).json({ error: "La cuenta por cobrar especificada no existe." });
       }
 
-      if (record.status === 'pagado') {
-        return res.status(400).json({ error: "Esta cuenta ya ha sido pagada en su totalidad." });
+      const saleRow = db.prepare('SELECT currency, exchange_rate FROM sales WHERE id = ?').get(record.sale_id) as any;
+      const saleCurrency = saleRow?.currency || 'BOB';
+      const payCurrency = req.body.currency || saleCurrency;
+      const payRate = Number(req.body.exchange_rate || saleRow?.exchange_rate || 6.96);
+
+      // T24: Multi-currency conversion between payment and accounts_receivable debt currency
+      let debtReduction = payAmount;
+      if (saleCurrency === 'USD' && payCurrency === 'BOB') {
+        debtReduction = Math.round((payAmount / payRate) * 100) / 100;
+      } else if (saleCurrency === 'BOB' && payCurrency === 'USD') {
+        debtReduction = Math.round((payAmount * payRate) * 100) / 100;
       }
 
-      const remaining = record.remaining_amount;
-      const actualPayment = Math.min(payAmount, remaining);
-      const newPaidAmount = record.paid_amount + actualPayment;
-      const newRemainingAmount = Math.max(0, remaining - actualPayment);
+      const remaining = Number(record.remaining_amount) || 0;
+      const actualDebtReduction = Math.min(debtReduction, remaining);
+      const newPaidAmount = Math.round((Number(record.paid_amount || 0) + actualDebtReduction) * 100) / 100;
+      const newRemainingAmount = Math.max(0, Math.round((remaining - actualDebtReduction) * 100) / 100);
       const newStatus = newRemainingAmount <= 0 ? 'pagado' : 'pendiente';
+
+      // Actual cash accepted in payCurrency
+      let actualPayReceived = payAmount;
+      if (actualDebtReduction < debtReduction) {
+        if (saleCurrency === 'USD' && payCurrency === 'BOB') {
+          actualPayReceived = Math.round(actualDebtReduction * payRate * 100) / 100;
+        } else if (saleCurrency === 'BOB' && payCurrency === 'USD') {
+          actualPayReceived = Math.round((actualDebtReduction / payRate) * 100) / 100;
+        } else {
+          actualPayReceived = actualDebtReduction;
+        }
+      }
+
+      const amountInBs = payCurrency === 'USD' ? (actualPayReceived * payRate) : actualPayReceived;
 
       const txPay = db.transaction(() => {
         // F07: Atomic check in processed_operations
@@ -6038,10 +6093,14 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           }
         }
 
+        const paymentNote = notes || (payCurrency !== saleCurrency 
+          ? `Abono de ${actualPayReceived} ${payCurrency} (Equivalente a ${actualDebtReduction} ${saleCurrency} a t/c ${payRate})` 
+          : 'Abono realizado');
+
         const result = db.prepare(`
           INSERT INTO credit_payments (account_receivable_id, amount, payment_method, user_id, notes, client_operation_id)
           VALUES (?, ?, ?, ?, ?, ?)
-        `).run(id, actualPayment, payment_method || 'Efectivo', user_id || 1, notes || 'Abono realizado', clientOpId);
+        `).run(id, actualPayReceived, payment_method || 'Efectivo', user_id || 1, paymentNote, clientOpId);
 
         db.prepare(`
           UPDATE accounts_receivable
@@ -6059,23 +6118,17 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           VALUES (?, ?, 0.0)
         `).run(currentActiveUserId, sName);
 
-        // F06: Convert USD payments to BOB for cash drawer balance
-        const saleRow = db.prepare('SELECT currency, exchange_rate FROM sales WHERE id = ?').get(record.sale_id) as any;
-        const payCurrency = req.body.currency || saleRow?.currency || 'BOB';
-        const payRate = Number(req.body.exchange_rate || saleRow?.exchange_rate || 6.96);
-        const amountInBs = payCurrency === 'USD' ? (actualPayment * payRate) : actualPayment;
-
-        // Record the cash movement (pending settlement)
+        // Record the cash movement in actual received currency
         const movResult = db.prepare(`
           INSERT INTO cash_movements (seller_id, sale_id, type, amount, currency, payment_method, status, notes)
           VALUES (?, ?, 'ingreso_manual', ?, ?, ?, 'pendiente', ?)
         `).run(
           currentActiveUserId,
           record.sale_id,
-          actualPayment,
+          actualPayReceived,
           payCurrency,
           payment_method || 'Efectivo',
-          notes || `Abono a Cuenta por Cobrar de Venta #${record.sale_id}`
+          notes || `Abono a Cuenta por Cobrar de Venta #${record.sale_id} (${actualPayReceived} ${payCurrency})`
         );
 
         // Update seller's cash account balance (always in BOB)
@@ -6092,7 +6145,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
             db.prepare(`
               INSERT INTO processed_operations (client_operation_id, operation_type, response_body, status)
               VALUES (?, 'payment', ?, 'completed')
-            `).run(clientOpId, JSON.stringify({ success: true, actualPayment, newRemainingAmount, newStatus }));
+            `).run(clientOpId, JSON.stringify({ success: true, actualPayment: actualPayReceived, actualDebtReduction, newRemainingAmount, newStatus }));
           } catch (_) {}
         }
 
@@ -6101,7 +6154,8 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           activeUserId: currentActiveUserId, 
           accId: accRow?.id, 
           movId: movResult.lastInsertRowid,
-          actualPayment,
+          actualPayment: actualPayReceived,
+          actualDebtReduction,
           newRemainingAmount,
           newStatus,
           isDuplicate: false
@@ -6112,7 +6166,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         return res.json(txPay);
       }
 
-      const { paymentId, accId, movId } = txPay as any;
+      const { paymentId, accId, movId, actualPayment: resPayment, newRemainingAmount: resRemaining, newStatus: resStatus } = txPay as any;
 
       syncAfterWrite({
         accounts_receivable: [id],
@@ -6120,7 +6174,13 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         cash_accounts: accId ? [accId] : [],
         cash_movements: movId ? [movId] : []
       });
-      res.json({ success: true, actualPayment, newRemainingAmount, newStatus });
+      res.json({ 
+        success: true, 
+        actualPayment: resPayment ?? actualPayReceived, 
+        actualDebtReduction, 
+        newRemainingAmount: resRemaining ?? newRemainingAmount, 
+        newStatus: resStatus ?? newStatus 
+      });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -6163,16 +6223,20 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const rateRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('exchange_rate') as any;
       const currentRate = exchange_rate ? Number(exchange_rate) : (rateRow ? parseFloat(rateRow.value) : 6.96);
       const safeCurrency = currency || 'BOB';
-      const safeTotal = Math.max(0, Number(total || 0));
+      const safeDiscount = Math.max(0, Number(discount || 0));
+      
+      // T25: Strictly recalculate total on server from items and discount
+      const calculatedGross = items.reduce((sum: number, it: any) => sum + (Math.max(0, Number(it.quantity || 0)) * Math.max(0, Number(it.price || 0))), 0);
+      const safeTotal = Math.max(0, Math.round((calculatedGross - safeDiscount) * 100) / 100);
       const safePaid = Math.max(0, Number(paid_amount || 0));
 
       if (safePaid > safeTotal) {
         return res.status(400).json({ error: "El abono inicial no puede exceder el total del pedido." });
       }
 
-      // P04: Validate official catalog prices if user lacks permission to modify prices
+      // P04 & T15: Validate official catalog prices and verify net available stock
       for (const item of items) {
-        const prodCheck = db.prepare('SELECT id, name, sku, price_unit, price_bulk FROM products WHERE id = ?').get(item.product_id) as any;
+        const prodCheck = db.prepare('SELECT id, name, sku, price_unit, price_bulk, stock FROM products WHERE id = ?').get(item.product_id) as any;
         if (!prodCheck) {
           return res.status(400).json({ error: `El producto con ID ${item.product_id} no existe en el inventario.` });
         }
@@ -6180,6 +6244,16 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         if (!Number.isFinite(safeQty) || !Number.isInteger(safeQty) || safeQty <= 0) {
           return res.status(400).json({ error: "Cantidad de producto inválida. Las cantidades deben ser enteros positivos." });
         }
+
+        // T15: Validate physical stock minus current active reservations
+        const currentReserved = getReservedStock(item.product_id);
+        const netAvailable = Math.max(0, (Number(prodCheck.stock) || 0) - currentReserved);
+        if (safeQty > netAvailable) {
+          return res.status(400).json({ 
+            error: `Stock disponible insuficiente para reservar "${prodCheck.name}". Disponible neto: ${netAvailable} (Físico: ${prodCheck.stock}, Reservado: ${currentReserved}), Solicitado: ${safeQty}.` 
+          });
+        }
+
         const safePrice = Math.max(0, Number(item.price || 0));
         if (!canModifyPrices) {
           let matchesUnit = false;
@@ -6264,8 +6338,12 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const currentRate = Number(existing.exchange_rate || 6.96);
       const safeCurrency = existing.currency || 'BOB';
 
+      const safeDiscount = Math.max(0, Number(discount || 0));
+      const calculatedGross = items.reduce((sum: number, it: any) => sum + (Math.max(0, Number(it.quantity || 0)) * Math.max(0, Number(it.price || 0))), 0);
+      const safeTotal = Math.max(0, Math.round((calculatedGross - safeDiscount) * 100) / 100);
+
       for (const item of items) {
-        const prodCheck = db.prepare('SELECT id, name, sku, price_unit, price_bulk FROM products WHERE id = ?').get(item.product_id) as any;
+        const prodCheck = db.prepare('SELECT id, name, sku, price_unit, price_bulk, stock FROM products WHERE id = ?').get(item.product_id) as any;
         if (!prodCheck) {
           return res.status(400).json({ error: `El producto con ID ${item.product_id} no existe en el inventario.` });
         }
@@ -6273,6 +6351,17 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         if (!Number.isFinite(safeQty) || !Number.isInteger(safeQty) || safeQty <= 0) {
           return res.status(400).json({ error: "Cantidad de producto inválida. Las cantidades deben ser enteros positivos." });
         }
+
+        // T15: Net available stock check (physical stock minus reservations, excluding prior allocation of this order)
+        const currentReserved = getReservedStock(item.product_id);
+        const priorThisOrderQty = (db.prepare('SELECT quantity FROM pending_sale_items WHERE pending_sale_id = ? AND product_id = ?').get(id, item.product_id) as any)?.quantity || 0;
+        const netAvailable = Math.max(0, (Number(prodCheck.stock) || 0) - (currentReserved - priorThisOrderQty));
+        if (safeQty > netAvailable) {
+          return res.status(400).json({ 
+            error: `Stock disponible insuficiente para reservar "${prodCheck.name}". Disponible neto: ${netAvailable} (Físico: ${prodCheck.stock}, Reservado externo: ${currentReserved - priorThisOrderQty}), Solicitado: ${safeQty}.` 
+          });
+        }
+
         const safePrice = Math.max(0, Number(item.price || 0));
         if (!canModifyPrices) {
           let matchesUnit = false;
@@ -6298,7 +6387,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           UPDATE pending_sales
           SET client_name = ?, destination = ?, client_phone = ?, transport_company = ?, total = ?, discount = ?
           WHERE id = ?
-        `).run(client_name, destination, client_phone || null, transport_company || null, total || 0, discount || 0, id);
+        `).run(client_name, destination, client_phone || null, transport_company || null, safeTotal, safeDiscount, id);
         
         db.prepare(`DELETE FROM pending_sale_items WHERE pending_sale_id = ?`).run(id);
         
@@ -6741,6 +6830,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         total,
         discount,
         payment_method,
+        initial_abono,
         exchange_rate,
         currency,
         notes,
@@ -6792,11 +6882,13 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
       const nowIso = getBoliviaISOString();
       const itemsJson = JSON.stringify(enrichedItems);
+      const safeInitialAbono = Math.max(0, Number(initial_abono || req.body?.initialAbono || 0));
 
+      // T17: Persist initial_abono in offline_pending_sales so credit down payments enter cash drawer upon approval
       db.prepare(`
         INSERT INTO offline_pending_sales 
-        (id, client_operation_id, user_id, user_name, client_id, client_name, client_phone, total, discount, payment_method, exchange_rate, currency, notes, items_json, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+        (id, client_operation_id, user_id, user_name, client_id, client_name, client_phone, total, discount, payment_method, initial_abono, exchange_rate, currency, notes, items_json, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
       `).run(
         safeId,
         safeOpId,
@@ -6808,6 +6900,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         Math.max(0, Number(total || 0)),
         Math.max(0, Number(discount || 0)),
         payment_method || 'Efectivo',
+        safeInitialAbono,
         Number(exchange_rate || 6.96),
         currency || 'BOB',
         notes || null,
@@ -6969,13 +7062,18 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       for (const [prodId, demand] of demandByProduct.entries()) {
         const prod = db.prepare('SELECT id, name, sku, stock FROM products WHERE id = ?').get(prodId) as any;
         const currentStock = prod ? Number(prod.stock) : 0;
-        if (currentStock < demand.totalQty) {
+        // T16: Deduct reserved pending orders to evaluate real net availability
+        const reservedStock = getReservedStock(prodId);
+        const availableStock = Math.max(0, currentStock - reservedStock);
+        if (availableStock < demand.totalQty) {
           deficitItems.push({
             product_id: prodId,
             name: prod?.name || demand.name,
             current_stock: currentStock,
+            available_stock: availableStock,
+            reserved_stock: reservedStock,
             requested_quantity: demand.totalQty,
-            deficit: demand.totalQty - currentStock
+            deficit: demand.totalQty - availableStock
           });
         }
       }
@@ -9196,18 +9294,14 @@ DIRECTIVAS CRÍTICAS:
         
         const transaction = db.transaction(() => {
           for (const item of items) {
-            const exp = item.expected_quantity_snapshot ?? item.expected_quantity ?? 0;
-            const physical = item.physical_quantity ?? 0;
-            const diff = physical - exp;
+            const diff = Number(item.difference || 0);
 
-            if (diff !== 0) {
+            if (diff !== 0 && item.status !== 'pendiente') {
               const p = db.prepare('SELECT stock, price_cost, name, sku FROM products WHERE id = ?').get(item.product_id) as any;
               if (p) {
                 const oldStock = p.stock;
-                // Conciliación con delta para no perder ventas intermedias ocurridas durante el conteo
-                const snapshot = item.expected_quantity_snapshot ?? item.expected_quantity ?? oldStock;
-                const delta = physical - snapshot;
-                const newStock = Math.max(0, oldStock === snapshot ? physical : oldStock + delta);
+                // T02: Apply physical difference observed relative to current live stock
+                const newStock = Math.max(0, oldStock + diff);
 
                 db.prepare('UPDATE products SET stock = ?, updated_at = ? WHERE id = ?').run(newStock, getBoliviaISOString(), item.product_id);
 
@@ -9363,16 +9457,13 @@ DIRECTIVAS CRÍTICAS:
       const transaction = db.transaction(() => {
         // Apply stock adjustment to products where difference is non-zero
         for (const item of items) {
-          if (item.difference !== 0) {
+          const diff = Number(item.difference || 0);
+          if (diff !== 0 && item.status !== 'pendiente') {
             const p = db.prepare('SELECT stock, price_cost, name, sku FROM products WHERE id = ?').get(item.product_id) as any;
             if (p) {
               const oldStock = p.stock;
-              const snapshot = item.expected_quantity_snapshot ?? item.expected_quantity ?? oldStock;
-              
-              // Verificación de snapshot: si hubo ventas durante el conteo (oldStock !== snapshot),
-              // se concilia aplicando el delta físico para no sobreescribir ventas legítimas
-              const delta = item.physical_quantity - snapshot;
-              const newStock = Math.max(0, oldStock === snapshot ? item.physical_quantity : oldStock + delta);
+              // T02: Apply physical difference observed relative to current live stock
+              const newStock = Math.max(0, oldStock + diff);
               
               // Apply adjustment
               db.prepare('UPDATE products SET stock = ?, updated_at = ? WHERE id = ?').run(newStock, getBoliviaISOString(), item.product_id);

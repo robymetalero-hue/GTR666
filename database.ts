@@ -65,31 +65,18 @@ export function getActiveDbPath(): string {
 }
 
 export function ensureProdDbExists(): void {
-  const minValidBytes = 200 * 1024; // 200KB min size
-  let needsRestore = false;
+  // T14: Do NOT automatically replace a valid production database with sandbox based on file size
   if (!fs.existsSync(prodDbPath)) {
-    needsRestore = true;
-  } else {
-    try {
-      const stats = fs.statSync(prodDbPath);
-      if (stats.size < minValidBytes) {
-        needsRestore = true;
-      }
-    } catch {
-      needsRestore = true;
-    }
-  }
-
-  if (needsRestore) {
-    if (fs.existsSync(sandboxDbPath) && fs.statSync(sandboxDbPath).size >= minValidBytes) {
+    const backupPath = path.resolve(process.cwd(), 'gtr_pos.db.bak');
+    if (fs.existsSync(backupPath)) {
       try {
-        fs.copyFileSync(sandboxDbPath, prodDbPath);
-        console.log('[Database Integrity Guard] Initialized production gtr_pos.db from verified sandbox catalog.');
+        fs.copyFileSync(backupPath, prodDbPath);
+        console.log('[Database Integrity Guard] Restored production gtr_pos.db from verified backup copy.');
       } catch (err: any) {
-        console.warn('[Database Integrity Guard] Failed to populate gtr_pos.db from sandbox:', err.message);
+        console.warn('[Database Integrity Guard] Failed to restore from backup:', err.message);
       }
     } else {
-      console.warn('[Database Integrity Guard] gtr_pos.db file check triggered. Fresh data will be populated from verified cloud storage or authorized admin restore.');
+      console.log('[Database Integrity Guard] gtr_pos.db does not exist yet. Will be initialized fresh.');
     }
   }
 }
@@ -274,13 +261,6 @@ db.exec(`
     subtotal_minor REAL
   );
 
-  CREATE TABLE IF NOT EXISTS processed_operations (
-    id TEXT PRIMARY KEY,
-    type TEXT,
-    result TEXT,
-    created_at DATETIME DEFAULT (strftime('%Y-%m-%dT%H:%M:%S-04:00', 'now', '-4 hours'))
-  );
-
   CREATE TABLE IF NOT EXISTS shifts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     closed_by INTEGER,
@@ -416,6 +396,7 @@ db.exec(`
     total REAL,
     discount REAL,
     payment_method TEXT,
+    initial_abono REAL DEFAULT 0.0,
     exchange_rate REAL,
     currency TEXT,
     notes TEXT,
@@ -877,23 +858,65 @@ try {
   `);
 } catch (e) {}
 
-// Processed Operations table for strict idempotency and deduplication
+// Canonical migration for processed_operations and offline_pending_sales (T01, T17, T18)
+export function runDatabaseMigrations(targetDb: Database.Database) {
+  try {
+    const tableInfo = targetDb.prepare("PRAGMA table_info(processed_operations)").all() as any[];
+    const hasClientOpId = tableInfo.some(c => c.name === 'client_operation_id');
+    if (tableInfo.length > 0 && !hasClientOpId) {
+      targetDb.exec(`
+        ALTER TABLE processed_operations RENAME TO _legacy_processed_operations_mig;
+        CREATE TABLE IF NOT EXISTS processed_operations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          client_operation_id TEXT UNIQUE NOT NULL,
+          operation_type TEXT NOT NULL,
+          payload_hash TEXT,
+          response_body TEXT,
+          status TEXT DEFAULT 'completed',
+          created_at DATETIME DEFAULT (strftime('%Y-%m-%dT%H:%M:%S-04:00', 'now', '-4 hours'))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_processed_operations_op_id ON processed_operations (client_operation_id);
+        CREATE INDEX IF NOT EXISTS idx_processed_operations_type ON processed_operations (operation_type);
+        DROP TABLE IF EXISTS _legacy_processed_operations_mig;
+      `);
+      console.log("[Database Migration] Migrated processed_operations to canonical schema with client_operation_id.");
+    } else {
+      targetDb.exec(`
+        CREATE TABLE IF NOT EXISTS processed_operations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          client_operation_id TEXT UNIQUE NOT NULL,
+          operation_type TEXT NOT NULL,
+          payload_hash TEXT,
+          response_body TEXT,
+          status TEXT DEFAULT 'completed',
+          created_at DATETIME DEFAULT (strftime('%Y-%m-%dT%H:%M:%S-04:00', 'now', '-4 hours'))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_processed_operations_op_id ON processed_operations (client_operation_id);
+        CREATE INDEX IF NOT EXISTS idx_processed_operations_type ON processed_operations (operation_type);
+      `);
+    }
+  } catch (e: any) {
+    console.warn("Migration warning (processed_operations):", e.message);
+  }
+
+  try {
+    const offlineCols = targetDb.prepare("PRAGMA table_info(offline_pending_sales)").all() as any[];
+    if (offlineCols.length > 0 && !offlineCols.some(c => c.name === 'initial_abono')) {
+      targetDb.exec("ALTER TABLE offline_pending_sales ADD COLUMN initial_abono REAL DEFAULT 0.0;");
+      console.log("[Database Migration] Added initial_abono column to offline_pending_sales.");
+    }
+  } catch (e: any) {}
+}
+
 try {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS processed_operations (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      client_operation_id TEXT UNIQUE NOT NULL,
-      operation_type TEXT NOT NULL,
-      payload_hash TEXT,
-      response_body TEXT,
-      status TEXT DEFAULT 'completed',
-      created_at DATETIME DEFAULT (strftime('%Y-%m-%dT%H:%M:%S-04:00', 'now', '-4 hours'))
-    );
-    CREATE INDEX IF NOT EXISTS idx_processed_operations_op_id ON processed_operations (client_operation_id);
-    CREATE INDEX IF NOT EXISTS idx_processed_operations_type ON processed_operations (operation_type);
-  `);
+  runDatabaseMigrations(getProdDb());
 } catch (e: any) {
-  console.error("Error creating processed_operations table:", e.message);
+  console.warn("Error running prod migrations:", e.message);
+}
+try {
+  runDatabaseMigrations(getSandboxDb());
+} catch (e: any) {
+  console.warn("Error running sandbox migrations:", e.message);
 }
 
 // Additive and safe unique indexes with pre-deduplication check

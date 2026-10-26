@@ -1,0 +1,647 @@
+SOLICITUD DE CORRECCIONES Y VALIDACIÓN INTEGRAL — GTR666
+Para compartir con Google AI Studio o con el desarrollador responsable.
+Fecha de referencia: 25 de octubre de 2026, Bolivia.
+
+Este archivo es una solicitud técnica de implementación. No es un parche ya aplicado ni certifica la aplicación publicada.
+
+1. OBJETIVO Y VERSIÓN DE REFERENCIA
+
+Necesito que revises e implementes las mejoras pendientes del sistema de ventas e inventario GTR666, con cambios localizados y pruebas que recorran los flujos completos. El problema principal es que aparecen existencias incorrectas o “ítems fantasma”. También hay inconsistencias entre inventario, pedidos, crédito, caja, conteos y sincronización.
+
+Repositorio:
+https://github.com/robymetalero-hue/GTR666
+
+La revisión de cambios comparó:
+- Versión anterior: 9526eebdc58404290454215482bd0523572268b0.
+- Versión revisada: c19d054f7fa906d830aa0df30bf5dbe26ae48c7e.
+- Commit revisado:
+  https://github.com/robymetalero-hue/GTR666/commit/c19d054f7fa906d830aa0df30bf5dbe26ae48c7e
+
+Las líneas indicadas en este documento corresponden a c19d054. Si ahora existe otra versión, identifica primero el commit actual, compara qué cambió y comprueba cuáles problemas persisten. No sobrescribas correcciones posteriores ni afirmes que un hallazgo sigue vigente sin verificarlo.
+
+Ruta base para consultar las fuentes de referencia:
+https://github.com/robymetalero-hue/GTR666/blob/c19d054f7fa906d830aa0df30bf5dbe26ae48c7e/
+
+El usuario informa que la aplicación está publicada. La revisión anterior comprobó el código de GitHub, pero no inspeccionó la base comercial ni confirmó que el build servido corresponda exactamente a ese commit. Distingue esos tres estados: código versionado, esquema real de la base y versión desplegada.
+
+2. CÓMO DEBES TRABAJAR
+
+- Trabaja en una rama aislada y conserva las mejoras existentes. Evita reescribir el servidor completo o modificar módulos ajenos sin necesidad.
+- Antes de corregir, reproduce cada defecto con datos ficticios e identifica su causa. Después, conserva el caso como prueba de regresión.
+- Usa las funciones, rutas e inicialización reales. Una fórmula copiada dentro de una prueba o una búsqueda de texto no valida la integración.
+- Prueba SQLite nueva, SQLite de una versión anterior y una copia de prueba restaurada. No prepares manualmente solo el esquema ideal, porque eso ocultó un fallo de migración.
+- Las migraciones deben preservar datos y trazabilidad. No elimines tablas comerciales, cambies claves históricas a ciegas ni recalcules existencias reales para hacer pasar las pruebas.
+- No uses la base productiva ni Firestore comercial como fixture de pruebas. No publiques ni ejecutes reparaciones de saldos comerciales con esta solicitud; entrega primero el parche, las migraciones y las evidencias para revisión.
+- Si faltan reglas de negocio, explicita la decisión propuesta. No inventes el stock verdadero ni un saldo inicial desconocido.
+- Revisa los consumidores de cada cambio: interfaz, API, SQLite, réplica, auditorías, reportes, caja y caché.
+- No declares “todo funciona” por una prueba de humo. Indica qué ejecutaste, qué quedó pendiente y qué depende del entorno real.
+
+3. EVIDENCIA DISPONIBLE Y LÍMITES
+
+La revisión verificó por SHA Git 34 fuentes y ejecutó pruebas aisladas, sin modificar producción:
+
+A. 53 escenarios usando la inicialización que contiene el código revisado:
+   28 cumplen, 5 incumplen y 20 quedan bloqueados por respuestas de la aplicación.
+   Cero errores del ejecutor. Muchos bloqueos se deben al contrato de processed_operations.
+   Algunos casos que cumplen solo validan un rechazo; no equivalen a ventas funcionales.
+
+B. Los mismos 53 escenarios, sustituyendo únicamente en memoria la tabla processed_operations por la segunda definición que pretendía crear el código:
+   47 cumplen y 6 incumplen.
+   Esto fue un aislamiento diagnóstico; no demuestra una migración aplicada al servidor.
+
+C. 25 pruebas adicionales de integración y límites:
+   2 cumplen y 23 incumplen; cero errores de preparación.
+   Son casos seleccionados para investigar conflictos y algunos comparten causa. No representan una tasa de fallos de las ventas reales.
+
+La revisión no ejecutó un build completo, TypeScript/lint, HTTP/autenticación reales, dispositivos o Firestore real. Completa esas verificaciones en un entorno de pruebas al implementar.
+
+Paquete opcional de evidencia que puede acompañar esta solicitud:
+- GTR666_revision_publicacion_20261025.md
+- GTR666_pruebas_publicacion_20261025.zip
+
+El ZIP contiene ejecutores y JSON con datos ficticios, además del manifiesto de fuentes. No contiene la base de la tienda ni un parche aplicado. Este TXT describe los escenarios para poder trabajar incluso sin ese ZIP.
+
+4. PRIORIDAD INMEDIATA: ESQUEMA Y SEGURIDAD DEL INVENTARIO
+
+4.1. T01 — Dos definiciones incompatibles de processed_operations
+
+Dónde:
+- database.ts:277, primera definición.
+- database.ts:883, segunda definición.
+- server.ts:5680, deduplicación de venta.
+- server.ts:5219 y 6035, devolución y abono.
+- server.ts:2659 y 2778, creación de productos que aún usa el contrato anterior.
+
+Problema:
+Primero se crea processed_operations con id, type, result, created_at. Después se vuelve a declarar con client_operation_id, operation_type, payload_hash, response_body y status, usando CREATE TABLE IF NOT EXISTS. Esa instrucción no migra la tabla existente.
+
+Reproducción:
+Inicializar una base nueva mediante la inicialización real. Consultar sus columnas y realizar una venta con client_operation_id.
+Observado: falta response_body; respuesta 500. También falla el índice que requiere client_operation_id.
+Esperado: inicialización coherente y venta aceptada una sola vez.
+
+Corrección:
+Definir un contrato único y una migración explícita que preserve las operaciones existentes. Actualizar todos los consumidores, incluidos productos. El arranque debe detectar una migración fallida y no continuar silenciosamente como si hubiera quedado correcta.
+
+No basta con reemplazar la tabla por la segunda definición: eso puede romper los consumidores antiguos. Revisar también el bloque database.ts:902–914 que renombra claves duplicadas de ventas; renombrar una clave no deduplica una operación comercial ni debe borrar su identidad original.
+
+Aceptación:
+Base nueva, antigua y restaurada migran sin pérdida; ventas, productos, devoluciones y abonos funcionan; reiniciar la migración no cambia los datos por segunda vez.
+
+4.2. T03 — Un pull antiguo permite aplicar dos veces un conteo
+
+Dónde:
+- firebaseSync.ts:830–831.
+- server.ts:9349, aprobación.
+- server.ts:9150, cambio de estado/cierre.
+
+Reproducción:
+Stock 8; aprobar físico 9, queda 9.
+Recibir por réplica una cabecera antigua del mismo conteo con status=finalizado y applied_at=null.
+Volver a aprobar.
+Observado: stock 10.
+Esperado: stock 9 y ninguna segunda aplicación.
+
+Causa:
+El guard frente a estados antiguos incluye en_progreso, pausado y completado, pero omite finalizado. El upsert puede borrar la marca de aplicación. El bloqueo local del reintento directo sí funciona, pero la réplica lo invalida.
+
+Corrección:
+Preservar estados terminales y evidencia de aplicación ante mensajes antiguos. Registrar una aplicación única, durable y transaccional por conteo/revisión. No depender solo de applied_at en una cabecera reemplazable. Revisar reintentos simultáneos y sincronización entre instancias.
+
+Aceptación:
+Reintento directo, pull obsoleto, reinicio y solicitudes concurrentes no vuelven a mover existencias. Un recuento legítimo debe tener una revisión explícita y auditable.
+
+4.3. T02 — Se descuenta dos veces una venta anterior al físico
+
+Dónde:
+- server.ts:9001, captura del físico.
+- server.ts:9199, delta del cierre.
+- server.ts:9349 y 9370, aprobación.
+
+Reproducción:
+Snapshot al abrir: 15.
+Venta antes de capturar el físico: 5; stock vigente 10.
+Físico observado: 9.
+Sin movimientos posteriores, aprobar.
+Observado: 4.
+Esperado: 9.
+
+Corrección:
+Separar snapshot de apertura, referencia de la captura y saldo vigente al aplicar. La diferencia física debe calcularse contra la referencia del mismo momento de observación y aplicarse una vez al saldo vigente.
+No reemplazar siempre el saldo actual por el físico: eso también borraría movimientos posteriores a la captura.
+Conservar referencias y movimientos para auditoría. Si no puede determinarse un corte temporal consistente, exigir recuento de ese ítem.
+
+Aceptación adicional:
+En el mismo ejemplo, una venta posterior al físico de 2 debe conservarse; el cierre debe terminar en 7, no en 9 ni en 2.
+
+4.4. T14 — Producción puede ser sustituida por una base de pruebas
+
+Dónde:
+- database.ts:67, ensureProdDbExists.
+
+Problema:
+Se considera inválida una base productiva por ser menor de 200 KB y se copia gtr_pos_sandbox.db si la de pruebas supera ese tamaño.
+
+Reproducción en archivos temporales:
+Base productiva SQLite válida de 8.192 bytes, stock 8.
+Base de pruebas de 311.296 bytes, stock 999.
+Observado al ejecutar la lógica: producción pasa a stock 999.
+Esperado: la base productiva válida no se sustituye.
+
+Corrección:
+Eliminar la promoción automática de sandbox a producción por tamaño. El tamaño no acredita integridad ni antigüedad.
+Si falta producción, seguir un procedimiento explícito de creación o restauración validada; no tomar datos de pruebas como respaldo comercial.
+Revisar los demás caminos de arranque, recuperación y copia.
+
+Este caso no demuestra que la base real de la tienda tenga ese tamaño o haya sido sustituida. Corrige el comportamiento del código y verifica el entorno sin modificarlo.
+
+4.5. T13 — El cliente puede anular el entorno del servidor
+
+Dónde:
+- server.ts:196–230, middleware de selección de entorno.
+
+Reproducción:
+Servidor configurado APP_ENV=sandbox.
+Solicitud con x-app-environment: production.
+Observado: isSandbox=false.
+Esperado: la cabecera no cambia el entorno forzado por el servidor.
+
+Corrección:
+Determinar la base mediante configuración y, cuando corresponda, una identidad y autorización verificadas. Una cabecera libre no puede anular el entorno.
+Probar permisos y selección de base juntos, no solo una función aislada.
+
+4.6. T08 / S04 — Colisión de SKU restaura stock remoto antiguo
+
+Dónde:
+- firebaseSync.ts:887–892 y validaciones de stock previas al remapeo.
+
+Reproducción:
+Local: id=1, SKU X, stock 8, actualizado 10:00.
+Remoto: id=999, mismo SKU X, stock 30, actualizado 08:00.
+Observado tras pull: id=1, stock 30, actualizado 08:00.
+Esperado: el stock local reciente no cambia y la colisión se registra.
+
+Causa:
+Se valida contra el ID remoto y luego se cambia a la identidad local por SKU. Esa modificación evita la comparación correcta con el registro que finalmente será sustituido.
+
+Corrección:
+Tratar la identidad incompatible como conflicto. No remapear silenciosamente ni usar INSERT OR REPLACE para imponerla.
+Si existe una correspondencia autorizada, resolverla antes de validar versión, borrado, stock y relaciones.
+Añadir pruebas de colisión con artículos inactivos/eliminados y movimientos dependientes.
+
+5. REINTENTOS, DEVOLUCIONES, CRÉDITO Y CÁLCULOS
+
+5.1. T04 — Devolver dos líneas con una sola clave falla
+
+Dónde:
+- database.ts:921, índice de sale_returns.client_operation_id.
+- server.ts:5306–5317, inserción de líneas devueltas.
+
+Reproducción:
+Devolver dos productos distintos de una venta en una sola solicitud con client_operation_id estable.
+Observado: UNIQUE constraint failed: sale_returns.client_operation_id; respuesta 500 y rollback.
+Esperado: ambas líneas devueltas una sola vez.
+
+Corrección:
+La clave única debe identificar la operación completa. Varias líneas pueden pertenecer a la misma operación. Usar una cabecera única con hijos o una restricción compuesta coherente con el modelo.
+Preservar atomicidad de inventario, dinero y deuda.
+
+5.2. T05, T06 y T21 — El frontend no completa la deduplicación
+
+Dónde:
+- src/views/ExtraViews.tsx:2192, devolución.
+- src/views/CuentasPorCobrarView.tsx:212, abono.
+- src/views/Inventory.tsx:841, ingreso.
+- server.ts:3878, ingreso de stock, y las rutas de devolución/abono.
+
+Reproducciones:
+- Stock 15, venta de 3 => 12. Repetir la misma devolución parcial de 1 sin clave termina en 14; debe terminar en 13.
+- Repetir el mismo abono de 10 sin clave registra 20; debe registrar 10.
+- Stock 10, ingreso de 5 repetido con la misma clave termina en 20; debe quedar 15.
+
+Corrección:
+Generar una clave estable al iniciar la intención de usuario y persistirla durante doble clic, timeout, recarga o reintento de cola offline. No generar una clave nueva en cada intento HTTP.
+El backend debe registrar resultado, tipo y huella del payload dentro del flujo transaccional. Misma clave con otro contenido debe rechazarse claramente.
+Definir compatibilidad para clientes antiguos sin clave; no fingir que dos operaciones iguales son siempre el mismo intento, porque dos abonos legítimos del mismo importe también son posibles.
+
+Aceptación:
+Una acción duplicada no mueve saldos dos veces; dos acciones legítimas con claves distintas sí se registran; una clave reutilizada con contenido distinto se rechaza.
+
+5.3. T18 — Reintentos anteriores al cambio quedan atascados
+
+Dónde:
+- server.ts:5680 y migraciones de sales/processed_operations.
+
+Reproducción:
+Existe una venta anterior con client_operation_id, pero todavía no existe su entrada en el contrato nuevo de processed_operations.
+Reintentar esa operación.
+Observado: intenta insertar otra venta y termina en 500 por índice único.
+Esperado: devuelve el resultado original, sin afectar stock/caja.
+
+Corrección:
+Migrar la evidencia histórica o mantener un lookup compatible que verifique identidad y contenido. Evitar inventar respuestas o aceptar otra operación solo porque coincide la clave.
+No alterar claves históricas para eludir el índice.
+
+5.4. T07 — La deuda cancelada reaparece al sincronizar
+
+Dónde:
+- server.ts:5394, ajuste de accounts_receivable.
+- server.ts:5510, syncMap de devolución.
+
+Reproducción:
+Venta a crédito por 100, abono inicial 20, deuda 80.
+Devolver toda la venta: deuda local 0.
+Pull de la cuenta remota antigua: deuda vuelve a 80.
+Esperado: deuda 0 con trazabilidad de devolución y pagos.
+
+Corrección:
+Incluir las cuentas y pagos afectados en la réplica de la operación. Usar versiones y estados coherentes para impedir que una versión anterior restaure deuda.
+Conservar el tratamiento correcto del dinero previamente cobrado; cancelar deuda y devolver efectivo son efectos distintos y deben cuadrar.
+
+5.5. T19 — Las devoluciones parciales exceden lo cobrado por redondeo
+
+Dónde:
+- server.ts:5299 y cálculo acumulado de devoluciones.
+
+Reproducción:
+3 unidades a BOB 3: bruto 9; descuento 1; cobrado 8.
+Tres devoluciones parciales de una unidad.
+Observado: 2,67 + 2,67 + 2,67 = 8,01.
+Esperado: acumulado 8,00.
+
+Corrección:
+Calcular importes monetarios con precisión consistente, asignar residuos y limitar cada parcial al neto aún atribuible. El resultado debe ser independiente de cómo se fragmente la devolución.
+Respetar tasa histórica y descuentos por línea/venta.
+
+5.6. T24 — Abono en BOB descuenta unidades USD sin convertir
+
+Dónde:
+- server.ts:6024, cálculo de actualPayment/deuda.
+- server.ts:6062, conversión para caja.
+- src/views/CuentasPorCobrarView.tsx, etiquetas y moneda.
+
+Reproducción:
+Deuda USD 10.
+Pago BOB 5, tasa 10 BOB/USD.
+Observado: deuda USD 5 y caja BOB 5.
+Esperado: deuda USD 9,50 y caja BOB 5.
+
+Corrección:
+Convertir el pago a la moneda de la deuda antes de descontarlo. Registrar por separado importe original, moneda, tasa aplicada, equivalente a deuda y movimiento de caja.
+Validar tasa positiva/finita, exceso de pago, residuos y moneda mostrada en la UI.
+Probar ambas direcciones de conversión.
+
+5.7. T25 — El precio de línea está validado, pero el total no
+
+Dónde:
+- server.ts:6148, alta de pedido.
+- server.ts:6303, edición.
+- server.ts:6422, finalización.
+
+Reproducción:
+Un vendedor envía una línea autorizada: cantidad 1, precio 10, descuento 0.
+Envía total=1.
+Observado: el pedido se acepta/finaliza y sales.total queda 1 aunque las líneas suman 10.
+Esperado: el servidor calcula o valida total=10.
+
+Corrección:
+Calcular subtotal, descuentos autorizados, impuestos si corresponden y total con un contrato común del servidor. Validar coherencia completa al crear, editar y finalizar.
+Conservar permisos de precios especiales de administrador; no confundirlos con una cabecera arbitraria.
+
+5.8. P06 — Cabecera de crédito y pagos transferidos no coinciden
+
+Dónde:
+- server.ts, pago de pedido y finalización a crédito.
+- pending_sales, accounts_receivable y credit_payments.
+
+Reproducción:
+Pedido total 100; abonos previos 80.
+Finalizar a crédito enviando initial_abono=50.
+Observado: paid_amount se limita a 100, pero los pagos transferidos suman 130.
+Esperado: rechazo atómico del exceso, o aplicación de una política explícita y coherente en cabecera, detalle, caja y eventual cambio al cliente.
+
+Corrección:
+No limitar solo la cabecera mientras se registra el importe bruto en el detalle. Los movimientos monetarios deben explicar exactamente el saldo.
+Probar abono previo, abono final, reintento y devolución posterior.
+
+5.9. R03 — Diagnóstico fiscal interpreta USD como BOB
+
+Dónde:
+- src/utils/fiscalMath.ts, calculatePosTransaction.
+
+Reproducción:
+Precio 10, cantidad 1, sin descuento, moneda de entrada USD, tasa 10.
+Observado: finalTotalBs=10 y finalTotalUSD=1.
+Esperado: finalTotalBs=100 y finalTotalUSD=10.
+
+Corrección:
+Definir y cumplir las unidades de todos los argumentos y resultados. Revisar los consumidores para que el diagnóstico y los cálculos del sistema usen el mismo contrato.
+Este hallazgo se refiere a esa utilidad; no demuestra que toda venta USD esté mal.
+
+6. RESERVAS, CONTINGENCIA Y EDICIÓN DE PRODUCTOS
+
+6.1. T15 y T16 — Las rutas no comparten disponibilidad real
+
+Dónde:
+- server.ts:427, getReservedStock.
+- server.ts:5704, venta POS.
+- server.ts:6148, alta de pendientes.
+- server.ts:6952–6970, aprobación offline.
+- Rutas de edición, cancelación y finalización de pendientes.
+
+Reproducciones:
+A. Físico 10; pedidos reservan 8; disponible 2. Aprobar offline una venta de 5 sin force.
+   Observado: se aprueba y físico queda 5, aunque sigue reservado 8.
+   Esperado: rechazo por disponibilidad insuficiente.
+B. Con físico 10, crear dos pedidos de 8.
+   Observado: reservado 16.
+   Esperado: no aceptar la segunda reserva de forma que exceda disponibilidad.
+
+Corrección:
+Compartir el cálculo de físico, reservado y disponible dentro de la transacción de todas las rutas.
+Al finalizar un pedido, excluir su propia reserva para no descontarla dos veces.
+Revisar concurrencia, cancelaciones, edición de cantidades y force con permisos y auditoría explícitos.
+Actualizar las versiones de inventario al cambiar reservas y mostrar stock_available en las pantallas que venden; no limitarse a añadir el campo a la API.
+
+6.2. T17 — El abono inicial offline se pierde antes de aprobar
+
+Dónde:
+- database.ts:410, offline_pending_sales.
+- server.ts:6731, recepción.
+- server.ts:7099, lectura del abono en aprobación.
+
+Reproducción:
+Enviar una venta offline a crédito por 100 con abono inicial 20 y aprobarla.
+Observado: caja 0, deuda 100.
+Esperado: caja 20, deuda 80.
+
+Causa:
+La aprobación lee pendingSale.initial_abono, pero ese dato no está conservado por el esquema y la recepción.
+
+Corrección:
+Migrar y persistir los campos necesarios del payload; registrar pago, caja, cuenta y réplica una sola vez.
+Probar la secuencia de envío real, persistencia, reinicio y aprobación, no solo una fila fabricada a mano que ya tenga el dato.
+
+6.3. T20 — Un formulario antiguo vuelve a crear stock vendido
+
+Dónde:
+- server.ts:3036, PUT de producto.
+- src/views/Inventory.tsx:1335, carga/guardado de ficha.
+
+Reproducción:
+Abrir ficha con stock 15.
+Otra venta deja stock vigente 8.
+Guardar un cambio de precio desde la ficha antigua que todavía envía stock 15.
+Observado: stock vuelve a 15.
+Esperado: conserva 8, o rechaza un ajuste explícito por conflicto de versión.
+
+Corrección:
+Separar edición de metadatos y ajuste de existencias. Si se envía un ajuste, exigir intención, permisos, versión esperada y motivo auditable.
+La mejora actual de “conservar stock cuando se omite” debe mantenerse; no protege el caso en que la UI envía un valor obsoleto.
+
+6.4. S01 — Líneas antiguas de un pedido reaparecen tras pull
+
+Dónde:
+- server.ts:6303 y réplica de pending_sale_items.
+
+Reproducción:
+Pedido con línea de cantidad 2.
+Editar para sustituirla por una nueva línea de cantidad 1.
+Sincronizar ida y vuelta con la copia remota anterior.
+Observado: reaparecen ambas líneas, total 3 unidades.
+Esperado: solo la revisión vigente de 1 unidad.
+
+Corrección:
+Propagar la eliminación o sustitución de cada detalle con tombstones/revisiones y una secuencia transaccional coherente. Proteger frente a mensajes remotos fuera de orden.
+La marca de borrado de la cabecera completa no resuelve las líneas retiradas en una edición.
+
+7. RÉPLICA, AUDITORÍA, RESPALDOS Y CACHÉ
+
+7.1. T09 — Un intento de réplica se confunde con entrega confirmada
+
+Dónde:
+- firebaseSync.ts:336, salida por máximo ID cacheado.
+- firebaseSync.ts:360, missedRows/backfill.
+- firestoreIntegrityMiddleware.ts:188, escritura del ledger antes del commit remoto.
+
+Reproducción:
+SQLite tiene ventas 1 y 2.
+Firestore solo tiene venta 2.
+Existe una entrada de validación/intento para venta 1 en firestore_transaction_ledger.
+Ejecutar push.
+Observado: remoto sigue conteniendo solo 2.
+Esperado: contiene 1 y 2.
+
+Corrección:
+Separar intención, validación, envío y confirmación durable. Reintentar por operación hasta acuse remoto comprobado.
+No inferir cobertura completa por máximo ID ni por la mera existencia de una fila del ledger.
+Probar fallo antes/durante/después del commit, reinicio y pérdida de respuesta.
+
+7.2. T11 — Las auditorías usan criterios distintos
+
+Dónde:
+- forensicAuditEngine.ts:397 y 431, catálogo.
+- forensicAuditEngine.ts:729, 761, 814 y 970, consultas por período.
+- Flujo individual y clasificación de movimientos.
+
+Reproducción:
+Aplicar un ajuste físico válido que deja stock 7.
+Auditoría individual: esperado 7.
+Catálogo: todavía esperado 8, informa drift=-1.
+Esperado: ambos reconocen el mismo movimiento y no inventan discrepancia.
+
+Corrección:
+Unificar identidad, tipo y filtros de movimientos para auditoría individual, catálogo y período.
+No excluir un ajuste legítimo solo por contener “Conciliación” en su referencia.
+Evitar a la vez contar dos veces el mismo efecto.
+
+7.3. T12 — Una compra aislada se toma como historia completa
+
+Dónde:
+- forensicAuditEngine.ts:388, hasSufficientHistory.
+- forensicAuditEngine.ts:1098 y 1113, conciliación.
+
+Reproducción:
+Stock vigente 55; no hay alta/saldo inicial validado; solo existe una compra documentada de 5.
+Observado: la conciliación acepta la historia y cambia stock a 5.
+Esperado: no modificar existencias por falta de ancla histórica suficiente.
+
+Corrección:
+Exigir un saldo inicial comprobado y continuidad suficiente. Una compra no demuestra que el saldo anterior fuera cero.
+Cuando falte historia, reportar incertidumbre y solicitar evidencia o conteo; no ejecutar una reparación destructiva basada en una inferencia incompleta.
+El rechazo actual cuando no hay ni alta ni compra es útil y debe conservarse.
+
+7.4. T10 — El respaldo puede omitir datos confirmados en WAL
+
+Dónde:
+- server.ts:4408, snapshot.
+- Copia gtr_pos.db.bak ejecutada antes del checkpoint.
+
+Reproducción:
+SQLite WAL con un lector que mantiene abierto un snapshot.
+Confirmar una escritura posterior.
+Checkpoint devuelve busy=1, log=1, checkpointed=0.
+Observado: el código ignora el resultado y acepta una copia que no contiene la escritura confirmada.
+Esperado: copia consistente con la escritura, o rechazo explícito y reintento.
+
+Corrección:
+Usar una API de backup consistente o un procedimiento que compruebe el checkpoint y la integridad antes de aceptar la copia.
+No capturar el error y continuar como si la copia estuviera completa. Probar restauración y contenido, no solo existencia del archivo.
+Conservar el caso sin lector que ya pasa.
+
+7.5. Q01 — La lista vieja recibe una versión nueva
+
+Dónde:
+- src/context/AppContext.tsx:1380 y consulta posterior alrededor de 1411.
+- Respuesta de productos y X-Catalog-Version / X-Inventory-Version.
+
+Reproducción:
+Descargar una lista cuyo stock es 8.
+Antes de consultar versión por separado, otra venta deja stock 7.
+La consulta posterior devuelve esa versión nueva.
+Observado: se marca la lista de stock 8 con la versión correspondiente a 7 y se omite la próxima actualización.
+Esperado: la lista conserva la versión de su propia respuesta y se vuelve a descargar.
+
+Corrección:
+Vincular datos y versiones al mismo snapshot/respuesta. Evitar que una consulta posterior sobrescriba esa asociación. Descartar respuestas fuera de orden.
+Comprobar el caso con respuestas HTTP demoradas; no basta verificar que el nombre de la cabecera aparezca en el código.
+
+7.6. S07 — Dos SQLite independientes pueden sobrescribir movimientos
+
+Condición:
+Este escenario solo aplica si realmente hay varias instancias escritoras con bases SQLite independientes compartiendo Firestore. Esa topología productiva no se verificó.
+
+Reproducción aislada:
+Dos bases parten de stock 15.
+Cada una vende 7 y genera venta con id local 1.
+Ambas suben a las mismas colecciones.
+Observado: stock remoto 8 y una venta.
+Esperado para un inventario compartido: stock 1 y dos ventas.
+
+Acción:
+Verificar la topología real antes de cambiar la arquitectura. Si solo hay una autoridad escritora, comprobar y documentar esa restricción y bloquear escritores no autorizados.
+Si varias escritoras están soportadas, IDs numéricos locales y último stock sobrescrito no bastan: se necesita identidad global y un mecanismo transaccional/registro de movimientos que preserve ambos efectos.
+No introducir una reestructuración grande para una condición que no se haya confirmado.
+
+8. MEJORAS EXISTENTES QUE DEBES CONSERVAR
+
+La revisión detectó avances reales. Al corregir los defectos, evita perder:
+
+- Rechazo de cantidades negativas/no enteras y de canjes sin puntos suficientes.
+- Conservación del stock omitido en PUT y atomicidad con la auditoría esencial de ajustes.
+- Tasa histórica y descuento en devoluciones simples.
+- Registro y réplica de sale_returns.
+- Cancelación local de deuda en devolución de crédito.
+- Validación de precios del vendedor, preservación de pedidos terminales y réplica de detalles.
+- Registro de caja al finalizar pedidos.
+- Corrección de columnas del catálogo y agrupación de demanda offline.
+- Reconocimiento de ajustes físicos en auditoría individual.
+- Mejoras de altas dentro del período y reconstrucción de ciertos cierres.
+- Reinicio de turno que conserva ventas y detalles.
+- Reportes que reincorporan costo de devoluciones y muestran pérdidas.
+- Conservación del timestamp al preservar stock local y nueva consulta remota en integridad.
+- Conteo ciego que no revela diferencia al capturar.
+- GET de conteo sin mutar alcance.
+- Reintento directo de cierre que ya no reaplica el ajuste.
+
+Una secuencia normal de 500 operaciones cuadró bajo el esquema previsto simulado. Repetirla con la inicialización/migración real corregida.
+
+9. MATRIZ MÍNIMA DE ACEPTACIÓN
+
+Ejecuta estas comprobaciones contra la implementación corregida. Documenta importes y saldos antes/después.
+
+- T01: base nueva/antigua/restaurada; venta, producto, devolución y abono sin conflicto de columnas.
+- T02: 15 al abrir, venta 5, físico 9 => 9; si después del físico se vende 2 => 7.
+- T03: 8 => conteo 9 => pull obsoleto => reintento; queda 9 y una sola aplicación.
+- T04: devolución de dos productos con una clave; éxito atómico sin duplicación.
+- T05/T06/T21: reintentos de devolución, abono e ingreso desde el frontend real; un solo efecto.
+- T07: crédito 100, pagado 20; devolución total => deuda 0; push/pull no restaura 80.
+- T08: mismo SKU/diferente identidad y stock remoto antiguo; no sobrescribe el local.
+- T09: remoto tiene 2, falta 1 aunque existe ledger; al terminar contiene ambas.
+- T10: backup con WAL ocupado; restauración completa o fallo explícito.
+- T11: individual, catálogo y período reconocen el mismo conteo.
+- T12: stock 55 con única compra 5 y sin ancla; conciliación no lo reduce a 5.
+- T13: cabecera de cliente no cambia APP_ENV forzado.
+- T14: base productiva válida pequeña no se reemplaza por sandbox.
+- T15: físico 10, reservado 8; offline de 5 se rechaza y físico queda 10.
+- T16: físico 10; no se aceptan dos reservas activas de 8.
+- T17: offline crédito 100 con abono 20 => caja 20/deuda 80; persiste tras reiniciar.
+- T18: reintento de venta histórica devuelve el resultado sin crear otra venta.
+- T19: tres parciales de una venta neta 8 suman 8,00 como máximo.
+- T20: guardar precio desde ficha con stock antiguo no restaura unidades vendidas.
+- T22: GET de conteo no modifica alcance ni saldos; conservar el comportamiento que ya cumple.
+- T23: reintento directo de cierre no reaplica; conservar el comportamiento que ya cumple.
+- T24: deuda USD 10, pago BOB 5 a tasa 10 => deuda USD 9,50/caja BOB 5.
+- T25: línea 10 y cabecera total 1 no se finalizan con importes incompatibles.
+- P06: pedido 100, abono 80 y solicitud de otro 50 no deja cabecera 100/detalle 130.
+- R03: entrada USD 10 a tasa 10 => BOB 100/USD 10.
+- S01: editar cantidad 2 a 1 y sincronizar conserva solo la revisión vigente de 1.
+- S07: validar la topología; si hay dos escritoras soportadas, conservar dos ventas y sus movimientos.
+- Q01: datos de stock 8 no se etiquetan con la versión posterior de stock 7.
+
+Pruebas transversales:
+- Doble clic, reintento después de timeout, reinicio con cola pendiente y dos solicitudes simultáneas.
+- Error entre stock, detalle, dinero y auditoría: rollback completo, sin efectos parciales.
+- Misma clave/mismo contenido: resultado original. Misma clave/otro contenido: conflicto.
+- Una venta legítima nueva no se confunde con el reintento de otra.
+- BOB y USD, tasas históricas, descuentos, devoluciones parciales y crédito.
+- Altas/ediciones/cancelaciones/finalización de pedidos y disponibilidad en todas las pantallas.
+- Réplica de ida y vuelta con datos viejos, borrados, colisiones y fallos intermedios.
+- Permisos reales de administrador/vendedor y separación de entornos.
+- Migración repetida sin pérdida; backup y restauración con integridad y contenido comprobados.
+- Build, TypeScript, lint y pruebas del proyecto, indicando cualquier limitación del entorno.
+- Secuencia de 500 operaciones con stock, caja, crédito y reportes contrastados contra un modelo independiente.
+
+10. CÓMO MEJORAR LAS PRUEBAS EXISTENTES
+
+Revisar tests/audit_cycle_runner.cjs:
+- Actualmente crea manualmente el contrato nuevo de processed_operations y por eso no detecta la inicialización incompatible.
+- Sustituir o complementar los casos de fórmulas copiadas por rutas/servicios reales.
+- Q01 debe ejecutar la carrera de respuestas, no solo buscar cabeceras con includes.
+- Las pruebas de réplica deben cubrir un ciclo completo y no solo una fórmula de merge aislada.
+
+Revisar scripts/verify_pre_production_readiness.cjs:
+- Verificar importes esperados de operaciones conocidas, no solo presencia de campos.
+- No presentar “ready for production” como certificación global de compatibilidad.
+- No arrancar pruebas que escriban en la base comercial. Hacer explícita la base de pruebas y aislarla.
+
+No adaptes expectativas para ocultar fallos. Si una regla cambia por una decisión válida, documenta la regla anterior, la nueva y su efecto.
+
+11. ORDEN DE IMPLEMENTACIÓN
+
+Primero:
+1) Contrato único de operaciones, migración y compatibilidad histórica.
+2) Aplicación durable del conteo y referencia temporal correcta.
+3) Separación producción/sandbox y resolución segura de colisiones de identidad.
+
+Después:
+4) Disponibilidad/reservas compartidas y protección de edición de stock.
+5) Deduplicación de punta a punta, devoluciones, moneda de deuda y abono offline.
+6) Réplica de deudas y detalles, confirmación durable y auditorías consistentes.
+7) Respaldo, caché, diagnóstico y comprobaciones finales.
+
+Verifica los problemas condicionados al entorno sin asumir que están ocurriendo en producción.
+
+12. ENTREGABLES QUE NECESITO
+
+A. Diagnóstico actualizado:
+   Commit inspeccionado; qué hallazgos se confirmaron, cuáles ya estaban corregidos y cuáles requieren información del entorno. Identificar causa y efecto sin contar síntomas repetidos como causas independientes.
+
+B. Cambios concretos:
+   Rama y commit/diff del parche, lista de archivos modificados y explicación breve de cada cambio. Cambios localizados, sin reestructuración innecesaria.
+
+C. Migración segura:
+   SQL/código versionado e idempotente, compatibilidad con bases anteriores y operaciones pendientes. Explicar recuperación ante fallo sin borrar actividad posterior ni datos comerciales.
+
+D. Pruebas:
+   Casos reproducibles, datos ficticios, resultados esperados y observados después del parche, comandos ejecutados y evidencia de build/TypeScript/lint. Separar fallos de código de limitaciones del entorno.
+
+E. Preparación de publicación:
+   Identificador de versión, comprobaciones previas, procedimiento de copia consistente, migración y verificación posterior. Señalar exactamente qué pasos dependen de revisar el esquema real o el build desplegado.
+   Preparar el resultado para revisión antes de cualquier publicación o modificación de saldos reales.
+
+F. Resumen para el propietario:
+   Qué se corrigió, qué ciclos completos quedaron probados, qué queda pendiente y cómo verificar la versión en uso. No prometer ausencia total de conflictos sin evidencia.
+
+Empieza verificando el commit y la inicialización real. Luego reproduce y corrige los bloqueadores en ese orden. El objetivo es que inventario, reservas, conteos, crédito, caja y réplica expliquen los mismos movimientos y que un reintento no los duplique.
+

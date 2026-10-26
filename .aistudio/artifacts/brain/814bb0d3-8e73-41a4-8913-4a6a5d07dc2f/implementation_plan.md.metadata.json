@@ -1,6 +1,6 @@
 {
-  "summary":  "Certificación Pre-Producción y Auditoría de No-Regresión completada al 100%. Respaldos físicos generados y 13/13 pruebas de producción superadas.",
-  "updatedAt":  "2026-10-25T08:53:44.322643784Z",
+  "summary":  "Plan de implementación estructurado por fases para resolver exclusivamente las fallas críticas de base de datos y caja/monetarias identificadas en el archivo de auditoría. Incluye migración idempotente de processed_operations, matemática de conteos físicos, conversión de moneda en cuentas por cobrar, unicidad en devoluciones multilínea, validación de totales y reservas, persistencia de anticipos offline y respaldos nativos con db.backup().",
+  "updatedAt":  "2026-10-26T11:38:25.286312636Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

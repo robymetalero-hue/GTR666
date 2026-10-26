@@ -826,12 +826,15 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
 
             if (table === 'inventory_counts') {
               try {
-                const localCount = db.prepare("SELECT status FROM inventory_counts WHERE id = ?").get(docId) as any;
-                if (localCount && ['cancelado', 'aprobado', 'cerrado'].includes(localCount.status)) {
+                const localCount = db.prepare("SELECT status, applied_at FROM inventory_counts WHERE id = ?").get(docId) as any;
+                if (localCount && (['cancelado', 'aprobado', 'cerrado', 'finalizado'].includes(localCount.status) || localCount.applied_at)) {
                   if (['en_progreso', 'pausado', 'completado'].includes(data.status)) {
                     console.log(`[Sync Count Shield] Retaining local resolved status "${localCount.status}" for count #${docId} over stale remote "${data.status}".`);
                     continue;
                   }
+                }
+                if (localCount && localCount.applied_at && !data.applied_at) {
+                  data.applied_at = localCount.applied_at;
                 }
               } catch (_) {}
             }
