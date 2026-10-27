@@ -881,32 +881,42 @@ export default function POS() {
     const [pendingClientPhone, setPendingClientPhone] = useState("");
     const [pendingTransportCompany, setPendingTransportCompany] = useState("");
     const [isSavingPending, setIsSavingPending] = useState(false);
+    const isSavingPendingRef = useRef(false);
 
     const handleSavePendingSale = async (e: React.FormEvent) => {
         e.preventDefault();
+        if (isSavingPendingRef.current) return;
         if (!pendingClientName.trim() || !pendingDestination.trim()) {
             showNotification("⚠️ Nombre de cliente y destino son obligatorios.", "error");
             return;
         }
+        isSavingPendingRef.current = true;
         setIsSavingPending(true);
         try {
-            const items = cart.map(item => ({
-                product_id: item.id,
-                quantity: item.cartQuantity || 1,
-                price: item.selectedPrice || item.price_unit
-            }));
-            
-                const opId = "pending_" + Date.now() + "_" + Math.random().toString(36).substring(2, 9);
-                const payload = {
-                    client_name: pendingClientName.trim(),
-                    destination: pendingDestination.trim(),
-                    client_phone: pendingClientPhone.trim() || null,
-                    transport_company: pendingTransportCompany.trim() || null,
-                    total: subtotal,
-                    discount: 0,
-                    items,
-                    clientOperationId: opId
+            // V04 & V05: Calculate explicit unit prices in BOB and enforce currency: 'BOB'
+            const items = cart.map(item => {
+                const itemPriceBs = getCartItemPriceBs(item);
+                return {
+                    product_id: item.id,
+                    quantity: item.cartQuantity || 1,
+                    price: itemPriceBs
                 };
+            });
+
+            const calculatedTotalBs = items.reduce((sum, it) => sum + (it.quantity * it.price), 0);
+            const opId = "pending_" + Date.now() + "_" + Math.random().toString(36).substring(2, 9);
+            const payload = {
+                client_name: pendingClientName.trim(),
+                destination: pendingDestination.trim(),
+                client_phone: pendingClientPhone.trim() || null,
+                transport_company: pendingTransportCompany.trim() || null,
+                total: calculatedTotalBs,
+                discount: 0,
+                currency: 'BOB',
+                exchange_rate: exchangeRate,
+                items,
+                clientOperationId: opId
+            };
                 if (!navigator.onLine) {
                     await saveOfflineAction('create_pending_sale', '/api/pending-sales', 'POST', payload);
                     clearCart(true);

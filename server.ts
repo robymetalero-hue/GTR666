@@ -650,6 +650,7 @@ async function startServer() {
   server.on("upgrade", (request, socket, head) => {
     const { pathname } = new URL(request.url || "", `http://${request.headers.host || "localhost"}`);
     if (pathname === "/live") {
+      // V01: Voice channel is reserved exclusively to the main owner/admin
       const authUser = authenticateWebSocketUpgrade(request, socket, true);
       if (!authUser) return;
       (request as any).verifiedUser = authUser;
@@ -5563,6 +5564,9 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       `).all();
       res.json(returns);
     } catch (e: any) {
+      if (e.message === 'CONFLICT_409' || e.statusCode === 409) {
+        return res.status(409).json({ error: "Conflicto: la clave de operación ya fue utilizada con datos diferentes.", client_operation_id: clientOpId });
+      }
       res.status(500).json({ error: e.message });
     }
   });
@@ -5575,6 +5579,12 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
       if (!sale_id || !Array.isArray(item_refunds) || item_refunds.length === 0) {
         return res.status(400).json({ error: "Datos de devolución inválidos." });
+      }
+      for (const it of item_refunds) {
+        const rawQty = Number(it.quantity);
+        if (!Number.isFinite(rawQty) || !Number.isInteger(rawQty) || rawQty <= 0) {
+          return res.status(400).json({ error: "Las cantidades a devolver deben ser números enteros positivos." });
+        }
       }
 
       const stockRestore = db.prepare('UPDATE products SET stock = stock + ?, updated_at = ? WHERE id = ?');
@@ -5925,8 +5935,13 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       return res.status(400).json({ error: "Se requiere registrar o seleccionar un cliente para compras al crédito / cuentas por cobrar." });
     }
 
-      const safeTotal = Math.max(0, Number(total || 0));
-      const safeDiscount = Math.max(0, Number(discount || 0));
+      const numTotal = Number(total);
+      const numDiscount = discount !== undefined ? Number(discount) : 0;
+      if (!Number.isFinite(numTotal) || numTotal < 0 || !Number.isFinite(numDiscount) || numDiscount < 0) {
+        return res.status(400).json({ error: "El total y descuento deben ser valores numéricos finitos y válidos." });
+      }
+      const safeTotal = numTotal;
+      const safeDiscount = numDiscount;
       const safeCurrency = currency || 'BOB';
       try {
         const rateRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('exchange_rate') as any;
@@ -6057,10 +6072,16 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
         const auditPayloads: any[] = [];
         const transaction = db.transaction(() => {
-          // C02 & S06: Atomic transactional check in processed_operations
+          // C02 & S06 & K07: Atomic transactional check in processed_operations
           if (clientOpId) {
-            const existingOp = db.prepare('SELECT response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
+            const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
             if (existingOp) {
+              const incomingHash = crypto.createHash('sha256').update(JSON.stringify({ items, total: safeTotal, discount: safeDiscount, client_id, payment_method })).digest('hex');
+              if (existingOp.payload_hash && existingOp.payload_hash !== incomingHash) {
+                const conflictErr = new Error("CONFLICT_409");
+                (conflictErr as any).statusCode = 409;
+                throw conflictErr;
+              }
               return { ...JSON.parse(existingOp.response_body), isDuplicate: true };
             }
           }
@@ -6233,12 +6254,11 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           }
 
           if (clientOpId) {
-            try {
-              db.prepare(`
-                INSERT INTO processed_operations (client_operation_id, operation_type, response_body, status)
-                VALUES (?, 'sale', ?, 'completed')
-              `).run(clientOpId, JSON.stringify({ success: true, saleId }));
-            } catch (_) {}
+            const payloadHash = crypto.createHash('sha256').update(JSON.stringify({ items, total: safeTotal, discount: safeDiscount, client_id, payment_method })).digest('hex');
+            db.prepare(`
+              INSERT INTO processed_operations (client_operation_id, operation_type, payload_hash, response_body, status, created_at)
+              VALUES (?, 'sale', ?, ?, 'completed', ?)
+            `).run(clientOpId, payloadHash, JSON.stringify({ success: true, saleId, total: safeTotal }), nowIso);
           }
           return { saleId, itemIds, productIds, arId, cpId, accId, movId, inventoryAuditLogIds, isDuplicate: false };
         });
@@ -6357,6 +6377,13 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   // REST API: Accounts Receivable (Cuentas por Cobrar)
   app.get("/api/accounts-receivable", (req, res) => {
     try {
+      const verifiedUser = (req as any).verifiedUser;
+      const uRole = String(verifiedUser?.role || '').toLowerCase();
+      const isAdmin = verifiedUser && (['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser));
+      const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
+      if (!isAdmin && userPerms.manage_credits === false) {
+        return res.status(403).json({ error: "No tienes autorización para consultar cuentas por cobrar." });
+      }
       const records = db.prepare(`
         SELECT ar.*, c.name as client_name, c.phone as client_phone, s.created_at as sale_date, s.total as sale_total
         FROM accounts_receivable ar
@@ -6373,6 +6400,13 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   app.get("/api/accounts-receivable/:id/history", (req, res) => {
     const { id } = req.params;
     try {
+      const verifiedUser = (req as any).verifiedUser;
+      const uRole = String(verifiedUser?.role || '').toLowerCase();
+      const isAdmin = verifiedUser && (['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser));
+      const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
+      if (!isAdmin && userPerms.manage_credits === false) {
+        return res.status(403).json({ error: "No tienes autorización para consultar el historial de crédito." });
+      }
       const history = db.prepare(`
         SELECT cp.*, u.username as user_name
         FROM credit_payments cp
@@ -6390,9 +6424,18 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     const { id } = req.params;
     const { amount, payment_method, user_id, notes } = req.body;
     const clientOpId = req.body.clientOperationId || req.body.client_operation_id || null;
-    const payAmount = Math.max(0, Number(amount || 0));
-    if (payAmount <= 0) {
-      return res.status(400).json({ error: "El monto del pago debe ser mayor a cero." });
+    
+    const verifiedUser = (req as any).verifiedUser;
+    const uRole = String(verifiedUser?.role || '').toLowerCase();
+    const isAdmin = verifiedUser && (['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser));
+    const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
+    if (!isAdmin && userPerms.manage_credits === false) {
+      return res.status(403).json({ error: "No tienes autorización para registrar abonos a cuentas por cobrar." });
+    }
+
+    const payAmount = Number(amount);
+    if (!Number.isFinite(payAmount) || payAmount <= 0) {
+      return res.status(400).json({ error: "El monto del pago debe ser mayor a cero y un valor numérico finito." });
     }
 
     try {
@@ -6557,6 +6600,8 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
   app.post("/api/pending-sales", (req, res) => {
     const { client_name, destination, client_phone, transport_company, total, discount, exchange_rate, currency, items, paid_amount } = req.body;
+    const clientOpId = req.body.clientOperationId || req.body.client_operation_id || null;
+
     if (!client_name || !destination) {
       return res.status(400).json({ error: "Nombre de cliente y destino son obligatorios para ventas pendientes." });
     }
@@ -6565,8 +6610,17 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     }
 
     const verifiedUser = (req as any).verifiedUser;
-    const userPerms = verifiedUser?.permissions || {};
-    const isAdmin = verifiedUser && isMainAdmin(verifiedUser);
+    const uRole = String(verifiedUser?.role || '').toLowerCase();
+    const isAdmin = verifiedUser && (['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser));
+    const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
+
+    if (!isAdmin && userPerms.create_pending_sales === false) {
+      return res.status(403).json({ error: "No tienes autorización para crear pedidos o ventas pendientes." });
+    }
+    const safeDiscountCheck = Math.max(0, Number(discount || 0));
+    if (safeDiscountCheck > 0 && !isAdmin && userPerms.apply_discounts === false) {
+      return res.status(403).json({ error: "No tienes autorización para aplicar descuentos en pedidos." });
+    }
     const canModifyPrices = isAdmin || !!userPerms.modify_prices || !!userPerms.edit_prices;
     
     try {
@@ -6584,25 +6638,47 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         return res.status(400).json({ error: "El abono inicial no puede exceder el total del pedido." });
       }
 
-      // P04 & T15: Validate official catalog prices and verify net available stock
-      for (const item of items) {
-        const prodCheck = db.prepare('SELECT id, name, sku, price_unit, price_bulk, stock FROM products WHERE id = ?').get(item.product_id) as any;
-        if (!prodCheck) {
-          return res.status(400).json({ error: `El producto con ID ${item.product_id} no existe en el inventario.` });
+      // E05 & E09: Deduplication check with clientOperationId in processed_operations
+      if (clientOpId) {
+        const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
+        if (existingOp) {
+          const incomingHash = crypto.createHash('sha256').update(JSON.stringify({ client_name, destination, items, total: safeTotal, discount: safeDiscount })).digest('hex');
+          if (existingOp.payload_hash && existingOp.payload_hash !== incomingHash) {
+            return res.status(409).json({ error: "Conflicto: la clave de operación ya fue utilizada con datos diferentes.", client_operation_id: clientOpId });
+          }
+          return res.status(200).json(JSON.parse(existingOp.response_body));
         }
+      }
+
+      // E06 & N05: Consolidate aggregate demand per product to prevent overselling on duplicate lines
+      const aggregatedDemand = new Map<number, number>();
+      for (const item of items) {
+        const pId = Number(item.product_id);
         const safeQty = Number(item.quantity);
         if (!Number.isFinite(safeQty) || !Number.isInteger(safeQty) || safeQty <= 0) {
           return res.status(400).json({ error: "Cantidad de producto inválida. Las cantidades deben ser enteros positivos." });
         }
+        aggregatedDemand.set(pId, (aggregatedDemand.get(pId) || 0) + safeQty);
+      }
 
-        // T15: Validate physical stock minus current active reservations
-        const currentReserved = getReservedStock(item.product_id);
+      for (const [pId, totalDemand] of aggregatedDemand.entries()) {
+        const prodCheck = db.prepare('SELECT id, name, sku, stock FROM products WHERE id = ?').get(pId) as any;
+        if (!prodCheck) {
+          return res.status(400).json({ error: `El producto con ID ${pId} no existe en el inventario.` });
+        }
+        const currentReserved = getReservedStock(pId);
         const netAvailable = Math.max(0, (Number(prodCheck.stock) || 0) - currentReserved);
-        if (safeQty > netAvailable) {
+        if (totalDemand > netAvailable) {
           return res.status(400).json({ 
-            error: `Stock disponible insuficiente para reservar "${prodCheck.name}". Disponible neto: ${netAvailable} (Físico: ${prodCheck.stock}, Reservado: ${currentReserved}), Solicitado: ${safeQty}.` 
+            error: `Stock disponible insuficiente para reservar "${prodCheck.name}". Disponible neto: ${netAvailable} (Físico: ${prodCheck.stock}, Reservado: ${currentReserved}), Demanda total solicitada: ${totalDemand}.` 
           });
         }
+      }
+
+      // P04: Validate official catalog prices
+      for (const item of items) {
+        const prodCheck = db.prepare('SELECT id, name, sku, price_unit, price_bulk, stock FROM products WHERE id = ?').get(item.product_id) as any;
+        const safeQty = Number(item.quantity);
 
         const safePrice = Math.max(0, Number(item.price || 0));
         if (!canModifyPrices) {
@@ -7152,7 +7228,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     }
   });
 
-  app.post("/api/inventory/reconcile-catalog", async (req, res) => {
+  app.post("/api/inventory/reconcile-catalog", enforceAdmin, async (req, res) => {
     try {
       const result = reconcileCatalogStockWithLedger();
       res.json({ success: true, ...result });
@@ -7213,9 +7289,14 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         return res.status(400).json({ error: 'La venta offline no contiene artículos válidos.' });
       }
 
-      // Fetch user name
-      const userRow = db.prepare('SELECT username FROM users WHERE id = ?').get(user_id || 1) as any;
-      const userName = userRow?.username || req.body.user_name || 'Vendedor';
+      const verifiedUser = (req as any).verifiedUser;
+      const uRole = String(verifiedUser?.role || '').toLowerCase();
+      const isAdmin = verifiedUser && (['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser));
+      const effectiveUserId = (verifiedUser && (!isAdmin || !user_id))
+        ? Number(verifiedUser.id)
+        : Number(user_id || verifiedUser?.id || 1);
+      const userRow = db.prepare('SELECT username FROM users WHERE id = ?').get(effectiveUserId) as any;
+      const userName = userRow?.username || verifiedUser?.username || 'Vendedor';
 
       // Enrich items with current product metadata
       const enrichedItems = items.map((it: any) => {
@@ -7312,11 +7393,20 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   // 3. Query pending offline sales list with live stock comparisons
   app.get("/api/offline-sales/pending", (req, res) => {
     try {
-      const pendingRows = db.prepare(`
-        SELECT * FROM offline_pending_sales 
-        WHERE status = 'pending' 
-        ORDER BY created_at DESC
-      `).all() as any[];
+      const verifiedUser = (req as any).verifiedUser;
+      const uRole = String(verifiedUser?.role || '').toLowerCase();
+      const isAdmin = verifiedUser && (['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser));
+      const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
+      const canViewCosts = isAdmin || !!userPerms.view_costs || !!userPerms.view_purchase_prices;
+
+      let pendingRows: any[] = [];
+      if (isAdmin) {
+        pendingRows = db.prepare("SELECT * FROM offline_pending_sales WHERE status = 'pending' ORDER BY created_at DESC").all() as any[];
+      } else if (verifiedUser && verifiedUser.id) {
+        pendingRows = db.prepare("SELECT * FROM offline_pending_sales WHERE status = 'pending' AND user_id = ? ORDER BY created_at DESC").all(verifiedUser.id) as any[];
+      } else {
+        return res.status(401).json({ error: "Sesión requerida." });
+      }
 
       const enrichedSales = pendingRows.map(row => {
         let items: any[] = [];
@@ -7345,7 +7435,9 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
             sku: prod?.sku || item.sku || '',
             current_stock: currentStock,
             has_sufficient_stock: hasSufficient,
-            deficit: deficit
+            deficit: deficit,
+            cost: canViewCosts ? item.cost : null,
+            price_cost: canViewCosts ? item.cost : null
           };
         });
 
@@ -9016,7 +9108,18 @@ DIRECTIVAS CRÍTICAS:
   // REST API: Cash Register Modules ("Cajas")
   app.get("/api/cajas/status", (req, res) => {
     try {
-      const users = db.prepare('SELECT id, username, role FROM users').all() as any[];
+      const verifiedUser = (req as any).verifiedUser;
+      const uRole = String(verifiedUser?.role || '').toLowerCase();
+      const isAdmin = verifiedUser && (['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser));
+
+      let users: any[] = [];
+      if (isAdmin) {
+        users = db.prepare('SELECT id, username, role FROM users').all() as any[];
+      } else if (verifiedUser && verifiedUser.id) {
+        users = db.prepare('SELECT id, username, role FROM users WHERE id = ?').all(verifiedUser.id) as any[];
+      } else {
+        return res.status(401).json({ error: "Sesión requerida." });
+      }
       const status = [];
       for (const u of users) {
         // Current/active (unclosed) accrued sales
@@ -9135,7 +9238,17 @@ DIRECTIVAS CRÍTICAS:
 
   app.get("/api/cajas/cierres", (req, res) => {
     try {
-      const cierres = db.prepare('SELECT * FROM caja_cierres ORDER BY closed_at DESC').all();
+      const verifiedUser = (req as any).verifiedUser;
+      const uRole = String(verifiedUser?.role || '').toLowerCase();
+      const isAdmin = verifiedUser && (['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser));
+      let cierres: any[] = [];
+      if (isAdmin) {
+        cierres = db.prepare('SELECT * FROM caja_cierres ORDER BY closed_at DESC').all() as any[];
+      } else if (verifiedUser && verifiedUser.id) {
+        cierres = db.prepare('SELECT * FROM caja_cierres WHERE user_id = ? ORDER BY closed_at DESC').all(verifiedUser.id) as any[];
+      } else {
+        return res.status(401).json({ error: "Sesión requerida." });
+      }
       res.json(cierres);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -9145,6 +9258,17 @@ DIRECTIVAS CRÍTICAS:
   app.get("/api/cajas/cierres/:id/sales", (req, res) => {
     const { id } = req.params;
     try {
+      const verifiedUser = (req as any).verifiedUser;
+      const uRole = String(verifiedUser?.role || '').toLowerCase();
+      const isAdmin = verifiedUser && (['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser));
+      const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
+      const canViewCosts = isAdmin || !!userPerms.view_costs || !!userPerms.view_purchase_prices;
+
+      const cierreRow = db.prepare('SELECT user_id FROM caja_cierres WHERE id = ?').get(id) as any;
+      if (cierreRow && !isAdmin && verifiedUser && Number(cierreRow.user_id) !== Number(verifiedUser.id)) {
+        return res.status(403).json({ error: "No tienes autorización para consultar las ventas de este cierre de caja." });
+      }
+
       const sales = db.prepare(`
         SELECT s.*, c.name as client_name
         FROM sales s
@@ -9155,7 +9279,10 @@ DIRECTIVAS CRÍTICAS:
 
       for (const sale of sales) {
         sale.items = db.prepare(`
-          SELECT si.*, p.name as product_name, p.sku, p.category
+          SELECT si.id, si.sale_id, si.product_id, si.quantity, si.price, ${canViewCosts ? 'si.cost' : 'NULL as cost'},
+                 COALESCE(si.product_name_snapshot, p.name) as product_name,
+                 COALESCE(si.product_sku_snapshot, p.sku) as sku,
+                 p.category
           FROM sale_items si
           JOIN products p ON p.id = si.product_id
           WHERE si.sale_id = ?
@@ -9201,6 +9328,10 @@ DIRECTIVAS CRÍTICAS:
       const verifiedUser = (req as any).verifiedUser;
       const uRole = String(verifiedUser?.role || '').toLowerCase();
       const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+      const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
+      if (!isAdmin && userPerms.physical_control_checklist === false) {
+        return res.status(403).json({ error: "No tienes autorización para acceder a sesiones de control físico." });
+      }
       let counts = db.prepare('SELECT * FROM inventory_counts ORDER BY id DESC').all() as any[];
 
       if (!isAdmin) {
@@ -9450,9 +9581,25 @@ DIRECTIVAS CRÍTICAS:
     const { id, itemId } = req.params;
     const { physical_quantity, counted_stock, notes, status: bodyStatus } = req.body;
     try {
-      const count = db.prepare('SELECT status, mode FROM inventory_counts WHERE id = ?').get(id) as any;
-      if (!count || count.status === 'cerrado' || count.status === 'cancelado') {
-        return res.status(400).json({ error: "No se puede modificar un conteo que ya ha sido cerrado o cancelado." });
+      const verifiedUser = (req as any).verifiedUser;
+      const uRole = String(verifiedUser?.role || '').toLowerCase();
+      const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+
+      const count = db.prepare('SELECT id, status, mode, user_id, applied_at FROM inventory_counts WHERE id = ?').get(id) as any;
+      if (!count || count.status === 'cerrado' || count.status === 'cancelado' || count.status === 'aprobado' || count.applied_at != null) {
+        return res.status(400).json({ error: "No se puede modificar un conteo que ya ha sido cerrado, cancelado o aprobado." });
+      }
+
+      if (!isAdmin && count.user_id && verifiedUser && Number(count.user_id) !== Number(verifiedUser.id)) {
+        return res.status(403).json({ error: "No tienes autorización para modificar ítems del conteo de otro usuario." });
+      }
+
+      const rawQty = physical_quantity !== undefined ? physical_quantity : counted_stock;
+      if (rawQty !== undefined) {
+        const numQty = Number(rawQty);
+        if (!Number.isFinite(numQty) || !Number.isInteger(numQty) || numQty < 0) {
+          return res.status(400).json({ error: "La cantidad física debe ser un número entero no negativo." });
+        }
       }
 
       // Check both item ID and session ID to prevent cross-session alteration
@@ -9610,6 +9757,17 @@ DIRECTIVAS CRÍTICAS:
       }
       const uRole = String(verifiedUser.role || '').toLowerCase();
       const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+
+      const currentCount = db.prepare('SELECT id, user_id, status, applied_at FROM inventory_counts WHERE id = ?').get(id) as any;
+      if (!currentCount) {
+        return res.status(404).json({ error: "Sesión de conteo no encontrada." });
+      }
+      if (currentCount.status === 'aprobado' || currentCount.status === 'cerrado' || currentCount.applied_at != null) {
+        return res.status(400).json({ error: "No se puede modificar una sesión de conteo que ya ha sido aprobada o cerrada." });
+      }
+      if (!isAdmin && Number(currentCount.user_id) !== Number(verifiedUser.id)) {
+        return res.status(403).json({ error: "No tienes autorización para modificar la sesión de control físico de otro usuario." });
+      }
 
       if (['cerrado', 'aprobado'].includes(status) && !isAdmin) {
         return res.status(403).json({ error: "No autorizado: Solo un administrador verificado puede cerrar o aprobar sesiones de control físico." });

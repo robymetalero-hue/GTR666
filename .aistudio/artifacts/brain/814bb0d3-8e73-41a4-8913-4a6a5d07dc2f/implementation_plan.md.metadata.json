@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan de implementación para la integración integral del parche de seguridad, control de accesos de kiosco y precisión transaccional para cajero y terminal POS GTR666 sin alterar registros históricos ni romper funcionalidades.",
-  "updatedAt":  "2026-10-26T22:49:02.871699946Z",
+  "summary":  "Plan integral para la incorporación de los parches y blindajes de seguridad auditados en Revision_GTR666_cambios_20261027_26de191c.txt. Cubre el aislamiento estricto de permisos en Kiosco (cajas, créditos, pedidos, conteos y conciliación), normalización obligatoria a moneda nacional BOB en pedidos, deduplicación atómica con clave estable y rechazo 409, consolidación de demanda agregada por producto, control de concurrencia optimista en inventario, blindaje de respaldos WAL y restricción exclusiva de voz administrativa al Administrador Principal.",
+  "updatedAt":  "2026-10-27T10:33:41.040024760Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

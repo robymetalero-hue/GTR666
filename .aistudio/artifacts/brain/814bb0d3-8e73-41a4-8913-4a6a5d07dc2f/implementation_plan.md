@@ -1,31 +1,31 @@
-# Plan de Implementación: Blindaje de Seguridad, Kiosco y Precisión Transaccional GTR666
+# Plan de Implementación: Blindaje Integral de Seguridad, Kiosco y Consistencia Transaccional GTR666
 
-Plan integral para aplicar las correcciones del informe `GTR666_kiosco_revision_y_parche_20261026_16de2010.txt` garantizando la protección estricta del inventario, la conciliación matemática de caja y stock, y la integridad de los registros comerciales históricos.
+Plan arquitectónico para resolver los 23 escenarios pendientes auditados en `Revision_GTR666_cambios_20261027_26de191c.txt`, garantizando el cumplimiento del 100% de los estándares de seguridad, aislamiento de datos entre cajeros, protección del inventario físico y conciliación matemática de caja y stock.
 
 ## Decisiones Críticas y Confirmaciones del Usuario
 
 > [!IMPORTANT]
 > A continuación se resumen las decisiones estratégicas confirmadas para la ejecución de este parche:
-
-- **Canal de Voz en Tiempo Real y Herramientas SQL (`/live`)**:
-  - *Decisión confirmada*: **Reservar el asistente de voz administrativo con ejecución de SQL y herramientas de sistema exclusivamente al Propietario / Administrador Principal**.
-  - Los cajeros conservarán acceso autenticado a las alertas del sistema (`/alerts`) y a la operativa del terminal sin riesgo de fuga de datos ni escalamiento de privilegios.
-- **Ventas y Acciones Offline en Cola Local**:
-  - *Decisión confirmada*: **Permitir que el cajero en turno sincronice las ventas y pedidos pendientes del terminal**.
-  - Se añadirá el identificador de operador (`ownerUserId`) para trazabilidad de autoría en auditoría, pero no se bloqueará la sincronización operativa de tickets legítimos pendientes generados durante contingencias de red.
-- **Idempotencia y Reutilización de Clave de Operación (`client_operation_id`)**:
-  - *Decisión confirmada*: **Rechazo estricto con HTTP 409 Conflicto y registro en log de auditoría**.
-  - Si un reintento llega con la misma clave de operación pero un contenido o payload modificado, el sistema protegerá la transacción original y alertará de discrepancia para evitar dobles deducciones o adulteración de tickets.
+>
+> 1. **Gestión de Precios y Moneda en Pedidos POS**:
+>    - *Decisión confirmada*: **Forzar todos los pedidos a moneda nacional BOB calculada**.
+>    - Cada ítem del pedido utilizará la misma función oficial de precio en bolivianos (`getCartItemPriceBs`), validando el total en el servidor con la tasa de cambio vigente y evitando reinterpretar precios en dólares como moneda local.
+> 2. **Demanda Agregada por Producto en Pedidos**:
+>    - *Decisión confirmada*: **Consolidar demanda total por producto y rechazar con HTTP 400 si supera el stock disponible**.
+>    - Si un pedido repite el mismo producto en múltiples líneas, el sistema sumará las cantidades totales y verificará que no sobrepase `stock físico - reservas activas de otros pedidos`.
+> 3. **Alcance de Cajeros en Cuentas por Cobrar y Conteos**:
+>    - *Decisión confirmada*: **Bloqueo estricto HTTP 403 y prohibición de editar conteos cerrados o ajenos**.
+>    - Cajeros sin permisos explícitos no podrán listar deudas ajenas, registrar abonos, ni modificar inventarios físicos completados (`applied_at != null` o estado aprobado/cerrado).
 
 ---
 
 ## 1. Alcance y Concepto Central
 
-- **Propósito**: Resolver de manera definitiva los 52 escenarios auditados de seguridad, integración, límites de API y WebSockets sin provocar regresiones en las ventas, recepciones, devoluciones, arqueos de caja ni en la síntesis forense del historial de productos (Kárdex).
-- **Usuarios Destinatarios**: 
-  - *Cajero / Vendedor*: Terminal ágil, protegido contra operaciones cruzadas de otros turnos, sin exposición de costos de compra ni accesos administrativos no autorizados.
-  - *Administrador / Dueño*: Control total, supervisión de auditoría forense inalterable, acceso exclusivo a herramientas de voz con ejecución SQL y gestión de crédito/catálogo.
-- **Principio de No Regresión**: Conservar intacta la base de datos comercial (`gtr_pos_sandbox.db` y `gtr_pos.db`), respetando los 500 registros de control de balance de caja y stock.
+- **Propósito**: Eliminar las discrepancias detectadas en los 148 escenarios de prueba, blindando los accesos a datos financieros, evitando dobles reservas de stock en pedidos y blindando la integridad de las transacciones SQLite y réplicas.
+- **Principio Rector**: Máxima seguridad y fidelidad contable sin alterar registros comerciales existentes, manteniendo intactos los snapshots de costos, tasas históricas y saldos de caja.
+- **Usuarios Destinatarios**:
+  - *Cajero en Terminal (Modo Kiosco)*: Interfaz ágil y aislada; solo accede a su propia caja, turnos y ventas; no puede inspeccionar deudas ajenas, ejecutar conciliaciones globales ni visualizar costos unitarios de compra.
+  - *Administrador Principal / Propietario*: Supervisión forense completa, acceso exclusivo a herramientas de voz con ejecución SQL (`/live`), control de créditos y gestión de inventario.
 
 ---
 
@@ -33,58 +33,62 @@ Plan integral para aplicar las correcciones del informe `GTR666_kiosco_revision_
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                        FLUJO OPERATIVO KIOSCO POS                      │
+│                        FLUJO OPERATIVO BLINDADO POS                    │
 └────────────────────────────────────────────────────────────────────────┘
 
   [ Cajero en Terminal ]
          │
-         ├──► 1. Inicio de Turno y Apertura de Caja (Auditoría vinculada al ID de sesión)
+         ├──► 1. Creación de Pedido (POS.tsx)
+         │       • Conversión síncrona a moneda oficial BOB (V04/V05)
+         │       • Inhabilitación inmediata del botón con 'isSubmittingRef' (V06)
+         │       • Clave estable 'clientOperationId' generada por intención (E05)
+         │       • Validación atómica de demanda agregada por producto (E06/N05)
          │
-         ├──► 2. Venta / Devolución / Pedido
-         │       • Validación atómica de stock agregado por producto (E06)
-         │       • Autoría ligada al operador activo de la sesión (K05/K13)
-         │       • Sin exposición de costos en cierres ni catálogos (K12/E07)
+         ├──► 2. Cuentas por Cobrar y Abonos
+         │       • Verificación estricta de permiso 'manage_credits' (K20/K21)
+         │       • Tasa de cambio forzada positiva y finita (N08)
+         │       • Monto en BOB impacta proporcionalmente a caja y deuda (N09/N10)
          │
-         ├──► 3. Contingencia Offline
-         │       • Cola local en IndexedDB con 'ownerUserId' y clave UUID estable
-         │       • Sincronización continua sin corte prematuro de promesa (E08)
-         │       • Cajero puede enviar pedidos del equipo sin perder continuidad
+         ├──► 3. Conteos Físicos de Inventario
+         │       • Solo acceso a conteos propios en progreso (K14/E04)
+         │       • Bloqueo total si está cerrado o aprobado (K15/K16)
+         │       • Cantidades restringidas a enteros no negativos (E21)
          │
-         └──► 4. Cierre y Arqueo
-                 • Solo visualiza su propia caja y liquidación (K09/K10)
-                 • Costos unitarios ocultos a perfiles sin permiso financiero
+         └──► 4. Arqueo y Liquidación de Caja
+                 • Solo visualiza su propia cuenta y movimientos (K10/E07)
+                 • Costos unitarios completamente censurados (K12)
 
-  [ Administrador / Propietario ]
+  [ Administrador Principal ]
          │
-         ├──► Asistente de Voz /live (Autenticación JWT en subprotocolo WebSocket)
-         ├──► Auditoría Forense y Kárdex Multifuente de Productos
-         └──► Conciliación Global de Catálogo y Autorización de Conteos
+         ├──► Canal de Voz /live (Restringido estrictamente a 'isMainAdmin') (V01)
+         ├──► Conciliación Global y Aprobación de Conteos Físicos
+         └──► Supervisión de Auditoría Forense y Respaldos WAL Confiables
 ```
-
-- **Retroalimentación en Interfaz**:
-  - Mensajes de error contextuales claros ante conflictos (HTTP 409: *"La transacción ya fue procesada con un contenido previo"*).
-  - Bloqueo visual e inhabilitación inmediata del botón de cobro durante el vuelo de la solicitud para impedir dobles clics y reintentos desfasados.
-  - Ocultamiento sistemático de campos de costo unitario para roles no administrativos en recibos, modales de kárdex y cierres de turno.
 
 ---
 
 ## 3. Decisiones de Producto y Arquitectura
 
-1. **Autenticación Robusta en WebSockets (`server.on('upgrade')`)**:
-   - *Enfoque*: Extraer y validar el JWT a través del subprotocolo `Sec-WebSocket-Protocol` (`['access_token', token]`).
-   - *Por qué*: Evita exponer credenciales en la URL de conexión (que pueden ser registradas en logs HTTP o proxies) y bloquea conexiones anónimas a `/live` y `/alerts`.
-2. **Autoría Comercial Vinculada a la Sesión (`verifiedUser.id`)**:
-   - *Enfoque*: En `POST /api/sales` y `POST /api/pending-sales`, para cajeros y vendedores el sistema asigna forzosamente `sale.user_id = verifiedUser.id`. Solo administradores pueden asignar ventas a terceros.
-   - *Por qué*: Previene suplantación de identidad en comisiones, balances de arqueo y trazabilidad forense.
-3. **Manejo de Transacciones y Fallas de Deduplicación**:
-   - *Enfoque*: El registro de la operación en `processed_operations` se ejecuta dentro de la misma transacción SQLite que la venta y la deducción de inventario. Si la inserción de deduplicación falla, toda la transacción revierte.
-   - *Por qué*: Garantiza que no existan ventas "huérfanas" sin evidencia de deduplicación ni inconsistencias por transacciones a medio completar.
-4. **Validación de Inventario Agregado en Pedidos**:
-   - *Enfoque*: Si un pedido incluye el mismo producto en múltiples líneas (ej. 6 unidades y 6 unidades cuando el stock físico es 10), se consolida la demanda total (12 unidades) antes de evaluar disponibilidad.
-   - *Por qué*: Previene sobreventas por evaluación fraccionada línea por línea.
-5. **Rate Limiting en Verificación de Supervisores**:
-   - *Enfoque*: Limitar a 5 intentos fallidos cada 15 minutos en `/api/auth/verify-supervisor` sin penalizar verificaciones exitosas.
-   - *Por qué*: Protege contra ataques de fuerza bruta al PIN de supervisor en el terminal POS.
+1. **Aislamiento Estricto de Kiosco por Endpoint (server.ts)**:
+   - `/api/cajas/status`: Filtrar automáticamente para que los cajeros únicamente reciban el saldo y arqueo de su propio `seller_id`. Solo administradores reciben la vista consolidada de todas las cajas.
+   - `/api/offline-sales/pending`: Filtrar por el operador de sesión autenticado y enmascarar costos unitarios (`NULL as price_cost`).
+   - `/api/inventory/reconcile-catalog`: Exigir rol de administrador (403 inmediato para cajeros).
+   - `/api/accounts-receivable`: Exigir permiso explícito `manage_credits` o rol administrador.
+   - `/api/inventory-counts/:id`: Validar propiedad del conteo y prohibir cualquier modificación si el conteo ya tiene `applied_at` o estado `aprobado`/`cerrado`.
+2. **Normalización y Deduplicación en Pedidos Pendientes (POS.tsx & server.ts)**:
+   - Forzar `currency: 'BOB'` y precios en bolivianos calculados con `getCartItemPriceBs` en `POST /api/pending-sales`.
+   - Implementar deduplicación transaccional con `processed_operations`: si se reintenta con la misma clave e idéntico contenido, retornar el pedido original (200); si la misma clave se reutiliza con contenido alterado, responder `HTTP 409 Conflicto`.
+   - Consolidar la demanda por `product_id` sumando líneas repetidas antes de comparar contra `stock - reservas_activas`.
+3. **Control de Concurrencia Optimista en Inventario (server.ts)**:
+   - En la actualización de productos desde el formulario, verificar que el stock no haya variado entre la apertura del formulario y el guardado, o separar la actualización de metadatos (nombre, categoría, alarmas) del ajuste directo de existencias.
+4. **Idempotencia en Ingresos de Compra y Devoluciones**:
+   - Agregar soporte de `client_operation_id` en `POST /api/stock-arrivals` para prevenir ingresos duplicados por reintentos.
+   - Validar cantidades enteras positivas en devoluciones (`sale_returns`) y ventas, rechazando `NaN` o números con decimales fraccionarios no autorizados.
+5. **Robustez de Respaldos y Entornos**:
+   - `createLocalDbSnapshot`: Forzar vaciado de WAL (`wal_checkpoint(PASSIVE)`) y comprobar que el archivo de respaldo contenga las páginas actualizadas.
+   - `APP_ENV`: Priorizar estrictamente la configuración del servidor, bloqueando la alteración del entorno mediante cabeceras cliente como `Host` o `X-App-Environment`.
+6. **Canal de Voz Administrativo**:
+   - Restringir la conexión WebSocket a `/live` exclusivamente al Administrador Principal (`isMainAdmin`), bloqueando tokens con rol subordinado y eliminando la autenticación por parámetro URL en favor del subprotocolo.
 
 ---
 
@@ -92,67 +96,66 @@ Plan integral para aplicar las correcciones del informe `GTR666_kiosco_revision_
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                   ARQUITECTURA DE INTEGRACIÓN Y PARCHE                 │
+│                   MATRIZ DE CONTROL Y FLUJO DE DATOS                   │
 └────────────────────────────────────────────────────────────────────────┘
 
- [ Cliente React / PWA ]
-   ├── AudioVoice.tsx ──────────► [Sec-WebSocket-Protocol: token] ──┐
-   ├── AppContext.tsx (Alerts) ─► [Sec-WebSocket-Protocol: token] ──┤
-   ├── offlineStorage.ts ───────► { id, ownerUserId, payloadHash }  │
-   └── POS.tsx ─────────────────► POST /api/sales & /pending-sales  │
-                                                                   ▼
- [ Backend Express / WebSocket Server ]                     [ Upgrade Handler ]
-   ├── Token / Role Gate ◄───────────────────────────────── Validar JWT & Role
-   │     ├─ /live: Solo Admin/Owner                                │
-   │     └─ /alerts: Todos los usuarios válidos                    │
-   │                                                               │
-   ├── API Endpoints Hardening                                     │
-   │     ├─ POST /api/sales: Forzar verifiedUser.id                │
-   │     ├─ POST /api/pending-sales: Guard create_pending_sales    │
-   │     ├─ GET /api/sales/:id: Guard de pertenencia/admin         │
-   │     ├─ POST /api/inventory/reconcile-catalog: Solo Admin      │
-   │     ├─ GET /api/cash-register/closures: Ocultar costos        │
-   │     └─ PUT /api/inventory/counts/:id: Bloqueo de conteos cer. │
-   │                                                               │
-   └── Motor SQLite Transaccional (gtr_pos_sandbox.db & gtr_pos.db)│
-         ├─ processed_operations (client_operation_id + payload_hash)
-         ├─ sales & sale_items
-         ├─ stock_arrivals & inventory_counts
-         └─ audit_logs (registro de 409 y autoría)
+  [ Cliente React (POS / Terminal) ]
+     │
+     ├──► POS.tsx: 
+     │       • isSubmittingRef (Bloqueo síncrono al clic)
+     │       • clientOperationId estable (UUID v4 memoizado por carrito)
+     │       • Precios en BOB: getCartItemPriceBs(item, rate)
+     │
+     ▼ (HTTP / WebSocket)
+  [ Servidor Express / WebSocket Gate ]
+     │
+     ├──► Upgrade Gate: /live -> solo isMainAdmin (Sec-WebSocket-Protocol)
+     │
+     ├──► Kiosk RBAC Middleware:
+     │       • /api/cajas/status (Filtro por seller_id si no es admin)
+     │       • /api/accounts-receivable (Guard manage_credits)
+     │       • /api/inventory/reconcile-catalog (Guard admin)
+     │       • /api/inventory-counts (Guard dueño + estado abierto + enteros)
+     │
+     └──► Motor Transaccional SQLite (better-sqlite3)
+             │
+             ├── BEGIN TRANSACTION
+             │     ├─ 1. processed_operations (Check hash & op_id -> 409 si difiere)
+             │     ├─ 2. Validar Demanda Agregada (sum(qty) <= disponible)
+             │     ├─ 3. Insertar Pedido / Venta / Ingreso
+             │     ├─ 4. Actualizar Stock / Reservas
+             │     └─ 5. Registrar Auditoría Forense
+             └── COMMIT (Atómico; si processed_operations falla, revierte)
 ```
 
-### Componentes y Archivos Afectados
+### Componentes y Módulos a Modificar
 
 1. **`server.ts`**:
-   - Implementar verificación de tokens en `server.on('upgrade')` para `/live` (con restricción a administrador/owner) y `/alerts`.
-   - Modificar clientes internos de voz para evitar llamadas sin sesión.
-   - Imponer autoría obligatoria del operador en `POST /api/sales` y pedidos.
-   - Enriquecer validaciones de idempotencia (detección de discrepancia de hash con respuesta 409).
-   - Bloquear manipulación de conteos físicos ya aprobados o cerrados.
-   - Aplicar rate limit estricto a `/api/auth/verify-supervisor`.
-2. **`firebaseSync.ts`**:
-   - Proteger productos locales contra sobreescritura accidental por colisión de SKU con IDs remotos divergentes.
-3. **`src/context/AppContext.tsx`**:
-   - Ajustar `syncRunningRef` para liberarse exclusivamente en el bloque `finally` de la sincronización asíncrona.
-   - Transmitir credenciales mediante subprotocolo seguro en la conexión de alertas.
-4. **`src/utils/offlineStorage.ts`**:
-   - Añadir `ownerUserId` a las acciones generadas en cola offline.
-5. **`src/views/POS.tsx`**:
-   - Asegurar generación de claves estables de operación y consolidación de montos/cantidades válidas antes del envío.
-6. **`src/components/AudioVoice.tsx`**:
-   - Ajustar el handshake de conexión WebSocket para enviar el token JWT por subprotocolo sin parámetros en URL.
+   - Incorporar guardas de permisos en `/api/cajas/status`, `/api/offline-sales/pending`, `/api/inventory/reconcile-catalog`, `/api/accounts-receivable` y conteos físicos.
+   - En `POST /api/pending-sales` y `PUT /api/pending-sales/:id`: deduplicación atómica con `processed_operations`, validación de demanda agregada por producto y forzado de moneda BOB.
+   - En `POST /api/stock-arrivals`: registrar `client_operation_id` para evitar dobles recepciones.
+   - Validación de cantidades enteras en `sale_returns` y rechazo de `NaN`/infinito en totales y tasas.
+   - En `/live`: verificar `isMainAdmin(verifiedUser)` y rechazar tokens en URL.
+   - En `createLocalDbSnapshot`: garantizar consistencia WAL antes de confirmar snapshot.
+2. **`src/views/POS.tsx`**:
+   - Bloqueo síncrono mediante `isSubmittingRef` en la creación de pedidos pendientes.
+   - Generación de `clientOperationId` estable por intento de pedido.
+   - Uso obligatorio de `getCartItemPriceBs` y envío explícito de `currency: 'BOB'`.
+3. **`database.ts`**:
+   - Garantizar que la tabla `processed_operations` preserve filas históricas y soporte operaciones de tipo `pending_sale` y `stock_arrival`.
 
 ---
 
 ## 5. Plan de Verificación y Certificación
 
-1. **Compilación y Linteo**:
-   - Ejecutar `compile_applet` para garantizar cero errores en Vite/TypeScript.
-   - Ejecutar `lint_applet` para validar consistencia de sintaxis e importaciones.
-2. **Batería de Pruebas de Regresión**:
-   - Ejecutar `tests/test_product_history_synthesis.cjs` (verificar que el kárdex y el historial multifuente permanezcan al 100%).
-   - Ejecutar `tests/txt_critical_fixes_runner.cjs` (verificar los 24 casos críticos de base de datos y caja).
-   - Ejecutar `tests/audit_cycle_runner.cjs` (verificar los 27 casos de auditoría).
-   - Ejecutar `scripts/verify_pre_production_readiness.cjs` (validación de preparación para entrega).
-3. **Verificación de Invariantes Financieros y de Stock**:
-   - Confirmar que los 500 movimientos comerciales de referencia sigan cuadrando: Stock 220, Libro 220, Caja BOB 3.000.
+1. **Batería de Pruebas Automatizadas de Auditoría**:
+   - Ejecutar suite de pruebas de Kiosco (`check_kiosk_v2.cjs` y verificación de escenarios K07, K08, K10, K11, K12, K14, K15, K16, K20, K21).
+   - Ejecutar verificación de pedidos y demanda agregada (escenarios E05, E06, E09, N05, N06, V04, V05, V06).
+   - Ejecutar pruebas de deduplicación, enteros y tipos de cambio (escenarios E11, E20, E21, E22, N08, N09).
+   - Ejecutar suite integral de los 6 puntos (`test_all_six_points.cjs`).
+   - Ejecutar suite financiera y de Kárdex (`test_product_history_synthesis.cjs` y `test_financial_history_and_rates.cjs`).
+2. **Compilación y Linteo**:
+   - `compile_applet` para garantizar cero fallos de Vite y empaquetado.
+   - `lint_applet` para asegurar tipado TypeScript estricto.
+3. **Verificación de Invariantes**:
+   - Confirmar preservación exacta del balance contable y de existencias: Stock físico 220, Libro 220, Caja BOB 3.000.

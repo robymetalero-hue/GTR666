@@ -1,0 +1,452 @@
+VERIFICACIÓN DE CAMBIOS APLICADOS — GTR666
+Fecha de revisión: 27 de octubre de 2026, Bolivia.
+Repositorio: https://github.com/robymetalero-hue/GTR666
+Versión examinada: 4655afa3dd343d1afff982cbe90f9c70f6ff8eb6
+Fecha del commit: 27/10/2026, 06:16:11, America/La_Paz.
+Comparación: 68aa567492a06076b9ba8cc7be7370efc6d12c3d → 4655afa.
+Enlace: https://github.com/robymetalero-hue/GTR666/commit/4655afa3dd343d1afff982cbe90f9c70f6ff8eb6
+
+RESULTADO
+
+Los cambios solucionan una parte de los problemas anteriores. No permiten dar por resueltos todos los riesgos de inventario, caja, cálculos y kiosco. El código actual incorpora una implementación parcial de las recomendaciones; no coincide con el candidato completo de seis archivos que se había preparado.
+
+En los mismos 52 escenarios de la auditoría de kiosco anterior, el resultado pasó de 15 cumplidos y 37 incumplidos a 29 cumplidos y 23 incumplidos. Es una mejora de 14 escenarios. No son 23 vulnerabilidades independientes: hay solapamientos y un caso depende de la política sobre sincronizar trabajo de otro cajero.
+
+También se ejecutaron 90 escenarios previos del ciclo completo: 66 cumplieron y 24 no cumplieron. Se añadieron seis comprobaciones sobre los cambios y sus límites; las seis reprodujeron discrepancias. En total: 148 escenarios seleccionados, 95 cumplidos, 53 sin el resultado esperado, cero errores finales del ejecutor. No es una tasa de fallos de producción.
+
+1. CORRECCIONES QUE SÍ SE COMPROBARON
+
+• Autenticación inicial de WebSocket: las conexiones anónimas a /live y /alerts se rechazan. Un cajero normal no entra a /live; sí puede entrar autenticado a /alerts. El usuario eliminado tampoco pasa la verificación inicial. Los clientes de voz y alertas envían el token en el subprotocolo. Se verificaron seis combinaciones controladas; falta integración real de ws, JWT y proxy.
+
+• Sincronización lenta: se eliminó el temporizador de 3,5 segundos que liberaba el bloqueo antes de terminar la solicitud. El caso con respuesta demorada mantuvo un único envío. Esto corrige esa causa concreta de doble ejecución, pero no sustituye la deduplicación del servidor.
+
+• Colisión de SKU con identidad distinta: una fila remota con id 999 y el mismo SKU ya no sobrescribió el producto local id 1. El stock local se mantuvo en 8 en lugar de subir a 30. Una actualización legítima de la misma identidad siguió aplicándose y dejó el stock en 7.
+
+• Acciones offline rechazadas por validación: se conservaron para revisión en lugar de borrarse silenciosamente tras HTTP 400/404/422. Las acciones nuevas guardan ownerUserId y reciben una clave de operación al enviarse; todavía faltan comprobaciones que utilicen estos datos correctamente.
+
+• Venta normal: el vendedor del registro se deriva de la sesión autenticada para cajeros. También se bloqueó la consulta por ID de tickets y sus artículos/devoluciones pertenecientes a otro vendedor en las rutas modificadas. No se extendió esta protección a todos los endpoints de caja, créditos, offline y conteos.
+
+• Otras mejoras: la imagen del producto participa en la comprobación de permisos de edición; se añadió el limitador de supervisor a la ruta; las variaciones de mayúsculas de /API ya no omiten la puerta de autenticación. El limitador se comprobó por su registro en código, sin ejecutar una secuencia HTTP real de intentos.
+
+• Inicialización de bases nuevas: ambas bases abiertas por database.ts tuvieron las 29 tablas esperadas en el experimento de arranque aislado. Esto corrige el caso anterior de sandbox con tablas incompletas. No resuelve los problemas de migración o respaldo descritos abajo.
+
+• Los dos ensayos controlados de 500 operaciones conservaron sus balances esperados: uno terminó con stock/libro 220 y caja Bs 3.000; el otro con stock/libro 458 y caja Bs 1.000. Las ventas conservaron costo y tipo de cambio históricos en el caso probado. Estos recorridos no cubren todos los fallos de red, permisos o restauración.
+
+2. PENDIENTES PRIORITARIOS DE KIOSCO Y PERMISOS
+
+2.1 Acceso a datos y operaciones fuera del alcance del cajero
+
+Con sesión de cajero y permisos revocados se reprodujo lo siguiente:
+• /api/cajas/status devolvió información de las cajas de otros usuarios.
+• /api/offline-sales/pending devolvió ventas ajenas con campos de costo.
+• La consulta de un cierre propio todavía expuso costos por otra ruta.
+• /api/inventory/reconcile-catalog permitió al cajero ejecutar la conciliación global.
+• /api/accounts-receivable permitió consultar deudas y registrar un abono sin el permiso correspondiente. En el caso probado, la deuda ajena bajó de 100 a 90.
+• El rol literal cajero continuó obteniendo liquidaciones globales.
+• POST /api/pending-sales creó un pedido aunque create_pending_sales estaba explícitamente en false, y admitió un descuento sin autorización.
+
+Ubicaciones: server.ts:6358, 6558, 7155, 7313, 9017, 9136 y 10244.
+Casos: K08, K10, K11, K12, K20, K21, E07, E10, E23.
+
+Mejora puntual: añadir controles de permiso y alcance en cada endpoint; filtrar por usuario autenticado donde corresponda y omitir costos desde SQL/respuesta. Ocultar una pantalla o un botón no protege estas rutas. Centralizar pequeños validadores reutilizables evita inconsistencias sin reestructurar la aplicación.
+
+2.2 Conteos de otro usuario y conteos ya aplicados
+
+Un cajero pudo modificar un ítem de un conteo asignado a otra persona y guardar cantidad 99. También pudo modificar un conteo aprobado y solicitar la reapertura de otro conteo. La revocación de physical_control_checklist no bloqueó todas las lecturas. Una cantidad física de 1,5 fue aceptada.
+
+Ubicaciones: server.ts:9449 y 9598; revisar también listado, detalle, creación y recuento.
+Casos: K14, K15, K16, E13, E21.
+
+Mejora puntual: comprobar dueño, permiso y estado antes de leer/escribir; impedir cambios cuando applied_at tenga valor o el estado sea aprobado/cerrado/cancelado; validar enteros finitos no negativos. No modificar cantidades históricas de conteos resueltos.
+
+3. PEDIDOS: DUPLICACIÓN, RESERVAS E IMPORTES
+
+3.1 La clave nueva enviada por la interfaz no se usa en el endpoint
+
+La interfaz ahora envía clientOperationId al crear el pedido, pero POST /api/pending-sales no la consulta ni la registra para deduplicar. Repetir el mismo pedido con la misma clave produjo dos pedidos y dos reservas. Dos invocaciones inmediatas del formulario generaron, además, dos claves diferentes y dos pedidos.
+
+El estado React isSavingPending solo deshabilita visualmente después del render; no hay un bloqueo síncrono al entrar en el handler. La clave se genera dentro de cada invocación, en lugar de mantenerse para la misma intención de guardado.
+
+Ubicaciones: src/views/POS.tsx:883 y server.ts:6558.
+Casos: E05, E09, V06.
+
+Mejora puntual: una clave estable por intención, bloqueo síncrono con ref y deduplicación en la misma transacción que crea el pedido. Un reintento idéntico debe devolver el pedido original; un contenido distinto bajo la misma clave debe responder 409.
+
+3.2 Reserva agregada insuficiente
+
+Con stock 10, dos líneas de 6 unidades del mismo producto fueron aceptadas y reservaron 12 unidades. Se reprodujo tanto al crear como al editar pedidos. La comprobación actual evalúa cada línea por separado antes de insertar.
+
+Ubicaciones: server.ts:6599 y 6706.
+Casos: E06, N05, N06.
+
+Mejora puntual: sumar primero las cantidades por product_id y validar la demanda total, descontando otras reservas activas, dentro de la transacción. Conservar intacto el pedido anterior si falla la edición.
+
+3.3 Diferencia entre el importe mostrado y el importe enviado
+
+El subtotal del POS usa getCartItemPriceBs. El formulario de pendientes envía item.selectedPrice || item.price_unit, sin currency explícita. Para un artículo normal de USD 1 a tipo de cambio 10, la pantalla calcula Bs 10 y el payload envía price: 1. El servidor interpreta esa cifra como BOB porque esa es la moneda por defecto.
+
+Con cajero sin edición de precios, el caso terminó en HTTP 403 aunque el usuario seleccionó un precio normal del catálogo. Con administrador, el servidor aceptó el pedido con total Bs 1, pese a que el subtotal del formulario era Bs 10.
+
+Ubicaciones: src/views/POS.tsx:885, 1397, 1408 y 1479; server.ts:6558.
+Casos: V04, V05.
+
+Mejora puntual: formar las líneas del pedido con la misma función de precio que utiliza la pantalla y enviar la moneda explícitamente. El servidor debe recalcular y comprobar el total en esa unidad. No reinterpretar precios USD como BOB.
+
+4. CAUSAS ANTERIORES DE VARIACIÓN O ÍTEMS FANTASMA QUE SIGUEN ABIERTAS
+
+• Formulario antiguo de producto: abrir con stock 15, vender hasta quedar en 8 y luego guardar el formulario volvió a dejar stock 15. La protección por SKU no cubre esta sobrescritura. Caso T20; server.ts:3132 y formulario de Inventory.tsx. Separar el guardado de metadatos del ajuste explícito de stock y comprobar la versión cuando se ajusten existencias.
+
+• Líneas antiguas de pedido en Firestore: después de editar un pedido para dejar una línea de cantidad 1, el pull recuperó la línea eliminada y quedaron dos filas con cantidad total 3. Caso S01. Replicar también la eliminación o un tombstone de las líneas anteriores, coordinado con la edición; no limitarse a enviar las filas nuevas.
+
+• Ingresos repetidos: repetir el mismo ingreso de compra pasó de stock 10 a 15 y después a 20. Caso T21; server.ts:4195. Añadir clave de operación estable y registro transaccional del ingreso.
+
+• Conciliación con historia incompleta: un producto con stock 55 y un único ingreso histórico de 5 fue conciliado a 5, sin saldo inicial validado. Caso T12. Una historia parcial no basta para reconstruir el saldo. Si falta el ancla histórica, informar la discrepancia y pedir revisión en vez de corregir automáticamente.
+
+• Caché/versiones: se reprodujo stock antiguo 8 etiquetado con la versión de un stock posterior 7. Caso Q01; src/context/AppContext.tsx:1353, especialmente 1413. Conservar exclusivamente las versiones asociadas a la respuesta del catálogo; la consulta posterior de versión puede pertenecer a otra transacción.
+
+• Dos bases SQLite escritoras independientes compartiendo Firestore: el escenario controlado perdió una de dos ventas remotas. Caso S07. Este riesgo depende de la topología real, que no se verificó en Google Cloud. Comprobar número de instancias, persistencia y coordinación antes de dar por cubierta la concurrencia multi-caja.
+
+5. CÁLCULOS, REINTENTOS Y DATOS HISTÓRICOS
+
+• Un total y descuento no numéricos permitieron crear una venta y descontar stock. La comprobación debe rechazar NaN/Infinity antes de comparar totales o entrar en la transacción. Caso E20; server.ts:5928.
+
+• Una devolución de 0,5 unidades dejó stock 14,5. Caso E22; server.ts:5647. Validar cantidades enteras positivas también en devoluciones.
+
+• Reutilizar la clave de una venta con contenido diferente devolvió HTTP 200 y el resultado de la primera venta, en lugar de 409. Caso K07; server.ts:6060. Falta comprobar tipo de operación, actor y huella canónica del contenido.
+
+• Si falla la escritura de processed_operations, la venta continúa porque el error se ignora. En la inyección controlada devolvió 200, creó una venta y bajó stock 15 a 14. Caso E11; server.ts:6235. La evidencia de deduplicación debe ser obligatoria dentro de la transacción y su fallo debe revertirla.
+
+• La migración de processed_operations eliminó la fila antigua del experimento en vez de preservarla. N01; database.ts:101. Además, el alta de producto sigue consultando/escribiendo el contrato antiguo id/type/result: primer alta 200, reintento 400 y cero operaciones registradas. N02; server.ts:2755 y 2874. Migrar conservando datos y actualizar todos los consumidores del esquema.
+
+• Reintentar una venta histórica que ya está en sales pero no en processed_operations terminó en 500 por la restricción única. T18. Recuperar el resultado previo desde la venta existente y validar su contenido; no generar otra venta.
+
+• Devoluciones y abonos enviados sin clave estable pueden duplicarse tras un reintento. T05 y T06. Los clientes deben mantener la misma clave hasta conocer el resultado definitivo. La clave de cobro normal todavía está en estado React; una recarga completa tras una respuesta ambigua requiere recuperación duradera, pendiente de prueba real.
+
+• Un abono con tipo de cambio negativo hizo crecer una deuda USD de 10 a 10,5. N08; server.ts:6390. Rechazar tasas no finitas o no positivas.
+
+• Un abono que la interfaz describe en Bs se trató como USD al omitir currency: la deuda USD bajó de 10 a 5 y la caja recibió Bs 50, en vez de deuda 9,5 y caja Bs 5. N09. El detalle de abonos tampoco conserva todos los metadatos estructurados de conversión. N10. Usar unidad explícita y la misma conversión en deuda, caja, historial y comprobante.
+
+• Se mantienen otras discrepancias: cabecera de abonos 100 frente a detalle 130 (P06), devolución completa fraccionada 4,98 frente a cobro 5 (N11), y diagnóstico matemático que transforma USD 10 a Bs 10/USD 1 con tasa 10 (R03).
+
+• Una deuda cancelada por devolución pudo reaparecer desde la réplica (T07); el ledger de intentos no garantizó que el documento remoto existiera (T09); la auditoría individual y la global discreparon tras un conteo aprobado (T11). Son pendientes específicos de replicación y cálculo, aunque el ciclo básico de 500 operaciones pase.
+
+6. RESPALDOS, ENTORNOS Y VOZ ADMINISTRATIVA
+
+Respaldos: createLocalDbSnapshot conserva una copia directa del archivo .db como alternativa si falla el backup nativo. Con WAL activo y un lector retenido se aceptó un respaldo con cero filas cuando el origen tenía una. N03; server.ts:4717 y 4736. No aceptar como válido un respaldo que omite páginas de WAL; comprobar el resultado y fallar de forma explícita si el método seguro no termina.
+
+Separación de respaldos: un snapshot realizado en contexto sandbox con 50 productos sustituyó gtr_pos.db.bak. Al simular que faltaba la base de producción, ensureProdDbExists restauró stock 999 del sandbox en vez de stock 8 de producción. N04; server.ts:4743 y database.ts:67. Es un escenario condicionado, no un incidente observado en tu infraestructura. Separar destino, metadatos y validación por entorno.
+
+Entornos: APP_ENV=production sí prevalece sobre X-App-Environment. Sin embargo, APP_ENV=sandbox puede ser anulado por Host/X-Forwarded-Host que contenga dspos.app; con APP_ENV ausente, un servicio ais-dev puede escoger producción mediante la cabecera del cliente. V02 y V03; server.ts:209. Dar prioridad exclusiva a configuración confiable del servidor y no permitir que cabeceras del cliente seleccionen una base. No se verificó cómo están configuradas las variables o proxies de tu despliegue real.
+
+Voz: /live ya exige autenticación y rechaza al cajero normal, pero acepta a cualquier usuario con rol admin/administrador/propietario. El plan del proyecto dice que debe reservarse al propietario/administrador principal. V01; server.ts:629. Restringir con isMainAdmin según esa política y volver a comprobar la autorización antes de ejecutar herramientas administrativas. El handler de conexión actual no utiliza request.verifiedUser para ese control por llamada. No se invocó Gemini, SQL por voz ni ninguna herramienta remota.
+
+El código también conserva la alternativa de token en la URL de WebSocket, aunque los clientes nuevos usan subprotocolo. Eliminarla si se pretende garantizar que ese canal no transporte credenciales en la URL.
+
+7. POLÍTICA DE COLAS ENTRE CAJEROS
+
+El documento de implementación añadido por AI Studio dice que el cajero de turno puede transmitir operaciones del equipo creadas por otro cajero. Esta política es diferente del criterio anterior E15, que esperaba conservarlas sin enviarlas desde otra sesión. Por eso E15 no debe interpretarse por sí solo como un defecto si ese cambio fue autorizado.
+
+Aun con esa política, falta proteger y registrar por separado al creador original y al usuario que transmite. ownerUserId no constituye una autorización: en /api/offline-sales/submit se sigue confiando en user_id del cuerpo para atribuir la venta. La prueba K13 permitió que una sesión de cajero 2 enviara un user_id 3. Es necesario validar el origen, el alcance y la trazabilidad en servidor, manteniendo los pedidos legítimos y sin borrar colas antiguas.
+
+8. MEJORAS DE INTERFAZ PROPUESTAS
+
+Este commit no contiene la aplicación de las mejoras visuales que se propusieron en la conversación. App.tsx, Inventory.tsx, OfflineStatusHUD.tsx e index.css permanecen iguales frente a la referencia; POS.tsx cambia el envío del pedido, no su diseño JSX.
+
+Por ejemplo, la confirmación del recibo sigue cerrándose a los ocho segundos, el indicador conserva el texto “Base de datos al día” sin confirmación de réplica por operación, y las etiquetas pequeñas del cobro permanecen. La combinación independiente de departamento y estado de stock tampoco fue añadida.
+
+Esto se verificó comparando fuentes. No se hizo una evaluación visual en navegador ni en Android/PC.
+
+9. ORDEN DE CORRECCIÓN RECOMENDADO PARA AI STUDIO
+
+1) Corregir permisos y alcance del kiosco: costos, cajas, créditos, pedidos, conteos y conciliación. Comprobar cada ruta con sesión de cajero y administrador.
+2) Corregir pedidos: precio/moneda coherentes con el formulario, claves estables, protección frente a doble envío, demanda agregada por producto y transacciones.
+3) Cerrar causas de variación de inventario: formulario antiguo, ingresos repetidos, líneas remotas eliminadas y conciliación sin saldo inicial validado.
+4) Completar deduplicación y migración sin pérdida de registros; validar números, tasas, devoluciones y abonos. Hacer obligatoria la escritura de la operación dentro de su transacción.
+5) Separar respaldos y selección de entorno; comprobar recuperación y concurrencia con la topología real. Completar alcance del administrador principal en voz.
+6) Aplicar las mejoras visuales en un cambio separado y pequeño; verificar importes y comportamiento de caja antes y después.
+
+Mantener cambios puntuales. No borrar tickets, movimientos, registros de deduplicación ni colas para que las pruebas pasen. No sustituir la base real por datos de ejemplo. Conservar instantáneas históricas de costo, moneda y tipo de cambio. Antes de publicar, realizar build/typecheck e integración en una copia aislada, con respaldo verificado y sin ventas de prueba en producción.
+
+10. ALCANCE Y LÍMITES DE ESTA REVISIÓN
+
+Se verificaron por SHA Git 55 archivos de fuente/configuración/pruebas relevantes y se comparó el commit nuevo con la referencia. No se descargó ni abrió la base comercial del repositorio. No se modificaron GitHub, la aplicación desplegada ni Firestore.
+
+Los diagnósticos ejecutan SQL, migraciones, handlers y funciones extraídos de las fuentes reales en SQLite de pruebas mediante node:sqlite. Los casos de kiosco incluyen la puerta real de autenticación y permisos con identidades sintéticas; no utilizan la librería real de firma JWT. Firestore, temporizadores, respuestas de red y almacenamiento del navegador se simulan según el caso. Se adaptaron únicamente los extractores a targetDb.exec y al nuevo lugar de las migraciones, y la prueba de WebSocket al subprotocolo actual; se conservaron las aserciones anteriores.
+
+Se parsearon completas las fuentes sin JSX modificadas: server.ts, database.ts, firebaseSync.ts y offlineStorage.ts. No equivale a build ni a typecheck. Las dependencias completas de la aplicación no están instaladas en el entorno de revisión; no se ejecutó la aplicación como servidor HTTP, no se montó React ni se probó IndexedDB real, impresión, proxy WebSocket o PWA instalada.
+
+No se confirmó que el commit revisado sea exactamente el servido a cada dispositivo en dspos.app. La versión publicada y las colas existentes deben comprobarse antes de un nuevo despliegue. Los fallos descritos son reproducciones controladas, no afirmaciones de incidentes reales en tu tienda.
+
+Conclusión de revisión: cambios útiles pero incompletos. Los fallos reproducidos de permisos, pedidos, importes y stock impiden considerar cerrado el problema anterior.
+
+
+ANEXO: RESULTADOS POR ESCENARIO
+PASS = resultado esperado; FAIL/FAIL_INVARIANT = criterio no cumplido. Los IDs pertenecen a sus familias y pueden solaparse.
+
+kiosk/baseline-security-results.json
+K01 | PASS | Sin sesión no se puede registrar venta
+K02 | PASS | Cabeceras falsas de admin no autorizan ajuste de inventario
+K03 | PASS | Sin permiso de productos no se cambia su imagen
+K04 | PASS | Permiso de crear ventas revocado se aplica en servidor
+K05 | PASS | La venta se atribuye al cajero autenticado y no al ID del body
+K06 | PASS | Sin permiso de descuento no se entrega mercadería gratis
+K07 | FAIL | Reutilizar una clave con contenido distinto produce conflicto
+  Esperado: {"http": 409, "sales": 1, "stock": 14}
+  Obtenido: {"http": 200, "sales": 1, "stock": 14}
+K08 | FAIL | Un permiso revocado impide crear pedidos mediante API
+  Esperado: 403
+  Obtenido: 200
+K09 | PASS | El cajero no consulta el ticket de otro vendedor por ID
+K10 | FAIL | Estado de cajas no revela saldos de otros vendedores
+  Esperado: false
+  Obtenido: true
+K11 | FAIL | El cajero no ejecuta una conciliación global de stock
+  Esperado: {"calls": 0, "http": 403}
+  Obtenido: {"calls": 1, "http": 200}
+K12 | FAIL | Cola offline no expone costos y ventas de otros cajeros
+  Esperado: {"blocked": true, "costLeaked": false}
+  Obtenido: {"blocked": false, "costLeaked": true}
+K13 | FAIL | La venta offline conserva la identidad autenticada
+  Esperado: 2
+  Obtenido: 3
+K14 | FAIL | No se modifica el conteo asignado a otro usuario
+  Esperado: 403
+  Obtenido: 200
+K15 | FAIL | Un conteo ya aprobado no admite modificar sus observaciones
+  Esperado: 400
+  Obtenido: 200
+K16 | FAIL | No se reabre el conteo de otro usuario
+  Esperado: 403
+  Obtenido: 200
+K17 | PASS | Cajero no aplica automáticamente ajustes del conteo
+K18 | PASS | Cajero no desactiva el kiosco con una cabecera falsa
+K19 | PASS | Catálogo de cajero no entrega costo de compra
+K20 | FAIL | Permiso de créditos revocado impide consultar deudas globales
+  Esperado: 403
+  Obtenido: 200
+K21 | FAIL | Un abono sin permiso no modifica la deuda de otro cliente
+  Esperado: {"debt": 100, "http": 403}
+  Obtenido: {"debt": 90, "http": 200}
+K22 | PASS | Respuesta de venta perdida y envío offline no crean otro movimiento
+K23 | PASS | Endpoint de supervisor está sujeto al limitador de intentos
+
+kiosk/baseline-extended-results.json
+E01 | PASS | Variar mayúsculas no omite autenticación de API
+E02 | PASS | El administrador conserva acceso a tickets de otros cajeros
+E03 | PASS | El cajero conserva lectura de sus propios tickets
+E04 | PASS | Conteo propio permite captura y sigue ocultando cantidades
+E05 | FAIL | Pedido autorizado repetido registra una sola reserva
+  Esperado: {"orders": 1, "reserved": 1}
+  Obtenido: {"orders": 2, "reserved": 2}
+E06 | FAIL | Filas repetidas no sobre-reservan inventario
+  Esperado: {"http": 400, "orders": 0}
+  Obtenido: {"http": 200, "orders": 1}
+E07 | FAIL | Cierre propio no filtra costos por otro endpoint
+  Esperado: true
+  Obtenido: false
+E08 | PASS | Una sincronización lenta conserva exclusión de ejecución
+E09 | FAIL | Dos procesadores de cola usan la misma clave durable
+  Esperado: {"orders": 1}
+  Obtenido: {"orders": 2}
+E10 | FAIL | Rol cajero no hereda acceso global a liquidaciones
+  Esperado: true
+  Obtenido: false
+E11 | FAIL | Operación de venta falla completa si no puede guardar su evidencia
+  Esperado: {"http": 500, "sales": 0, "stock": 15}
+  Obtenido: {"http": 200, "sales": 1, "stock": 14}
+E12 | PASS | 500 operaciones válidas conservan stock, libro y caja
+E13 | FAIL | Revocar control físico impide consultar incluso un conteo propio
+  Esperado: 403
+  Obtenido: 200
+E14 | PASS | Un error de validación no borra silenciosamente la acción offline
+E15 | FAIL | Cambiar de cajero no envía ni borra ventas offline de otro usuario
+  Esperado: {"posts": 0, "retained": 1}
+  Obtenido: {"posts": 1, "retained": 0}
+E16 | PASS | Cabecera de cliente no anula APP_ENV configurado
+E17 | PASS | Identidad remota de otro SKU no repone stock local más reciente
+E18 | PASS | Sincronización de la misma identidad mantiene actualización legítima
+E19 | PASS | Acciones nuevas guardan el usuario propietario antes de sincronizar
+E20 | FAIL | Importes no numéricos no descuentan stock ni crean una venta
+  Esperado: {"http": 400, "sales": 0, "stock": 15}
+  Obtenido: {"http": 200, "sales": 1, "stock": 14}
+E21 | FAIL | Un conteo físico no acepta fracciones de una unidad
+  Esperado: 400
+  Obtenido: 200
+E22 | FAIL | Una devolución no incorpora fracciones al inventario
+  Esperado: {"http": 400, "stock": 14}
+  Obtenido: {"http": 200, "stock": 14.5}
+E23 | FAIL | Un pedido no elude el permiso de descuentos
+  Esperado: {"http": 403, "orders": 0}
+  Obtenido: {"http": 200, "orders": 1}
+
+kiosk/baseline-socket-results.json
+W01 | PASS | 
+W02 | PASS | 
+W03 | PASS | 
+W04 | PASS | 
+W05 | PASS | 
+W06 | PASS | 
+
+cycle/cycle-results.json
+C01 | PASS | Alta, ingreso, venta y devolución conservan el balance básico
+C02 | PASS | Reintento de venta normal descuenta una sola vez
+C03 | PASS | Venta con varias líneas del mismo producto revierte todo si falta stock
+C04 | PASS | Devolución limita cantidad acumulada al máximo vendido
+C05 | PASS | Venta conserva costo y tasa históricos tras cambios posteriores
+C06 | PASS | Secuencia determinista de 500 operaciones mantiene stock, libro y caja
+C07 | PASS | Precio alterado de vendedor se rechaza en venta normal
+C08 | PASS | Cantidad negativa se rechaza en venta normal
+C09 | PASS | Abono BOB concuerda con deuda y caja
+C10 | PASS | Finalizar pendiente dos veces no descuenta dos veces en un proceso
+C11 | PASS | Aprobar cola offline dos veces no descuenta dos veces en un proceso
+C12 | PASS | GET de conteo ciego elimina los campos sensibles principales
+C13 | PASS | Marca de eliminación protege el producto frente a pull normal
+F01 | PASS | Devolución USD usa la tasa histórica real
+F02 | PASS | Devolver todo no reembolsa más de lo cobrado tras descuentos
+F03 | PASS | Reintento de devolución parcial no duplica unidades ni dinero
+F04 | PASS | Devolver toda una venta al crédito cancela la deuda pendiente
+F05 | PASS | Réplica explícita incluye los registros de devoluciones
+F06 | PASS | Abono a crédito USD mantiene moneda y conversión a caja
+F07 | PASS | Reintento de abono conserva un solo pago
+F08 | PASS | Cantidades de unidades deben ser enteros positivos
+F09 | PASS | Canje de puntos no excede el saldo real del cliente
+F10 | PASS | Error al registrar auditoría revierte el ajuste de producto completo
+P01 | PASS | Pedido pendiente impide vender las unidades ya comprometidas
+P02 | PASS | Guardar pendiente replica cabecera y detalle
+P03 | PASS | Finalizar pendiente registra caja inmediatamente
+P04 | PASS | La ruta pendiente valida el precio enviado por el vendedor
+P05 | PASS | Pedido completado no permite reescribir su detalle
+P06 | FAIL_INVARIANT | Exceso de abonos se rechaza sin modificar el pedido o se limita coherentemente
+  Esperado: {"paid_amount": 100, "payments": 100}
+  Obtenido: {"paid_amount": 100, "payments": 130}
+O01 | PASS | Contingencia funciona con una base creada desde el esquema actual
+O02 | PASS | Aprobación offline no permite stock negativo por filas repetidas
+O03 | PASS | Cantidad negativa en cola nunca incrementa stock al aprobar
+O04 | PASS | Crédito offline no registra dinero que no fue recibido
+A01 | PASS | Auditoría respeta una conciliación física aprobada
+A02 | PASS | Historia incompleta impide imponer un stock inferido
+A03 | PASS | Auditoría registra cantidad anterior correctamente con snake_case
+A04 | PASS | Auditoría del período incluye el stock de altas ocurridas dentro del período
+A05 | PASS | Reiniciar turno conserva ventas y relaciones históricas
+A06 | PASS | Auditar un período pasado no compara su cierre con stock posterior
+R01 | PASS | Utilidad tras devolución parcial conserva el costo que volvió a inventario
+R02 | PASS | Reporte conserva pérdidas en lugar de convertirlas en cero
+R03 | FAIL_INVARIANT | Diagnóstico matemático usa moneda de entrada USD correctamente
+  Esperado: {"BOB": 100, "USD": 10}
+  Obtenido: {"BOB": 10, "USD": 1}
+B01 | PASS | Conteo ciego no revela diferencia al registrar el físico
+S01 | FAIL_INVARIANT | Reeditar pedido no recupera líneas borradas desde Firestore
+  Esperado: {"qty": 1, "rows": 1}
+  Obtenido: {"qty": 3, "rows": 2}
+S02 | PASS | Pedido eliminado no reaparece al sincronizar
+S03 | PASS | Pull normal conserva juntos stock y fecha de la versión elegida
+S04 | PASS | SKU remoto colisionado no reemplaza la identidad de un producto
+S05 | PASS | Push incremental no omite un hueco de IDs anterior al máximo remoto
+S06 | PASS | Existe restricción única de venta y el reintento secuencial no duplica
+S07 | FAIL_INVARIANT | Dos SQLite escritoras independientes no pierden ventas al compartir Firestore
+  Esperado: {"cloudStock": 1, "sales": 2}
+  Obtenido: {"cloudStock": 8, "sales": 1}
+S08 | PASS | Verificación posterior no afirma reparación si la réplica no cambió
+Q01 | FAIL_INVARIANT | Caché no etiqueta un catálogo viejo con una versión posterior a otra venta
+  Esperado: 7
+  Obtenido: 8
+D01 | PASS | Snapshot copia todas las escrituras confirmadas mientras SQLite usa WAL
+
+cycle/integration-results.json
+T01 | PASS | Venta con clave sobre esquema inicializado por el código publicado
+T02 | PASS | Venta antes de registrar el físico no se descuenta dos veces
+T03 | PASS | Pull obsoleto no reabre ni permite reaplicar un conteo aprobado
+T04 | PASS | Una devolución de dos productos puede usar una única clave de operación
+T05 | FAIL_INVARIANT | Reintentar devolución desde un cliente sin clave no duplica unidades
+  Esperado: 13
+  Obtenido: 14
+T06 | FAIL_INVARIANT | Reintentar abono desde un cliente sin clave no duplica pagos
+  Esperado: 10
+  Obtenido: 20
+T07 | FAIL_INVARIANT | La deuda cancelada por devolución no reaparece desde la réplica
+  Esperado: 0
+  Obtenido: 80
+T08 | PASS | SKU de otra identidad no permite sobrescribir stock local más reciente
+T09 | FAIL_INVARIANT | Un intento asentado en ledger no demuestra que su documento llegó a la nube
+  Esperado: ["1", "2"]
+  Obtenido: ["2"]
+T10 | PASS | Snapshot conserva todos los datos con lector y WAL activos usando backup nativo
+T11 | FAIL_INVARIANT | Auditoría individual y de catálogo incluyen el mismo conteo aprobado
+  Esperado: {"catalogDiscrepancies": 0, "individual": 7}
+  Obtenido: {"catalogDiscrepancies": 1, "individual": 7}
+T12 | FAIL_INVARIANT | Una compra aislada no constituye un saldo inicial histórico validado
+  Esperado: 55
+  Obtenido: 5
+T13 | PASS | Una cabecera del cliente no cambia un entorno forzado a sandbox
+T14 | PASS | Una base productiva válida pequeña no es sustituida por datos de pruebas
+T15 | PASS | Venta offline respeta reservas que ya bloquean una venta normal
+T16 | PASS | Crear pedidos no reserva más unidades que el físico disponible
+T17 | PASS | Abono inicial offline se conserva al recibir y aprobar la venta
+T18 | FAIL_INVARIANT | Reintento de una venta anterior al despliegue devuelve su resultado
+  Esperado: 200
+  Obtenido: 500
+T19 | PASS | Devoluciones parciales asignan el residuo del descuento sin exceder lo cobrado
+T20 | FAIL_INVARIANT | Formulario de producto anterior a una venta no repone unidades vendidas
+  Esperado: 8
+  Obtenido: 15
+T21 | FAIL_INVARIANT | Reintento del mismo ingreso de compra no duplica unidades
+  Esperado: 15
+  Obtenido: 20
+T22 | PASS | GET de conteo conserva el alcance inicial
+T23 | PASS | Reintento directo de cierre sin pull intermedio no vuelve a aplicar
+T24 | PASS | Abono en BOB sobre deuda USD convierte antes de descontar la deuda
+T25 | PASS | Pedido de vendedor conserva igualdad entre total y líneas autorizadas
+
+cycle/new-change-results.json
+N01 | FAIL_INVARIANT | La migración conserva respuestas de deduplicación antiguas
+  Esperado: 1
+  Obtenido: 0
+N02 | FAIL_INVARIANT | Creación de producto usa contrato nuevo y reproduce el resultado al reintentar
+  Esperado: {"first": 200, "operations": 1, "retry": 200}
+  Obtenido: {"first": 200, "operations": 0, "retry": 400}
+N03 | FAIL_INVARIANT | Fallo del backup nativo con WAL activo no acepta una copia incompleta
+  Esperado: true
+  Obtenido: false
+N04 | FAIL_INVARIANT | Un snapshot de sandbox no sustituye el respaldo usado para recuperar producción
+  Esperado: 8
+  Obtenido: 999
+N05 | FAIL_INVARIANT | Pedido con dos filas del mismo producto no sobre-reserva
+  Esperado: {"accepted": false, "reserved": 0}
+  Obtenido: {"accepted": true, "reserved": 12}
+N06 | FAIL_INVARIANT | Editar un pedido también agrega la demanda repetida por producto
+  Esperado: {"accepted": false, "reserved": 1}
+  Obtenido: {"accepted": true, "reserved": 12}
+N07 | PASS | Conciliar conserva una venta posterior a la captura física
+N08 | FAIL_INVARIANT | Abono rechaza tasa negativa sin aumentar la deuda
+  Esperado: {"debt": 10, "rejected": true}
+  Obtenido: {"debt": 10.5, "rejected": false}
+N09 | FAIL_INVARIANT | Solicitud que la interfaz anuncia como Bs conserva esa unidad en deuda USD
+  Esperado: {"cashBOB": 5, "debtUSD": 9.5}
+  Obtenido: {"cashBOB": 50, "debtUSD": 5}
+N10 | FAIL_INVARIANT | Detalle de abonos conserva unidad de deuda o metadatos estructurados de conversión
+  Esperado: true
+  Obtenido: false
+N11 | FAIL_INVARIANT | Devolución fragmentada agota también los residuos redondeados hacia abajo
+  Esperado: 5
+  Obtenido: 4.98
+N12 | PASS | Arranque completo prepara las tablas de ambos entornos que abre
+
+additional-results.json
+V01 | FAIL | La voz administrativa queda reservada al administrador principal declarado en el plan
+  Esperado: false
+  Obtenido: true
+V02 | FAIL | APP_ENV sandbox conserva prioridad aunque la cabecera Host sea dspos.app
+  Esperado: true
+  Obtenido: false
+V03 | FAIL | Un entorno ais-dev sin APP_ENV no cambia a producción mediante X-App-Environment
+  Esperado: true
+  Obtenido: false
+V04 | FAIL | Formulario de pedido de cajero conserva los Bs 10 mostrados para un producto de USD 1 a tasa 10
+  Esperado: {"http": 200, "totalBOB": 10}
+  Obtenido: {"http": 403, "totalBOB": null}
+V05 | FAIL | Formulario de pedido de administrador tampoco cambia Bs 10 mostrados por Bs 1
+  Esperado: {"currency": "BOB", "total": 10}
+  Obtenido: {"currency": "BOB", "total": 1}
+V06 | FAIL | Dos envíos inmediatos del mismo formulario no crean dos pedidos
+  Esperado: 1
+  Obtenido: 2
