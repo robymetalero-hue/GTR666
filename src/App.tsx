@@ -283,16 +283,51 @@ function AppLayout() {
         isOfflineModalOpen, setIsOfflineModalOpen, isPwaInstallModalOpen, setIsPwaInstallModalOpen,
         hasPwaUpdate, isUpdatingPwa, pwaUpdateStepMessage, pwaVersionInfo, checkForPwaUpdates, applyPwaUpdate, handlePwaPrimaryAction,
         isSupervisorUnlocked, setIsSupervisorUnlocked, supervisorInfo, setSupervisorInfo, relockKiosk, isFullscreen, toggleFullscreen, showNotification,
-        inventoryLock
+        inventoryLock, isKioskLocked, requestSupervisorAuth, cart, pendingSalesCount, pendingActionsCount
     } = useAppContext();
     
     const isRgb = theme === 'rgb';
     const [isSupervisorModalOpen, setIsSupervisorModalOpen] = useState(false);
-    
-    const isKioskLocked = !isSupervisorUnlocked 
-        && (kioskMode || (user && user.role === 'vendedor' && !user?.permissions?.view_inventory && !user?.permissions?.access_admin_panel)) 
-        && user?.role !== 'admin' 
-        && user?.role !== 'propietario';
+    const [supervisorPendingAction, setSupervisorPendingAction] = useState<{ label: string; callback: () => void } | null>(null);
+
+    useEffect(() => {
+        const handleSupervisorAuthReq = (e: Event) => {
+            const detail = (e as CustomEvent).detail;
+            if (detail) {
+                setSupervisorPendingAction({ label: detail.actionLabel, callback: detail.onAuthorized });
+                setIsSupervisorModalOpen(true);
+            }
+        };
+        window.addEventListener('gtr-request-supervisor-auth', handleSupervisorAuthReq);
+        return () => window.removeEventListener('gtr-request-supervisor-auth', handleSupervisorAuthReq);
+    }, []);
+
+    const handleSafeLogout = async () => {
+        if (pendingSalesCount > 0 || pendingActionsCount > 0) {
+            setGlobalNotification({
+                message: `⚠️ Hay ${pendingSalesCount + pendingActionsCount} operación(es) offline sin sincronizar. Sincroniza antes de salir para evitar pérdida de datos.`,
+                type: 'error'
+            });
+            setIsOfflineModalOpen(true);
+            return;
+        }
+        if (cart && cart.length > 0) {
+            const confirmCart = window.confirm("⚠️ Tienes productos en el carrito activo. Si cierras sesión ahora, el carrito quedará en espera. ¿Deseas continuar?");
+            if (!confirmCart) return;
+        }
+        if (isKioskLocked) {
+            requestSupervisorAuth("Cerrar sesión de la terminal Kiosco", () => {
+                setView('inicio');
+                setUser(null);
+            });
+            return;
+        }
+        const confirmClose = window.confirm("¿Seguro que deseas salir del terminal de caja fiscal?");
+        if (confirmClose) {
+            setView('inicio');
+            await setUser(null);
+        }
+    };
     const lowStockCount = products ? products.filter(p => p.stock <= p.stock_alarm).length : 0;
     const [localWorkers, setLocalWorkers] = useState<any[]>([]);
     const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -471,6 +506,9 @@ function AppLayout() {
 
     const shouldTriggerAutoReload = (): boolean => {
         try {
+            if (isCashierActive() || pendingSalesCount > 0 || pendingActionsCount > 0) {
+                return false;
+            }
             const now = Date.now();
             const lastReloadStr = localStorage.getItem('last_auto_version_reload');
             const countStr = localStorage.getItem('auto_version_reload_count');
@@ -944,12 +982,7 @@ function AppLayout() {
                         Dispositivos
                     </button>
                     <button 
-                        onClick={async () => {
-                            const confirmClose = window.confirm("¿Seguro que deseas salir del terminal de caja fiscal?");
-                            if (confirmClose) {
-                                await setUser(null);
-                            }
-                        }}
+                        onClick={handleSafeLogout}
                         className="py-2 border border-slate-205 dark:border-slate-800 rounded-xl text-[10px] font-extrabold uppercase text-rose-500 hover:bg-rose-500/5 transition flex items-center justify-center gap-1.5 cursor-pointer"
                     >
                         <LogOut size={11} />
@@ -957,7 +990,7 @@ function AppLayout() {
                     </button>
                 </div>
 
-                {hasPermission(user, 'access_ai') && (
+                {!isKioskLocked && hasPermission(user, 'access_ai') && (
                     <button 
                         onClick={() => {
                             safeDispatchEvent('open-ai-quick-commands');
@@ -1174,17 +1207,7 @@ function AppLayout() {
                         </button>
                         <button 
                             type="button"
-                            onClick={() => {
-                                if (isKioskLocked) {
-                                    setIsSupervisorModalOpen(true);
-                                } else {
-                                    const confirmClose = window.confirm("¿Seguro que deseas salir del terminal de caja fiscal?");
-                                    if (confirmClose) {
-                                        setView('inicio');
-                                        setUser(null);
-                                    }
-                                }
-                            }} 
+                            onClick={handleSafeLogout} 
                             className="w-8 h-8 rounded-xl bg-rose-500/10 hover:bg-rose-500/15 border border-rose-500/15 flex items-center justify-center text-rose-500 cursor-pointer transition hover:scale-105"
                             title={isKioskLocked ? "Autorización de Supervisor requerida para salir del Kiosco" : "Salir del Sistema"}
                         >
@@ -1704,13 +1727,7 @@ function AppLayout() {
                             <span className="text-[9px] font-black uppercase tracking-wider">Superv.</span>
                         </button>
                         <button
-                            onClick={() => {
-                                const confirmClose = window.confirm("¿Seguro que deseas salir del terminal de caja fiscal?");
-                                if (confirmClose) {
-                                    setView('inicio');
-                                    setUser(null);
-                                }
-                            }}
+                            onClick={handleSafeLogout}
                             className="flex flex-col items-center justify-center gap-1 flex-1 py-1 text-rose-500 hover:text-rose-600 cursor-pointer touch-target"
                         >
                             <LogOut size={18} />
@@ -1977,8 +1994,8 @@ function AppLayout() {
                 </div>
             )}
 
-            {/* AI Voice modality interactive assistant */}
-            <AudioVoice />
+            {/* AI Voice modality interactive assistant - hidden in Kiosk Mode */}
+            {!isKioskLocked && hasPermission(user, 'access_ai') && <AudioVoice />}
 
             {/* Offline Control Center & Diagnostics Modal */}
             <OfflineManagerModal 
@@ -1995,10 +2012,19 @@ function AppLayout() {
             {/* Kiosk Mode Temporary Supervisor Unlock Modal */}
             <SupervisorUnlockModal
                 isOpen={isSupervisorModalOpen}
-                onClose={() => setIsSupervisorModalOpen(false)}
+                actionLabel={supervisorPendingAction?.label || null}
+                onClose={() => {
+                    setIsSupervisorModalOpen(false);
+                    setSupervisorPendingAction(null);
+                }}
                 onSuccess={(sup) => {
                     setIsSupervisorUnlocked(true);
                     setSupervisorInfo(sup);
+                    const pendingCb = supervisorPendingAction?.callback;
+                    setSupervisorPendingAction(null);
+                    if (pendingCb) {
+                        pendingCb();
+                    }
                     if (showNotification) {
                         showNotification(`Terminal desbloqueada por supervisor ${sup.username} (${sup.role}).`, 'success');
                     }

@@ -41,11 +41,14 @@ export interface DbContext {
 export const dbAsyncLocalStorage = new AsyncLocalStorage<DbContext>();
 
 export function isCurrentContextSandbox(): boolean {
+  if (process.env.APP_ENV === 'test') {
+    return true;
+  }
   const store = dbAsyncLocalStorage.getStore();
   if (store !== undefined) {
     return store.isSandbox;
   }
-  if (process.env.APP_ENV === 'test' || process.env.APP_ENV === 'sandbox') {
+  if (process.env.APP_ENV === 'sandbox') {
     return true;
   }
   if (process.env.APP_ENV === 'production') {
@@ -332,6 +335,17 @@ targetDb.exec(`
     PRIMARY KEY (table_name, record_id)
   );
 
+  CREATE TABLE IF NOT EXISTS incident_quarantine_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    incident_id TEXT NOT NULL,
+    table_name TEXT NOT NULL,
+    record_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    backup_path TEXT NOT NULL,
+    quarantined_at DATETIME DEFAULT (strftime('%Y-%m-%dT%H:%M:%S-04:00', 'now', '-4 hours'))
+  );
+
   CREATE TABLE IF NOT EXISTS offline_pending_sales (
     id TEXT PRIMARY KEY,
     client_operation_id TEXT UNIQUE,
@@ -544,6 +558,51 @@ try {
 try {
   targetDb.exec("ALTER TABLE pending_sales ADD COLUMN transport_company TEXT DEFAULT NULL");
 } catch (e: any) {}
+
+try {
+  targetDb.exec("ALTER TABLE pending_sales ADD COLUMN order_type TEXT DEFAULT 'envio'");
+} catch (e: any) {}
+
+try {
+  targetDb.exec("ALTER TABLE pending_sales ADD COLUMN valid_until DATETIME DEFAULT NULL");
+} catch (e: any) {}
+
+try {
+  targetDb.exec("ALTER TABLE pending_sales ADD COLUMN reserve_stock INTEGER DEFAULT 1");
+} catch (e: any) {}
+
+try {
+  targetDb.exec("ALTER TABLE pending_sales ADD COLUMN notes TEXT DEFAULT NULL");
+} catch (e: any) {}
+
+try {
+  targetDb.exec(`
+    CREATE TABLE IF NOT EXISTS product_groups (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      description TEXT DEFAULT NULL,
+      color TEXT DEFAULT 'indigo',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+} catch (e: any) {
+  console.error("Error creating product_groups:", e.message);
+}
+
+try {
+  targetDb.exec(`
+    CREATE TABLE IF NOT EXISTS product_group_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      group_id INTEGER NOT NULL,
+      product_id INTEGER NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(group_id, product_id)
+    );
+  `);
+} catch (e: any) {
+  console.error("Error creating product_group_items:", e.message);
+}
 
 try {
   targetDb.exec(`

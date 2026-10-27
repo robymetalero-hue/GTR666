@@ -66,8 +66,8 @@ interface SaleDetail {
 }
 
 export default function CajasView() {
-  const { user, showNotification, exchangeRate } = useAppContext();
-  const isAdminOrPropietario = user?.role === 'propietario' || hasPermission(user, 'view_other_cash');
+  const { user, showNotification, exchangeRate, isKioskLocked } = useAppContext();
+  const isAdminOrPropietario = !isKioskLocked && (user?.role === 'propietario' || hasPermission(user, 'view_other_cash'));
 
   const [activeTab, setActiveTab] = useState<'estado' | 'cierres'>('estado');
   
@@ -141,28 +141,32 @@ export default function CajasView() {
   useEffect(() => {
     fetchAccounts();
     fetchSettlements();
-  }, [user, activeTab]);
+  }, [user, activeTab, isKioskLocked]);
 
   const getHeaders = () => {
     return {
       'Content-Type': 'application/json',
-      'x-user-role': user?.role || '',
+      'x-user-role': isKioskLocked ? 'vendedor' : (user?.role || ''),
       'x-user-id': String(user?.id || ''),
-      'x-user-permissions': JSON.stringify(user?.permissions || {})
+      'x-user-permissions': JSON.stringify(isKioskLocked ? { ...user?.permissions, view_other_cash: false } : (user?.permissions || {}))
     };
   };
 
   const fetchAccounts = async () => {
     setIsLoading(true);
     try {
-      const res = await fetch(`/api/cash-accounts?user_role=${user?.role || ''}&user_id=${user?.id || ''}`, {
+      const effectiveRole = isKioskLocked ? 'vendedor' : (user?.role || '');
+      const res = await fetch(`/api/cash-accounts?user_role=${effectiveRole}&user_id=${user?.id || ''}`, {
         headers: getHeaders()
       });
       if (res.ok) {
-        const data = await res.json();
+        const rawData = await res.json();
+        const data = isKioskLocked && user
+          ? rawData.filter((acc: CashAccount) => Number(acc.seller_id) === Number(user.id) || (acc.seller_username && user.username && acc.seller_username.toLowerCase() === user.username.toLowerCase()))
+          : rawData;
         setAccounts(data);
         
-        // If logged in as seller, auto-select their own account
+        // If logged in as seller or locked in Kiosk, auto-select their own account
         if (!isAdminOrPropietario && data.length > 0) {
           const myAccount = data[0];
           setSelectedAccount(myAccount);

@@ -247,7 +247,7 @@ export function InicioView() {
 // VIEW: HISTORIAL DE VENTAS
 // ----------------------------------------------------
 export function HistorialVentasView() {
-    const { user, receiptTemplate, setView } = useAppContext();
+    const { user, receiptTemplate, setView, isKioskLocked, requestSupervisorAuth } = useAppContext();
     const outerScroll = useElasticScroll(true);
     const listScroll = useElasticScroll(true);
     const [sales, setSales] = useState<any[]>([]);
@@ -295,7 +295,12 @@ export function HistorialVentasView() {
         try {
             const currentOffset = append ? salesOffset + SALES_LIMIT : 0;
             let url = `/api/sales?lazy=true&limit=${SALES_LIMIT}&offset=${currentOffset}`;
-            if (dateRange.preset !== 'all' && dateRange.startDate && dateRange.endDate) {
+            if (isKioskLocked) {
+                const now = new Date();
+                const pad = (n: number) => String(n).padStart(2, '0');
+                const todayStr = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+                url += `&startDate=${todayStr}&endDate=${todayStr}&kiosk_own_today=true`;
+            } else if (dateRange.preset !== 'all' && dateRange.startDate && dateRange.endDate) {
                 url += `&startDate=${dateRange.startDate}&endDate=${dateRange.endDate}`;
             }
             
@@ -344,7 +349,7 @@ export function HistorialVentasView() {
 
     useEffect(() => {
         loadSales();
-    }, [dateRange]);
+    }, [dateRange, isKioskLocked]);
 
     // Derive unique cashiers list from actual sales
     const cashiers = React.useMemo(() => {
@@ -361,6 +366,14 @@ export function HistorialVentasView() {
     // Real-time memoized intelligent filter matching all constraints
     const filteredSales = React.useMemo(() => {
         return sales.filter(sale => {
+            if (isKioskLocked && user) {
+                const matchesId = sale.user_id != null && user.id != null && Number(sale.user_id) === Number(user.id);
+                const matchesName = sale.user_name && user.username && String(sale.user_name).toLowerCase() === String(user.username).toLowerCase();
+                if (!matchesId && !matchesName) {
+                    return false;
+                }
+            }
+
             // General query matching ID, client_name or user_name (cashier)
             if (searchQuery.trim() !== '') {
                 const query = searchQuery.toLowerCase().trim();
@@ -372,7 +385,7 @@ export function HistorialVentasView() {
             }
 
             // Cashier filter
-            if (selectedCashier !== 'all') {
+            if (!isKioskLocked && selectedCashier !== 'all') {
                 const saleCashier = sale.user_name || 'admin';
                 if (saleCashier !== selectedCashier) {
                     return false;
@@ -413,7 +426,7 @@ export function HistorialVentasView() {
 
             return true;
         });
-    }, [sales, searchQuery, selectedCashier, selectedPaymentMethod, minAmount, maxAmount]);
+    }, [sales, searchQuery, selectedCashier, selectedPaymentMethod, minAmount, maxAmount, isKioskLocked, user]);
 
     // calculate metrics (consolidated in Bs using historical exchange rates)
     const toBs = (s: any, field: 'total' | 'discount' | 'capital' = 'total') => {
@@ -1064,14 +1077,21 @@ export function HistorialVentasView() {
                 
                 {/* Actions Toolbar */}
                 <div className="flex items-center gap-2 w-full sm:w-auto justify-between sm:justify-end">
-                    <DateRangePicker 
-                        value={dateRange} 
-                        onChange={(r) => {
-                            setDateRange(r);
-                            setSelectedSale(null);
-                        }} 
-                        className="flex-1 sm:flex-none"
-                    />
+                    {isKioskLocked ? (
+                        <div className="px-3.5 py-2 rounded-2xl bg-amber-500/10 border border-amber-500/25 text-amber-600 dark:text-amber-400 text-xs font-extrabold uppercase tracking-wider flex items-center gap-2">
+                            <ShieldAlert size={14} />
+                            <span>Turno Actual • @{user?.username || 'Cajero'}</span>
+                        </div>
+                    ) : (
+                        <DateRangePicker 
+                            value={dateRange} 
+                            onChange={(r) => {
+                                setDateRange(r);
+                                setSelectedSale(null);
+                            }} 
+                            className="flex-1 sm:flex-none"
+                        />
+                    )}
 
                     <button 
                         onClick={() => loadSales()}
@@ -1083,7 +1103,35 @@ export function HistorialVentasView() {
                 </div>
             </div>
 
-            {/* Performance Tracking Stats Bento Grid */}
+            {/* Performance Tracking Stats Bento Grid (Hidden in Kiosk Mode to prevent global financial leaks) */}
+            {isKioskLocked ? (
+                <div className="grid grid-cols-2 gap-2.5 sm:gap-3.5">
+                    <div className="bg-white dark:bg-[#0c111e] p-3.5 sm:p-4 rounded-2xl border border-slate-200/80 dark:border-slate-850 shadow-xs flex flex-col justify-between">
+                        <div className="flex items-center gap-1.5 mb-1">
+                            <span className="w-2 h-2 rounded-full bg-sky-500 shrink-0"></span>
+                            <span className="text-[9px] uppercase font-bold tracking-wider text-slate-400 truncate">Mis Ventas del Turno</span>
+                        </div>
+                        <div className="flex items-baseline gap-1 my-0.5">
+                            <span className="text-sm sm:text-base font-black text-sky-600 dark:text-sky-400 font-mono tracking-tight whitespace-nowrap">
+                                {transactionsCount}
+                            </span>
+                            <span className="text-[10px] font-bold text-slate-400">tickets emitidos hoy</span>
+                        </div>
+                    </div>
+                    <div className="bg-white dark:bg-[#0c111e] p-3.5 sm:p-4 rounded-2xl border border-slate-200/80 dark:border-slate-850 shadow-xs flex flex-col justify-between">
+                        <div className="flex items-center gap-1.5 mb-1">
+                            <span className="w-2 h-2 rounded-full bg-indigo-500 shrink-0"></span>
+                            <span className="text-[9px] uppercase font-bold tracking-wider text-slate-400 truncate">Artículos Despachados</span>
+                        </div>
+                        <div className="flex items-baseline gap-1 my-0.5">
+                            <span className="text-sm sm:text-base font-black text-indigo-600 dark:text-indigo-400 font-mono tracking-tight whitespace-nowrap">
+                                {totalItemsCount}
+                            </span>
+                            <span className="text-[10px] font-bold text-slate-400">unidades en mi turno</span>
+                        </div>
+                    </div>
+                </div>
+            ) : (
             <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-2.5 sm:gap-3.5">
                 {/* 1. Flujo de Caja (Total Recaudado) */}
                 <div className="bg-white dark:bg-[#0c111e] p-3.5 sm:p-4 rounded-2xl border border-slate-200/80 dark:border-slate-850 shadow-xs flex flex-col justify-between transition hover:border-indigo-500/30">
@@ -1190,6 +1238,7 @@ export function HistorialVentasView() {
                     </span>
                 </div>
             </div>
+            )}
 
             {/* Main Content Layout */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-5">
@@ -1219,19 +1268,21 @@ export function HistorialVentasView() {
                                 )}
                             </div>
                             
-                            {/* Cajero */}
-                            <div className="w-full sm:w-44 shrink-0">
-                                <select
-                                    value={selectedCashier}
-                                    onChange={(e) => setSelectedCashier(e.target.value)}
-                                    className="w-full px-3 py-2 text-xs bg-white dark:bg-[#070c14] border border-slate-200 dark:border-slate-800 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500 text-slate-750 dark:text-slate-200 font-bold cursor-pointer"
-                                >
-                                    <option value="all">👤 Todos los cajeros</option>
-                                    {cashiers.map(c => (
-                                        <option key={c} value={c}>👤 @{c}</option>
-                                    ))}
-                                </select>
-                            </div>
+                            {/* Cajero (Hidden in Kiosk Mode) */}
+                            {!isKioskLocked && (
+                                <div className="w-full sm:w-44 shrink-0">
+                                    <select
+                                        value={selectedCashier}
+                                        onChange={(e) => setSelectedCashier(e.target.value)}
+                                        className="w-full px-3 py-2 text-xs bg-white dark:bg-[#070c14] border border-slate-200 dark:border-slate-800 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500 text-slate-750 dark:text-slate-200 font-bold cursor-pointer"
+                                    >
+                                        <option value="all">👤 Todos los cajeros</option>
+                                        {cashiers.map(c => (
+                                            <option key={c} value={c}>👤 @{c}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            )}
 
                             {/* Método de pago */}
                             <div className="w-full sm:w-44 shrink-0">
@@ -1521,8 +1572,15 @@ export function HistorialVentasView() {
 
                                 <button
                                     onClick={() => {
-                                        localStorage.setItem('auto_refund_sale_id', selectedSale.id.toString());
-                                        setView('devoluciones');
+                                        const proceedRefund = () => {
+                                            localStorage.setItem('auto_refund_sale_id', selectedSale.id.toString());
+                                            setView('devoluciones');
+                                        };
+                                        if (isKioskLocked) {
+                                            requestSupervisorAuth(`Anulación / Devolución de Venta #${selectedSale.id}`, proceedRefund);
+                                        } else {
+                                            proceedRefund();
+                                        }
                                     }}
                                     className="w-full py-2 bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/20 dark:hover:bg-rose-950/35 text-rose-600 dark:text-rose-400 font-extrabold text-xs rounded-xl tracking-wider flex items-center justify-center gap-1.5 cursor-pointer transition-all border border-rose-200/50 dark:border-rose-900/30 uppercase"
                                 >
@@ -1685,9 +1743,16 @@ export function HistorialVentasView() {
                                     </button>
                                     <button
                                         onClick={() => {
-                                            localStorage.setItem('auto_refund_sale_id', selectedSale.id.toString());
-                                            setView('devoluciones');
-                                            setShowDetailModal(false);
+                                            const proceedRefund = () => {
+                                                localStorage.setItem('auto_refund_sale_id', selectedSale.id.toString());
+                                                setView('devoluciones');
+                                                setShowDetailModal(false);
+                                            };
+                                            if (isKioskLocked) {
+                                                requestSupervisorAuth(`Anulación / Devolución de Venta #${selectedSale.id}`, proceedRefund);
+                                            } else {
+                                                proceedRefund();
+                                            }
                                         }}
                                         className="py-2.5 px-4 bg-rose-600 hover:bg-rose-500 text-white font-extrabold text-xs rounded-xl tracking-wider flex items-center gap-1.5 cursor-pointer transition-all uppercase"
                                     >

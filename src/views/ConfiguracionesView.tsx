@@ -21,7 +21,8 @@ export default function ConfiguracionesView() {
         exchangeRate, setExchangeRate, fetchExchangeRate, user, showNotification, receiptTemplate, 
         updateReceiptTemplate, clients, fetchClients, theme, setTheme, rgbSettings, setRgbSettings, 
         pwaPrompt, installPWA, isPwaInstalled, kioskMode, setKioskMode,
-        hasPwaUpdate, isUpdatingPwa, pwaUpdateStepMessage, pwaVersionInfo, handlePwaPrimaryAction, checkForPwaUpdates, applyPwaUpdate
+        hasPwaUpdate, isUpdatingPwa, pwaUpdateStepMessage, pwaVersionInfo, handlePwaPrimaryAction, checkForPwaUpdates, applyPwaUpdate,
+        isSupervisorUnlocked, requestSupervisorAuth
     } = useAppContext();
     const [rateInput, setRateInput] = useState<string>("");
     const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
@@ -2070,13 +2071,20 @@ export default function ConfiguracionesView() {
                                     checked={kioskMode} 
                                     onChange={(e) => {
                                         const val = e.target.checked;
-                                        setKioskMode(val);
-                                        if (val && document.documentElement.requestFullscreen) {
-                                            document.documentElement.requestFullscreen().catch(() => {});
-                                        } else if (!val && document.fullscreenElement) {
-                                            document.exitFullscreen().catch(() => {});
+                                        const applyKioskChange = () => {
+                                            setKioskMode(val);
+                                            if (val && document.documentElement.requestFullscreen) {
+                                                document.documentElement.requestFullscreen().catch(() => {});
+                                            } else if (!val && document.fullscreenElement) {
+                                                document.exitFullscreen().catch(() => {});
+                                            }
+                                            showNotification(`Modo Quiosco ${val ? 'Activado' : 'Desactivado'}`, 'success');
+                                        };
+                                        if (!val && kioskMode && !isSupervisorUnlocked) {
+                                            requestSupervisorAuth("Desactivar Modo Quiosco", applyKioskChange);
+                                            return;
                                         }
-                                        showNotification(`Modo Quiosco ${val ? 'Activado' : 'Desactivado'}`, 'success');
+                                        applyKioskChange();
                                     }}
                                     disabled={!isAdmin}
                                 />

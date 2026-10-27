@@ -256,16 +256,12 @@ export default function POS() {
         hasMoreProducts, loadMoreProducts,
         deductLocalProductStock, registerLocalClient,
         isSupervisorUnlocked, isFullscreen, toggleFullscreen,
-        inventoryLock
+        inventoryLock, isKioskLocked
     } = useAppContext();
 
     const [loadingMoreProducts, setLoadingMoreProducts] = useState(false);
     const [visibleCatalogLimit, setVisibleCatalogLimit] = useState(48);
     const executeCheckoutRef = useRef<any>(null);
-    const isKioskLocked = !isSupervisorUnlocked 
-        && (kioskMode || (user && user.role === 'vendedor' && !user?.permissions?.view_inventory && !user?.permissions?.access_admin_panel)) 
-        && user?.role !== 'admin' 
-        && user?.role !== 'propietario';
 
 
     const catalogScroll = useElasticScroll(true);
@@ -881,8 +877,13 @@ export default function POS() {
     const [lastSaleItems, setLastSaleItems] = useState<any[]>([]);
     const [loadingLastSale, setLoadingLastSale] = useState(false);
 
-    // Pending Sale Modal States
+    // Pending Sale / Quotation / Reservation Modal States
     const [isPendingSaleModalOpen, setIsPendingSaleModalOpen] = useState(false);
+    const [pendingOrderType, setPendingOrderType] = useState<'cotizacion' | 'reserva' | 'envio'>('envio');
+    const [pendingReserveStock, setPendingReserveStock] = useState<boolean>(true);
+    const [pendingValidityDays, setPendingValidityDays] = useState<'none' | '3' | '7' | '15' | 'custom'>('7');
+    const [pendingCustomValidUntil, setPendingCustomValidUntil] = useState<string>("");
+    const [pendingNotes, setPendingNotes] = useState<string>("");
     const [pendingClientName, setPendingClientName] = useState("");
     const [pendingDestination, setPendingDestination] = useState("");
     const [pendingClientPhone, setPendingClientPhone] = useState("");
@@ -890,11 +891,29 @@ export default function POS() {
     const [isSavingPending, setIsSavingPending] = useState(false);
     const isSavingPendingRef = useRef(false);
 
+    const handleChangePendingOrderType = (type: 'cotizacion' | 'reserva' | 'envio') => {
+        setPendingOrderType(type);
+        if (type === 'cotizacion') {
+            setPendingReserveStock(false);
+            setPendingValidityDays('7');
+        } else if (type === 'reserva') {
+            setPendingReserveStock(true);
+            setPendingValidityDays('3');
+        } else {
+            setPendingReserveStock(true);
+            setPendingValidityDays('none');
+        }
+    };
+
     const handleSavePendingSale = async (e: React.FormEvent) => {
         e.preventDefault();
         if (isSavingPendingRef.current) return;
-        if (!pendingClientName.trim() || !pendingDestination.trim()) {
-            showNotification("⚠️ Nombre de cliente y destino son obligatorios.", "error");
+        if (!pendingClientName.trim()) {
+            showNotification("⚠️ El nombre del cliente es obligatorio.", "error");
+            return;
+        }
+        if (pendingOrderType === 'envio' && !pendingDestination.trim()) {
+            showNotification("⚠️ El destino de envío es obligatorio para pedidos de despacho.", "error");
             return;
         }
         isSavingPendingRef.current = true;
@@ -910,44 +929,67 @@ export default function POS() {
                 };
             });
 
-            const calculatedTotalBs = items.reduce((sum, it) => sum + (it.quantity * it.price), 0);
+            const calculatedSubtotalBs = items.reduce((sum, it) => sum + (it.quantity * it.price), 0);
+            const appliedDiscountBs = Math.min(calculatedSubtotalBs, discountValue || 0);
+            const calculatedTotalBs = roundBs(Math.max(0, calculatedSubtotalBs - appliedDiscountBs));
+
+            let computedValidUntil: string | null = null;
+            if (pendingValidityDays === 'custom' && pendingCustomValidUntil) {
+                computedValidUntil = pendingCustomValidUntil;
+            } else if (pendingValidityDays !== 'none' && pendingValidityDays !== 'custom') {
+                const d = new Date();
+                d.setDate(d.getDate() + Number(pendingValidityDays));
+                computedValidUntil = d.toISOString().split('T')[0];
+            }
+
+            const defaultDest = pendingOrderType === 'cotizacion'
+                ? 'Cotización en Mostrador'
+                : pendingOrderType === 'reserva'
+                ? 'Reserva en Tienda'
+                : 'Envío por definir';
+
             const opId = "pending_" + Date.now() + "_" + Math.random().toString(36).substring(2, 9);
             const payload = {
                 client_name: pendingClientName.trim(),
-                destination: pendingDestination.trim(),
+                destination: pendingDestination.trim() || defaultDest,
                 client_phone: pendingClientPhone.trim() || null,
                 transport_company: pendingTransportCompany.trim() || null,
                 total: calculatedTotalBs,
-                discount: 0,
+                discount: appliedDiscountBs,
                 currency: 'BOB',
                 exchange_rate: exchangeRate,
+                order_type: pendingOrderType,
+                reserve_stock: pendingReserveStock ? 1 : 0,
+                valid_until: computedValidUntil,
+                notes: pendingNotes.trim() || null,
                 items,
                 clientOperationId: opId
             };
-                if (!navigator.onLine) {
-                    await saveOfflineAction('create_pending_sale', '/api/pending-sales', 'POST', payload);
-                    clearCart(true);
-                    setLocalPriceInputs({});
-                    setSelectedCartItemId(null);
-                    setIsMobileCartOpen(false);
-                    setPendingClientName("");
-                    setPendingDestination("");
-                    setPendingClientPhone("");
-                    setPendingTransportCompany("");
-                    setIsPendingSaleModalOpen(false);
-                    showNotification("📦 Pedido registrado offline. Se sincronizará automáticamente al recuperar internet.", "success");
-                    return;
-                }
+            if (!navigator.onLine) {
+                await saveOfflineAction('create_pending_sale', '/api/pending-sales', 'POST', payload);
+                clearCart(true);
+                setLocalPriceInputs({});
+                setSelectedCartItemId(null);
+                setIsMobileCartOpen(false);
+                setPendingClientName("");
+                setPendingDestination("");
+                setPendingClientPhone("");
+                setPendingTransportCompany("");
+                setPendingNotes("");
+                setIsPendingSaleModalOpen(false);
+                showNotification("📦 Registro guardado offline. Se sincronizará automáticamente al recuperar internet.", "success");
+                return;
+            }
 
-                const token = localStorage.getItem('auth_token');
-                const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-                if (token) headers['Authorization'] = `Bearer ${token}`;
+            const token = localStorage.getItem('auth_token');
+            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+            if (token) headers['Authorization'] = `Bearer ${token}`;
 
-                const res = await fetch('/api/pending-sales', {
-                    method: 'POST',
-                    headers,
-                    body: JSON.stringify(payload)
-                });
+            const res = await fetch('/api/pending-sales', {
+                method: 'POST',
+                headers,
+                body: JSON.stringify(payload)
+            });
             
             if (res.ok) {
                 clearCart(true);
@@ -958,8 +1000,11 @@ export default function POS() {
                 setPendingDestination("");
                 setPendingClientPhone("");
                 setPendingTransportCompany("");
+                setPendingNotes("");
                 setIsPendingSaleModalOpen(false);
-                showNotification("📦 ¡Pedido guardado como Venta Pendiente para envío con éxito!", "success");
+                fetchProducts(undefined, true);
+                const modeLabel = pendingOrderType === 'cotizacion' ? 'Cotización / Proforma' : pendingOrderType === 'reserva' ? 'Reserva en Mostrador' : 'Pedido para Envío';
+                showNotification(`📦 ¡${modeLabel} registrada con éxito en Ventas Pendientes!`, "success");
             } else {
                 const err = await res.json();
                 showNotification("⚠️ Error: " + (err.error || "No se pudo guardar"), "error");
@@ -2197,7 +2242,7 @@ export default function POS() {
                 </div>
 
                 {/* GTR AI Operational Neural Bar */}
-                {hasPermission(user, 'access_ai') && (
+                {!isKioskLocked && hasPermission(user, 'access_ai') && (
                     <div className="px-4 py-2.5 bg-indigo-50/30 dark:bg-indigo-950/10 border-b border-slate-150 dark:border-slate-850 flex items-center gap-2" id="cart-ai-command-bar">
                         <Sparkles className={`w-3.5 h-3.5 text-indigo-500 shrink-0 ${isAiProcessing ? 'animate-spin' : 'animate-pulse'}`} />
                         <input
@@ -3834,7 +3879,7 @@ export default function POS() {
                 )}
             </AnimatePresence>
 
-            {/* Modal de Retención de Venta Pendiente (Envío) */}
+            {/* Modal de Retención de Venta Pendiente / Cotización / Reserva / Envío */}
             <AnimatePresence>
                 {isPendingSaleModalOpen && (
                     <div className="fixed inset-0 z-[100] flex items-start sm:items-center justify-center p-2 sm:p-4 overflow-y-auto">
@@ -3850,12 +3895,12 @@ export default function POS() {
                             animate={{ scale: 1, opacity: 1, y: 0 }}
                             exit={{ scale: 0.95, opacity: 0, y: 15 }}
                             transition={{ type: 'spring', stiffness: 350, damping: 25 }}
-                            className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-205 dark:border-slate-850 p-6 max-w-md w-full relative z-10 flex flex-col gap-4 shadow-2xl select-none text-slate-800 dark:text-white"
+                            className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-205 dark:border-slate-850 p-5 sm:p-6 max-w-lg w-full relative z-10 flex flex-col gap-3.5 shadow-2xl select-none text-slate-800 dark:text-white my-auto max-h-[94vh] overflow-y-auto"
                         >
                             <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-850/60 shrink-0">
                                 <div className="flex items-center gap-2 text-amber-500">
                                     <Truck size={18} className="animate-pulse" />
-                                    <h2 className="text-sm font-extrabold uppercase tracking-wider">Retener / Venta Pendiente</h2>
+                                    <h2 className="text-sm font-extrabold uppercase tracking-wider">Registrar Venta Pendiente / Cotización</h2>
                                 </div>
                                 <button 
                                     onClick={() => {
@@ -3868,65 +3913,179 @@ export default function POS() {
                                 </button>
                             </div>
 
-                            <p className="text-[11px] text-slate-400 leading-relaxed font-semibold">
-                                Registra este pedido de forma temporal para envíos. El stock de los productos no se deducirá hasta que la venta sea finalizada y cobrada en el módulo correspondiente.
-                            </p>
-
-                            <form onSubmit={handleSavePendingSale} className="flex flex-col gap-3.5 mt-1">
+                            <form onSubmit={handleSavePendingSale} className="flex flex-col gap-3.5">
+                                {/* Selector de Modo de Operación */}
                                 <div className="flex flex-col gap-1.5">
-                                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Nombre del Cliente *</label>
-                                    <div className="relative">
+                                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Modalidad de Operación *</label>
+                                    <div className="grid grid-cols-3 gap-2">
+                                        {[
+                                            { id: 'cotizacion', label: 'Cotización / Proforma', desc: 'Sin reserva por defecto' },
+                                            { id: 'reserva', label: 'Reserva Mostrador', desc: 'Aparta stock en tienda' },
+                                            { id: 'envio', label: 'Pedido para Envío', desc: 'Despacho / Flota / Delivery' }
+                                        ].map((mode) => {
+                                            const active = pendingOrderType === mode.id;
+                                            return (
+                                                <button
+                                                    key={mode.id}
+                                                    type="button"
+                                                    onClick={() => handleChangePendingOrderType(mode.id as any)}
+                                                    className={`p-2.5 rounded-2xl border text-left transition cursor-pointer flex flex-col gap-0.5 ${
+                                                        active
+                                                            ? 'bg-indigo-600/10 dark:bg-indigo-500/15 border-indigo-500 text-indigo-600 dark:text-indigo-300 shadow-xs'
+                                                            : 'bg-slate-50 dark:bg-black/20 border-slate-200 dark:border-slate-850 text-slate-600 dark:text-slate-400 hover:border-slate-300'
+                                                    }`}
+                                                >
+                                                    <span className="text-[10.5px] font-black uppercase leading-tight">{mode.label}</span>
+                                                    <span className="text-[8.5px] font-semibold opacity-75 leading-tight">{mode.desc}</span>
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+
+                                {/* Control de Reserva de Stock Físico */}
+                                <div className={`p-3 rounded-2xl border flex items-center justify-between gap-3 transition ${
+                                    pendingReserveStock
+                                        ? 'bg-amber-500/10 border-amber-500/30 text-amber-800 dark:text-amber-300'
+                                        : 'bg-slate-50 dark:bg-black/20 border-slate-200 dark:border-slate-850 text-slate-600 dark:text-slate-400'
+                                }`}>
+                                    <div className="flex flex-col">
+                                        <span className="text-[11px] font-extrabold uppercase tracking-wide">
+                                            {pendingReserveStock ? '🔒 Reservar Stock Físico del Inventario' : '📄 Solo Cotizar (No Reserva Stock)'}
+                                        </span>
+                                        <span className="text-[9.5px] font-semibold opacity-80">
+                                            {pendingReserveStock
+                                                ? 'Las unidades se apartan del stock disponible para evitar que otro vendedor las venda.'
+                                                : 'No compromete el inventario disponible hasta que el cliente confirme su compra.'}
+                                        </span>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => setPendingReserveStock(!pendingReserveStock)}
+                                        className={`w-12 h-6 rounded-full p-0.5 transition-colors cursor-pointer shrink-0 ${
+                                            pendingReserveStock ? 'bg-amber-500' : 'bg-slate-300 dark:bg-slate-700'
+                                        }`}
+                                    >
+                                        <div className={`w-5 h-5 rounded-full bg-white shadow-sm transform transition-transform ${
+                                            pendingReserveStock ? 'translate-x-6' : 'translate-x-0'
+                                        }`} />
+                                    </button>
+                                </div>
+
+                                {/* Vigencia / Fecha de Vencimiento */}
+                                <div className="flex flex-col gap-1.5">
+                                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Vigencia de la Cotización / Reserva</label>
+                                    <div className="flex flex-wrap gap-1.5">
+                                        {[
+                                            { id: 'none', label: 'Sin vencimiento' },
+                                            { id: '3', label: '3 Días' },
+                                            { id: '7', label: '7 Días' },
+                                            { id: '15', label: '15 Días' },
+                                            { id: 'custom', label: 'Fecha exacta' }
+                                        ].map(opt => (
+                                            <button
+                                                key={opt.id}
+                                                type="button"
+                                                onClick={() => setPendingValidityDays(opt.id as any)}
+                                                className={`px-2.5 py-1.5 rounded-xl text-[10px] font-extrabold uppercase transition cursor-pointer border ${
+                                                    pendingValidityDays === opt.id
+                                                        ? 'bg-indigo-600 text-white border-indigo-500'
+                                                        : 'bg-slate-50 dark:bg-black/20 border-slate-200 dark:border-slate-850 text-slate-500 dark:text-slate-400'
+                                                }`}
+                                            >
+                                                {opt.label}
+                                            </button>
+                                        ))}
+                                    </div>
+                                    {pendingValidityDays === 'custom' && (
+                                        <input
+                                            type="date"
+                                            value={pendingCustomValidUntil}
+                                            onChange={(e) => setPendingCustomValidUntil(e.target.value)}
+                                            className="mt-1 w-full bg-slate-50 dark:bg-black/20 border border-slate-205 dark:border-slate-850 rounded-xl p-2 text-xs font-bold focus:outline-none focus:border-indigo-500 text-slate-700 dark:text-slate-200"
+                                        />
+                                    )}
+                                </div>
+
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                    <div className="flex flex-col gap-1">
+                                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Nombre del Cliente *</label>
                                         <input 
                                             type="text"
                                             required
                                             value={pendingClientName}
                                             onChange={(e) => setPendingClientName(e.target.value)}
-                                            placeholder="Ej. Juan Pérez"
+                                            placeholder="Ej. Juan Pérez / Empresa"
+                                            className="w-full bg-slate-50 dark:bg-black/20 border border-slate-205 dark:border-slate-850 rounded-xl p-2.5 text-xs font-bold focus:outline-none focus:border-indigo-500 dark:focus:border-indigo-400 text-slate-700 dark:text-slate-200 placeholder-slate-400"
+                                        />
+                                    </div>
+
+                                    <div className="flex flex-col gap-1">
+                                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Teléfono / WhatsApp</label>
+                                        <input 
+                                            type="tel"
+                                            value={pendingClientPhone}
+                                            onChange={(e) => setPendingClientPhone(e.target.value)}
+                                            placeholder="Ej. 78945612"
                                             className="w-full bg-slate-50 dark:bg-black/20 border border-slate-205 dark:border-slate-850 rounded-xl p-2.5 text-xs font-bold focus:outline-none focus:border-indigo-500 dark:focus:border-indigo-400 text-slate-700 dark:text-slate-200 placeholder-slate-400"
                                         />
                                     </div>
                                 </div>
 
-                                <div className="flex flex-col gap-1.5">
-                                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Destino del Envío *</label>
-                                    <textarea 
-                                        required
-                                        rows={2}
-                                        value={pendingDestination}
-                                        onChange={(e) => setPendingDestination(e.target.value)}
-                                        placeholder="Ej. Calle Aroma #420, Cochabamba (Envío por flota o delivery)"
-                                        className="w-full bg-slate-50 dark:bg-black/20 border border-slate-205 dark:border-slate-850 rounded-xl p-2.5 text-xs font-bold focus:outline-none focus:border-indigo-500 dark:focus:border-indigo-400 text-slate-700 dark:text-slate-200 placeholder-slate-400 resize-none"
-                                    />
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                    <div className="flex flex-col gap-1">
+                                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                                            {pendingOrderType === 'envio' ? 'Destino del Envío *' : 'Referencia / Lugar Entrega (Opcional)'}
+                                        </label>
+                                        <input 
+                                            type="text"
+                                            required={pendingOrderType === 'envio'}
+                                            value={pendingDestination}
+                                            onChange={(e) => setPendingDestination(e.target.value)}
+                                            placeholder={pendingOrderType === 'envio' ? "Ej. Av. Aroma #420, Cochabamba" : "Ej. Retiro en tienda / Mostrador"}
+                                            className="w-full bg-slate-50 dark:bg-black/20 border border-slate-205 dark:border-slate-850 rounded-xl p-2.5 text-xs font-bold focus:outline-none focus:border-indigo-500 dark:focus:border-indigo-400 text-slate-700 dark:text-slate-200 placeholder-slate-400"
+                                        />
+                                    </div>
+
+                                    <div className="flex flex-col gap-1">
+                                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Transporte / Flota (Opcional)</label>
+                                        <input 
+                                            type="text"
+                                            value={pendingTransportCompany}
+                                            onChange={(e) => setPendingTransportCompany(e.target.value)}
+                                            placeholder="Ej. Trans Copacabana, Delivery..."
+                                            className="w-full bg-slate-50 dark:bg-black/20 border border-slate-205 dark:border-slate-850 rounded-xl p-2.5 text-xs font-bold focus:outline-none focus:border-indigo-500 dark:focus:border-indigo-400 text-slate-700 dark:text-slate-200 placeholder-slate-400"
+                                        />
+                                    </div>
                                 </div>
 
-                                <div className="flex flex-col gap-1.5">
-                                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Empresa de Transporte (Opcional)</label>
+                                <div className="flex flex-col gap-1">
+                                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Observaciones / Condiciones Comerciales (Opcional)</label>
                                     <input 
                                         type="text"
-                                        value={pendingTransportCompany}
-                                        onChange={(e) => setPendingTransportCompany(e.target.value)}
-                                        placeholder="Ej. Trans Copacabana, Delivery Moto, etc."
+                                        value={pendingNotes}
+                                        onChange={(e) => setPendingNotes(e.target.value)}
+                                        placeholder="Ej. Precios sujetos a tipo de cambio, entrega inmediata..."
                                         className="w-full bg-slate-50 dark:bg-black/20 border border-slate-205 dark:border-slate-850 rounded-xl p-2.5 text-xs font-bold focus:outline-none focus:border-indigo-500 dark:focus:border-indigo-400 text-slate-700 dark:text-slate-200 placeholder-slate-400"
                                     />
                                 </div>
 
-                                <div className="flex flex-col gap-1.5">
-                                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Teléfono / Celular (Opcional)</label>
-                                    <input 
-                                        type="tel"
-                                        value={pendingClientPhone}
-                                        onChange={(e) => setPendingClientPhone(e.target.value)}
-                                        placeholder="Ej. 78945612"
-                                        className="w-full bg-slate-50 dark:bg-black/20 border border-slate-205 dark:border-slate-850 rounded-xl p-2.5 text-xs font-bold focus:outline-none focus:border-indigo-500 dark:focus:border-indigo-400 text-slate-700 dark:text-slate-200 placeholder-slate-400"
-                                    />
+                                <div className="p-3 bg-slate-50/50 dark:bg-black/20 border border-slate-200/50 dark:border-slate-850 rounded-2xl flex flex-col gap-1 text-xs">
+                                    {discountValue > 0 && (
+                                        <div className="flex justify-between items-center text-[11px] text-slate-400">
+                                            <span>Subtotal: Bs. {subtotal.toFixed(2)}</span>
+                                            <span className="text-rose-500 font-bold">Descuento: -Bs. {discountValue.toFixed(2)}</span>
+                                        </div>
+                                    )}
+                                    <div className="flex justify-between items-center">
+                                        <span className="font-bold text-slate-500">Total a Registrar:</span>
+                                        <span className="font-mono font-black text-indigo-600 dark:text-indigo-400 text-sm">
+                                            Bs. {roundBs(Math.max(0, subtotal - (discountValue || 0))).toFixed(2)}
+                                        </span>
+                                    </div>
                                 </div>
 
-                                <div className="p-3 bg-slate-50/50 dark:bg-black/20 border border-slate-200/50 dark:border-slate-850 rounded-2xl flex justify-between items-center text-xs mt-1.5">
-                                    <span className="font-bold text-slate-500">Monto del Pedido:</span>
-                                    <span className="font-mono font-black text-indigo-600 dark:text-indigo-400 text-sm">Bs. {subtotal.toFixed(2)}</span>
-                                </div>
-
-                                <div className="flex gap-2.5 mt-3">
+                                <div className="flex gap-2.5 mt-1">
                                     <button
                                         type="button"
                                         onClick={() => {
@@ -3942,7 +4101,7 @@ export default function POS() {
                                         disabled={isSavingPending}
                                         className="flex-1 py-2.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 disabled:from-slate-300 disabled:to-slate-400 text-white font-black uppercase text-[10px] tracking-wider rounded-xl cursor-pointer shadow-md shadow-amber-500/10 flex items-center justify-center gap-1.5 transition"
                                     >
-                                        {isSavingPending ? "Guardando..." : "Guardar Pedido"}
+                                        {isSavingPending ? "Guardando..." : pendingOrderType === 'cotizacion' ? "Guardar Cotización" : pendingOrderType === 'reserva' ? "Guardar Reserva" : "Guardar Pedido"}
                                     </button>
                                 </div>
                             </form>

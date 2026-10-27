@@ -212,28 +212,25 @@ async function startServer() {
   app.use(express.urlencoded({ limit: "100mb", extended: true }));
 
   // Sandbox vs Production Environment Isolation Gate
-  // Accede inequívocamente a producción para dspos.app o cuando APP_ENV=production
+  // Accede inequívocamente a producción para dspos.app, ais-pre o cabecera explícita 'production' (salvo en modo test)
   app.use((req, res, next) => {
     const rawHost = String(req.headers['x-forwarded-host'] || req.headers['host'] || req.hostname || '').toLowerCase();
     const explicitEnv = String(req.headers['x-app-environment'] || '').toLowerCase();
-    const isDsposDomain = rawHost.includes('dspos.app');
+    const isProdDomain = rawHost.includes('dspos.app') || rawHost.includes('ais-pre');
     const isDevDomain = rawHost.includes('ais-dev');
-    const isLocalContainer = rawHost.includes('localhost') || rawHost.includes('127.0.0.1');
 
     let isSandbox = false;
-    // Server-level environment takes precedence over client-supplied headers
-    if (process.env.APP_ENV === 'production' || isDsposDomain) {
-      isSandbox = false;
-    } else if (process.env.APP_ENV === 'sandbox') {
+    if (process.env.APP_ENV === 'test') {
       isSandbox = true;
     } else if (explicitEnv === 'sandbox') {
       isSandbox = true;
-    } else if (explicitEnv === 'production') {
+    } else if (isProdDomain || explicitEnv === 'production') {
       isSandbox = false;
-    } else if (!isDsposDomain && (isDevDomain || (isLocalContainer && (process.env.K_SERVICE?.startsWith('ais-dev') || process.env.APP_URL?.includes('ais-dev'))))) {
+    } else if (isDevDomain || process.env.APP_ENV === 'sandbox') {
       isSandbox = true;
     } else {
-      isSandbox = process.env.NODE_ENV === 'development' && !isDsposDomain;
+      // Fail-closed: any untagged request without explicit environment header defaults to sandbox
+      isSandbox = true;
     }
 
     (req as any).isSandbox = isSandbox;
@@ -456,6 +453,7 @@ async function startServer() {
         JOIN pending_sales ps ON ps.id = psi.pending_sale_id
         WHERE psi.product_id = ?
           AND ps.status IN ('pendiente', 'en_proceso', 'esperando_pago', 'reservado')
+          AND COALESCE(ps.reserve_stock, 1) = 1
       `).get(productId) as any;
       return Number(row?.reserved) || 0;
     } catch {
@@ -2592,6 +2590,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
             FROM pending_sale_items psi
             JOIN pending_sales ps ON ps.id = psi.pending_sale_id
             WHERE ps.status IN ('pendiente', 'en_proceso', 'esperando_pago', 'reservado')
+              AND COALESCE(ps.reserve_stock, 1) = 1
             GROUP BY psi.product_id
           `).all() as any[];
           for (const r of reservedRows) {
@@ -3421,6 +3420,360 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       }
 
       res.json({ success: true, count: deletedIds.length, deletedIds });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ==========================================
+  // PRODUCT GROUPS & BULK INVENTORY ADJUSTMENT APIS
+  // ==========================================
+
+  app.get("/api/product-groups", (req, res) => {
+    try {
+      const groups = db.prepare("SELECT * FROM product_groups ORDER BY name COLLATE NOCASE ASC").all() as any[];
+      const items = db.prepare("SELECT group_id, product_id FROM product_group_items").all() as any[];
+      const map = new Map<number, number[]>();
+      for (const it of items) {
+        const gId = Number(it.group_id);
+        if (!map.has(gId)) map.set(gId, []);
+        map.get(gId)!.push(Number(it.product_id));
+      }
+      const enriched = groups.map(g => ({
+        ...g,
+        product_ids: map.get(Number(g.id)) || []
+      }));
+      res.json(enriched);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/product-groups", (req, res) => {
+    const { name, description, color, product_ids } = req.body;
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ error: "El nombre del grupo es obligatorio." });
+    }
+    try {
+      const nowIso = getBoliviaISOString();
+      const groupId = db.transaction(() => {
+        const resGroup = db.prepare(`
+          INSERT INTO product_groups (name, description, color, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?)
+        `).run(String(name).trim(), description ? String(description).trim() : null, color || 'indigo', nowIso, nowIso);
+        const gId = Number(resGroup.lastInsertRowid);
+        if (Array.isArray(product_ids) && product_ids.length > 0) {
+          const ins = db.prepare("INSERT OR IGNORE INTO product_group_items (group_id, product_id, created_at) VALUES (?, ?, ?)");
+          for (const pid of product_ids) {
+            const numPid = Number(pid);
+            if (Number.isFinite(numPid) && numPid > 0) {
+              ins.run(gId, numPid, nowIso);
+            }
+          }
+        }
+        return gId;
+      })();
+      res.json({ success: true, id: groupId });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.put("/api/product-groups/:id", (req, res) => {
+    const { id } = req.params;
+    const { name, description, color, product_ids } = req.body;
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ error: "El nombre del grupo es obligatorio." });
+    }
+    try {
+      const existing = db.prepare("SELECT id FROM product_groups WHERE id = ?").get(id);
+      if (!existing) {
+        return res.status(404).json({ error: "Grupo de productos no encontrado." });
+      }
+      const nowIso = getBoliviaISOString();
+      db.transaction(() => {
+        db.prepare(`
+          UPDATE product_groups
+          SET name = ?, description = ?, color = ?, updated_at = ?
+          WHERE id = ?
+        `).run(String(name).trim(), description ? String(description).trim() : null, color || 'indigo', nowIso, id);
+
+        if (Array.isArray(product_ids)) {
+          db.prepare("DELETE FROM product_group_items WHERE group_id = ?").run(id);
+          const ins = db.prepare("INSERT OR IGNORE INTO product_group_items (group_id, product_id, created_at) VALUES (?, ?, ?)");
+          for (const pid of product_ids) {
+            const numPid = Number(pid);
+            if (Number.isFinite(numPid) && numPid > 0) {
+              ins.run(Number(id), numPid, nowIso);
+            }
+          }
+        }
+      })();
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.delete("/api/product-groups/:id", (req, res) => {
+    const { id } = req.params;
+    try {
+      db.transaction(() => {
+        db.prepare("DELETE FROM product_group_items WHERE group_id = ?").run(id);
+        db.prepare("DELETE FROM product_groups WHERE id = ?").run(id);
+      })();
+      res.json({ success: true });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Bulk adjustment of selected products (prices, costs, category, stock_alarm, or physical stock)
+  app.post("/api/products/bulk-adjust", (req, res) => {
+    const {
+      product_ids,
+      adjustments, // { price_unit?: { mode: 'percent'|'fixed'|'exact', value: number, currency?: 'USD'|'BOB', rounding?: 'none'|'0.50'|'1.00' }, price_bulk?: ..., price_cost?: ..., category?: string, stock_alarm?: number, stock?: { mode: 'delta'|'exact', value: number } }
+      reason
+    } = req.body;
+
+    if (!Array.isArray(product_ids) || product_ids.length === 0) {
+      return res.status(400).json({ error: "Debe seleccionar al menos un producto para aplicar el ajuste masivo." });
+    }
+    if (!adjustments || typeof adjustments !== 'object') {
+      return res.status(400).json({ error: "No se especificaron reglas de ajuste." });
+    }
+
+    try {
+      const verifiedUser = (req as any).verifiedUser;
+      const uRole = String(verifiedUser?.role || '').toLowerCase();
+      const isAdmin = verifiedUser && (['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser));
+      const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
+
+      const isChangingPrices = !!(adjustments.price_unit || adjustments.price_bulk || adjustments.price_cost);
+      const isChangingStock = !!adjustments.stock;
+      const isChangingMeta = !!(adjustments.category !== undefined || adjustments.stock_alarm !== undefined);
+
+      if (!isAdmin) {
+        if (isChangingPrices && !userPerms.edit_prices && !userPerms.modify_prices) {
+          return res.status(403).json({ error: "No tienes privilegios para modificar precios o costos masivamente." });
+        }
+        if (isChangingStock && !userPerms.inventory_adjustments) {
+          return res.status(403).json({ error: "No tienes privilegios para ajustar el stock físico." });
+        }
+        if (isChangingMeta && !userPerms.edit_products) {
+          return res.status(403).json({ error: "No tienes privilegios para editar metadatos de productos." });
+        }
+      }
+
+      if (isChangingStock) {
+        if (checkInventoryLock(res)) return;
+        if (!reason || !String(reason).trim()) {
+          return res.status(400).json({ error: "Es obligatorio ingresar un motivo de auditoría cuando se modifica el stock físico." });
+        }
+      }
+
+      const rateRow = db.prepare("SELECT value FROM settings WHERE key = 'exchange_rate'").get() as any;
+      const exchangeRate = rateRow?.value ? parseFloat(rateRow.value) : 6.96;
+
+      const computeAdjustedPriceUsd = (currentUsd: number, rule: any): number => {
+        if (!rule || rule.value === undefined || rule.value === null || isNaN(Number(rule.value))) {
+          return currentUsd;
+        }
+        const val = Number(rule.value);
+        const mode = rule.mode || 'percent'; // 'percent' | 'fixed' | 'exact'
+        const inputCurrency = rule.currency || 'USD'; // 'USD' | 'BOB'
+        const rounding = rule.rounding || 'none'; // 'none' | '0.50' | '1.00'
+
+        let newUsd = currentUsd;
+        if (mode === 'percent') {
+          newUsd = currentUsd * (1 + val / 100);
+        } else if (mode === 'fixed') {
+          const deltaUsd = inputCurrency === 'BOB' ? (val / exchangeRate) : val;
+          newUsd = currentUsd + deltaUsd;
+        } else if (mode === 'exact') {
+          newUsd = inputCurrency === 'BOB' ? (val / exchangeRate) : val;
+        }
+
+        newUsd = Math.max(0, newUsd);
+
+        // Apply optional commercial rounding in BOB or USD
+        if (rounding === '0.50') {
+          if (inputCurrency === 'BOB') {
+            const bobRounded = Math.round((newUsd * exchangeRate + Number.EPSILON) * 2) / 2;
+            newUsd = bobRounded / exchangeRate;
+          } else {
+            newUsd = Math.round((newUsd + Number.EPSILON) * 2) / 2;
+          }
+        } else if (rounding === '1.00') {
+          if (inputCurrency === 'BOB') {
+            const bobRounded = Math.round(newUsd * exchangeRate);
+            newUsd = bobRounded / exchangeRate;
+          } else {
+            newUsd = Math.round(newUsd);
+          }
+        }
+
+        return Math.max(0, Math.round((newUsd + Number.EPSILON) * 10000) / 10000);
+      };
+
+      const nowIso = getBoliviaISOString();
+      const auditUser = (req as any).auditUser || {};
+      const normUserId = auditUser.userId || verifiedUser?.id || 1;
+      const normUsername = auditUser.userName || verifiedUser?.username || 'admin';
+      const normRole = auditUser.userRole || verifiedUser?.role || 'admin';
+      const auditReason = (reason && String(reason).trim()) ? String(reason).trim() : 'Ajuste masivo de catálogo / inventario';
+
+      const updatedProductIds: number[] = [];
+      const invLogIds: any[] = [];
+      const sysLogIds: any[] = [];
+
+      db.transaction(() => {
+        const selectStmt = db.prepare("SELECT * FROM products WHERE id = ?");
+        const updateStmt = db.prepare(`
+          UPDATE products
+          SET category = ?, stock = ?, price_unit = ?, price_bulk = ?, price_cost = ?, stock_alarm = ?, updated_at = ?
+          WHERE id = ?
+        `);
+        const insertInvLog = db.prepare(`
+          INSERT INTO inventory_audit_logs
+          (product_id, product_name, product_sku, type, quantity, price, user_id, username, reference, notes, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+
+        for (const rawId of product_ids) {
+          const pid = Number(rawId);
+          const oldProd = selectStmt.get(pid) as any;
+          if (!oldProd) continue;
+
+          const newCategory = (adjustments.category !== undefined && String(adjustments.category).trim() !== '')
+            ? String(adjustments.category).trim()
+            : oldProd.category;
+
+          const newStockAlarm = (adjustments.stock_alarm !== undefined && adjustments.stock_alarm !== null && adjustments.stock_alarm !== '')
+            ? Math.max(0, Math.round(Number(adjustments.stock_alarm)))
+            : Number(oldProd.stock_alarm || 0);
+
+          const newPriceUnit = adjustments.price_unit
+            ? computeAdjustedPriceUsd(Number(oldProd.price_unit || 0), adjustments.price_unit)
+            : Number(oldProd.price_unit || 0);
+
+          const newPriceBulk = adjustments.price_bulk
+            ? computeAdjustedPriceUsd(Number(oldProd.price_bulk || 0), adjustments.price_bulk)
+            : Number(oldProd.price_bulk || 0);
+
+          const newPriceCost = adjustments.price_cost
+            ? computeAdjustedPriceUsd(Number(oldProd.price_cost || 0), adjustments.price_cost)
+            : Number(oldProd.price_cost || 0);
+
+          let newStock = Number(oldProd.stock || 0);
+          if (adjustments.stock && adjustments.stock.value !== undefined && adjustments.stock.value !== null) {
+            const sVal = Math.round(Number(adjustments.stock.value));
+            if (adjustments.stock.mode === 'exact') {
+              newStock = Math.max(0, sVal);
+            } else {
+              newStock = Math.max(0, newStock + sVal);
+            }
+          }
+
+          const changedFields: any = {};
+          if (oldProd.category !== newCategory) changedFields.category = { before: oldProd.category, after: newCategory };
+          if (oldProd.stock_alarm !== newStockAlarm) changedFields.stock_alarm = { before: oldProd.stock_alarm, after: newStockAlarm };
+          if (Math.abs(Number(oldProd.price_unit || 0) - newPriceUnit) > 0.0001) changedFields.price_unit = { before: oldProd.price_unit, after: newPriceUnit };
+          if (Math.abs(Number(oldProd.price_bulk || 0) - newPriceBulk) > 0.0001) changedFields.price_bulk = { before: oldProd.price_bulk, after: newPriceBulk };
+          if (Math.abs(Number(oldProd.price_cost || 0) - newPriceCost) > 0.0001) changedFields.price_cost = { before: oldProd.price_cost, after: newPriceCost };
+          if (Number(oldProd.stock || 0) !== newStock) changedFields.stock = { before: oldProd.stock, after: newStock };
+
+          if (Object.keys(changedFields).length === 0) continue;
+
+          updateStmt.run(newCategory, newStock, newPriceUnit, newPriceBulk, newPriceCost, newStockAlarm, nowIso, pid);
+          updatedProductIds.push(pid);
+
+          const stockDiff = newStock - Number(oldProd.stock || 0);
+          if (stockDiff !== 0) {
+            const logType = stockDiff > 0 ? 'ajuste_incremento' : 'ajuste_decremento';
+            const invRes = insertInvLog.run(
+              pid,
+              oldProd.name,
+              oldProd.sku,
+              logType,
+              Math.abs(stockDiff),
+              newPriceCost,
+              normUserId,
+              normUsername,
+              'Ajuste Masivo',
+              auditReason,
+              nowIso
+            );
+            invLogIds.push(invRes.lastInsertRowid);
+          }
+
+          let eventType = 'modificacion_producto';
+          let logCategory = 'productos';
+          let severity = 'info';
+          if (changedFields.stock) {
+            eventType = stockDiff > 0 ? 'ajuste_incremento' : 'ajuste_decremento';
+            logCategory = 'inventario';
+          } else if (changedFields.price_cost) {
+            eventType = 'cambio_costo';
+            logCategory = 'precios';
+            severity = 'critical';
+          } else if (changedFields.price_unit || changedFields.price_bulk) {
+            eventType = 'cambio_precio';
+            logCategory = 'precios';
+          }
+
+          const sysId = insertSystemAuditLog({
+            eventType,
+            category: logCategory,
+            module: 'inventario',
+            action: `Ajuste Masivo (${updatedProductIds.length} prod.)`,
+            severity,
+            entityType: 'producto',
+            entityId: pid,
+            entityName: oldProd.name,
+            userId: normUserId,
+            userName: normUsername,
+            userRole: normRole,
+            quantityBefore: oldProd.stock,
+            quantityChanged: stockDiff,
+            quantityAfter: newStock,
+            priceBefore: oldProd.price_unit,
+            priceAfter: newPriceUnit,
+            reason: auditReason,
+            beforeData: oldProd,
+            afterData: {
+              ...oldProd,
+              category: newCategory,
+              stock: newStock,
+              price_unit: newPriceUnit,
+              price_bulk: newPriceBulk,
+              price_cost: newPriceCost,
+              stock_alarm: newStockAlarm
+            },
+            changedFields,
+            relatedProductId: pid,
+            status: 'success'
+          });
+          if (sysId) sysLogIds.push(sysId);
+        }
+      })();
+
+      if (updatedProductIds.length > 0) {
+        const syncMap: Record<string, any[]> = {
+          products: updatedProductIds
+        };
+        if (invLogIds.length > 0) syncMap.inventory_audit_logs = invLogIds;
+        if (sysLogIds.length > 0) syncMap.system_audit_logs = sysLogIds;
+        syncAfterWrite(syncMap);
+        incrementCatalogVersion();
+        incrementInventoryVersion();
+      }
+
+      res.json({
+        success: true,
+        updatedCount: updatedProductIds.length,
+        updatedProductIds
+      });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -5305,6 +5658,476 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     }
   });
 
+  // REST API: Net Profitability Report by Category and Seller
+  app.get("/api/reports/profitability", enforcePermission('view_reports'), (req, res) => {
+    try {
+      const { startDate, endDate } = req.query as { startDate?: string; endDate?: string };
+      const rateRow = db.prepare("SELECT value FROM settings WHERE key = 'exchange_rate'").get() as any;
+      const currentExchangeRate = rateRow?.value ? parseFloat(rateRow.value) : 6.96;
+
+      let dateWhereSales = "";
+      let dateParams: any[] = [];
+      if (startDate && endDate) {
+        dateWhereSales = "WHERE substr(s.created_at, 1, 10) >= date(?) AND substr(s.created_at, 1, 10) <= date(?)";
+        dateParams = [startDate, endDate];
+      } else if (startDate) {
+        dateWhereSales = "WHERE substr(s.created_at, 1, 10) >= date(?)";
+        dateParams = [startDate];
+      } else if (endDate) {
+        dateWhereSales = "WHERE substr(s.created_at, 1, 10) <= date(?)";
+        dateParams = [endDate];
+      }
+
+      // Fetch all sale_items in period with their parent sale discount & exchange_rate, plus returns
+      const itemRows = db.prepare(`
+        SELECT 
+          si.id as sale_item_id,
+          si.sale_id,
+          si.product_id,
+          si.quantity,
+          si.price,
+          COALESCE(si.cost, p.price_cost, 0) as unit_cost_usd,
+          COALESCE(p.category, 'Sin Categoría') as category,
+          s.user_id,
+          COALESCE(u.username, 'Cajero') as seller_name,
+          s.currency,
+          COALESCE(s.exchange_rate, ?) as exchange_rate,
+          COALESCE(s.discount, 0) as sale_discount,
+          COALESCE(s.total, 0) as sale_total,
+          s.payment_method,
+          COALESCE((SELECT SUM(sr.quantity) FROM sale_returns sr WHERE sr.sale_item_id = si.id), 0) as returned_qty,
+          COALESCE((SELECT SUM(sr.refund_amount) FROM sale_returns sr WHERE sr.sale_item_id = si.id), 0) as refunded_amount
+        FROM sale_items si
+        JOIN sales s ON s.id = si.sale_id
+        LEFT JOIN products p ON p.id = si.product_id
+        LEFT JOIN users u ON u.id = s.user_id
+        ${dateWhereSales}
+      `).all(currentExchangeRate, ...dateParams) as any[];
+
+      // Precalculate gross subtotal per sale to prorate sale_discount accurately across categories
+      const saleGrossSubtotalMap = new Map<number, number>();
+      for (const r of itemRows) {
+        const sId = Number(r.sale_id);
+        const lineGross = Number(r.quantity || 0) * Number(r.price || 0);
+        saleGrossSubtotalMap.set(sId, (saleGrossSubtotalMap.get(sId) || 0) + lineGross);
+      }
+
+      interface CatStat {
+        category: string;
+        unitsSold: number;
+        returnedUnits: number;
+        netUnits: number;
+        grossSalesBob: number;
+        discountsBob: number;
+        returnsBob: number;
+        netSalesBob: number;
+        cogsBob: number;
+        netProfitBob: number;
+        txIds: Set<number>;
+      }
+
+      interface SellerStat {
+        sellerId: number;
+        sellerName: string;
+        unitsSold: number;
+        returnedUnits: number;
+        grossSalesBob: number;
+        discountsBob: number;
+        returnsBob: number;
+        netSalesBob: number;
+        cogsBob: number;
+        netProfitBob: number;
+        creditSalesBob: number;
+        txIds: Set<number>;
+      }
+
+      const categoryMap = new Map<string, CatStat>();
+      const sellerMap = new Map<number, SellerStat>();
+      const seenDiscountedSalesForSeller = new Set<number>();
+
+      for (const r of itemRows) {
+        const sId = Number(r.sale_id);
+        const rate = Number(r.exchange_rate || currentExchangeRate);
+        const isUsd = r.currency === 'USD';
+        const qty = Number(r.quantity || 0);
+        const retQty = Number(r.returned_qty || 0);
+        const netQty = Math.max(0, qty - retQty);
+
+        const lineGrossOrig = qty * Number(r.price || 0);
+        const lineGrossBob = isUsd ? lineGrossOrig * rate : lineGrossOrig;
+
+        const saleGrossOrig = saleGrossSubtotalMap.get(sId) || 0;
+        const saleDiscountOrig = Number(r.sale_discount || 0);
+        const proratedDiscountOrig = saleGrossOrig > 0 ? (saleDiscountOrig * (lineGrossOrig / saleGrossOrig)) : 0;
+        const proratedDiscountBob = isUsd ? proratedDiscountOrig * rate : proratedDiscountOrig;
+
+        const refundOrig = Number(r.refunded_amount || 0);
+        const refundBob = isUsd ? refundOrig * rate : refundOrig;
+
+        const netSalesBob = lineGrossBob - proratedDiscountBob - refundBob;
+        const unitCostBob = Number(r.unit_cost_usd || 0) * rate;
+        const netCogsBob = netQty * unitCostBob;
+        const netProfitBob = netSalesBob - netCogsBob;
+
+        const catKey = String(r.category || 'Sin Categoría');
+        if (!categoryMap.has(catKey)) {
+          categoryMap.set(catKey, {
+            category: catKey,
+            unitsSold: 0,
+            returnedUnits: 0,
+            netUnits: 0,
+            grossSalesBob: 0,
+            discountsBob: 0,
+            returnsBob: 0,
+            netSalesBob: 0,
+            cogsBob: 0,
+            netProfitBob: 0,
+            txIds: new Set<number>()
+          });
+        }
+        const cStat = categoryMap.get(catKey)!;
+        cStat.unitsSold += qty;
+        cStat.returnedUnits += retQty;
+        cStat.netUnits += netQty;
+        cStat.grossSalesBob += lineGrossBob;
+        cStat.discountsBob += proratedDiscountBob;
+        cStat.returnsBob += refundBob;
+        cStat.netSalesBob += netSalesBob;
+        cStat.cogsBob += netCogsBob;
+        cStat.netProfitBob += netProfitBob;
+        cStat.txIds.add(sId);
+
+        const uId = Number(r.user_id || 1);
+        if (!sellerMap.has(uId)) {
+          sellerMap.set(uId, {
+            sellerId: uId,
+            sellerName: String(r.seller_name || 'Cajero'),
+            unitsSold: 0,
+            returnedUnits: 0,
+            grossSalesBob: 0,
+            discountsBob: 0,
+            returnsBob: 0,
+            netSalesBob: 0,
+            cogsBob: 0,
+            netProfitBob: 0,
+            creditSalesBob: 0,
+            txIds: new Set<number>()
+          });
+        }
+        const sStat = sellerMap.get(uId)!;
+        sStat.unitsSold += qty;
+        sStat.returnedUnits += retQty;
+        sStat.grossSalesBob += lineGrossBob;
+        sStat.discountsBob += proratedDiscountBob;
+        sStat.returnsBob += refundBob;
+        sStat.netSalesBob += netSalesBob;
+        sStat.cogsBob += netCogsBob;
+        sStat.netProfitBob += netProfitBob;
+        if (!seenDiscountedSalesForSeller.has(sId)) {
+          seenDiscountedSalesForSeller.add(sId);
+          if (r.payment_method === 'Crédito') {
+            const saleTotalBob = isUsd ? Number(r.sale_total || 0) * rate : Number(r.sale_total || 0);
+            sStat.creditSalesBob += saleTotalBob;
+          }
+        }
+        sStat.txIds.add(sId);
+      }
+
+      const totalNetProfitAll = Array.from(categoryMap.values()).reduce((acc, c) => acc + Math.max(0, c.netProfitBob), 0);
+
+      const byCategory = Array.from(categoryMap.values())
+        .map(c => {
+          const marginPct = c.netSalesBob > 0 ? (c.netProfitBob / c.netSalesBob) * 100 : 0;
+          const profitSharePct = totalNetProfitAll > 0 && c.netProfitBob > 0 ? (c.netProfitBob / totalNetProfitAll) * 100 : 0;
+          return {
+            category: c.category,
+            transactionsCount: c.txIds.size,
+            unitsSold: c.unitsSold,
+            returnedUnits: c.returnedUnits,
+            netUnits: c.netUnits,
+            grossSalesBob: Number(c.grossSalesBob.toFixed(2)),
+            discountsBob: Number(c.discountsBob.toFixed(2)),
+            returnsBob: Number(c.returnsBob.toFixed(2)),
+            netSalesBob: Number(c.netSalesBob.toFixed(2)),
+            netSalesUsd: Number((c.netSalesBob / currentExchangeRate).toFixed(2)),
+            cogsBob: Number(c.cogsBob.toFixed(2)),
+            cogsUsd: Number((c.cogsBob / currentExchangeRate).toFixed(2)),
+            netProfitBob: Number(c.netProfitBob.toFixed(2)),
+            netProfitUsd: Number((c.netProfitBob / currentExchangeRate).toFixed(2)),
+            marginPct: Number(marginPct.toFixed(1)),
+            profitSharePct: Number(profitSharePct.toFixed(1))
+          };
+        })
+        .sort((a, b) => b.netProfitBob - a.netProfitBob);
+
+      const bySeller = Array.from(sellerMap.values())
+        .map(s => {
+          const marginPct = s.netSalesBob > 0 ? (s.netProfitBob / s.netSalesBob) * 100 : 0;
+          const avgTicketBob = s.txIds.size > 0 ? s.netSalesBob / s.txIds.size : 0;
+          return {
+            sellerId: s.sellerId,
+            sellerName: s.sellerName,
+            transactionsCount: s.txIds.size,
+            unitsSold: s.unitsSold,
+            returnedUnits: s.returnedUnits,
+            grossSalesBob: Number(s.grossSalesBob.toFixed(2)),
+            discountsBob: Number(s.discountsBob.toFixed(2)),
+            returnsBob: Number(s.returnsBob.toFixed(2)),
+            netSalesBob: Number(s.netSalesBob.toFixed(2)),
+            netSalesUsd: Number((s.netSalesBob / currentExchangeRate).toFixed(2)),
+            cogsBob: Number(s.cogsBob.toFixed(2)),
+            netProfitBob: Number(s.netProfitBob.toFixed(2)),
+            netProfitUsd: Number((s.netProfitBob / currentExchangeRate).toFixed(2)),
+            creditSalesBob: Number(s.creditSalesBob.toFixed(2)),
+            avgTicketBob: Number(avgTicketBob.toFixed(2)),
+            marginPct: Number(marginPct.toFixed(1))
+          };
+        })
+        .sort((a, b) => b.netProfitBob - a.netProfitBob);
+
+      const totals = byCategory.reduce(
+        (acc, c) => {
+          acc.unitsSold += c.unitsSold;
+          acc.netUnits += c.netUnits;
+          acc.grossSalesBob += c.grossSalesBob;
+          acc.discountsBob += c.discountsBob;
+          acc.returnsBob += c.returnsBob;
+          acc.netSalesBob += c.netSalesBob;
+          acc.cogsBob += c.cogsBob;
+          acc.netProfitBob += c.netProfitBob;
+          return acc;
+        },
+        { unitsSold: 0, netUnits: 0, grossSalesBob: 0, discountsBob: 0, returnsBob: 0, netSalesBob: 0, cogsBob: 0, netProfitBob: 0 }
+      );
+
+      res.json({
+        success: true,
+        exchangeRate: currentExchangeRate,
+        totals: {
+          ...totals,
+          grossSalesBob: Number(totals.grossSalesBob.toFixed(2)),
+          discountsBob: Number(totals.discountsBob.toFixed(2)),
+          returnsBob: Number(totals.returnsBob.toFixed(2)),
+          netSalesBob: Number(totals.netSalesBob.toFixed(2)),
+          netSalesUsd: Number((totals.netSalesBob / currentExchangeRate).toFixed(2)),
+          cogsBob: Number(totals.cogsBob.toFixed(2)),
+          netProfitBob: Number(totals.netProfitBob.toFixed(2)),
+          netProfitUsd: Number((totals.netProfitBob / currentExchangeRate).toFixed(2)),
+          marginPct: totals.netSalesBob > 0 ? Number(((totals.netProfitBob / totals.netSalesBob) * 100).toFixed(1)) : 0
+        },
+        byCategory,
+        bySeller
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // REST API: Daily Executive Summary for WhatsApp / Management Closing
+  app.get("/api/reports/executive-summary", enforcePermission('view_reports'), (req, res) => {
+    try {
+      const targetDate = req.query.date
+        ? String(req.query.date).slice(0, 10)
+        : getBoliviaISOString().slice(0, 10);
+
+      const rateRow = db.prepare("SELECT value FROM settings WHERE key = 'exchange_rate'").get() as any;
+      const exchangeRate = rateRow?.value ? parseFloat(rateRow.value) : 6.96;
+
+      // 1. Sales & Discounts on targetDate
+      const salesRow = db.prepare(`
+        SELECT 
+          COUNT(id) as tx_count,
+          COALESCE(SUM(CASE WHEN currency='USD' THEN (total + COALESCE(discount, 0)) * exchange_rate ELSE (total + COALESCE(discount, 0)) END), 0) as gross_sales_bob,
+          COALESCE(SUM(CASE WHEN currency='USD' THEN COALESCE(discount, 0) * exchange_rate ELSE COALESCE(discount, 0) END), 0) as discounts_bob,
+          COALESCE(SUM(CASE WHEN currency='USD' THEN total * exchange_rate ELSE total END), 0) as net_invoiced_bob
+        FROM sales
+        WHERE substr(created_at, 1, 10) = date(?)
+      `).get(targetDate) as any;
+
+      // 2. Returns on targetDate
+      const returnsRow = db.prepare(`
+        SELECT 
+          COUNT(sr.id) as return_count,
+          COALESCE(SUM(CASE WHEN s.currency='USD' THEN sr.refund_amount * s.exchange_rate ELSE sr.refund_amount END), 0) as refunds_bob,
+          COALESCE(SUM(COALESCE(si.cost, p.price_cost, 0) * COALESCE(s.exchange_rate, ?) * sr.quantity), 0) as returned_cogs_bob
+        FROM sale_returns sr
+        JOIN sale_items si ON si.id = sr.sale_item_id
+        JOIN sales s ON s.id = sr.sale_id
+        LEFT JOIN products p ON p.id = si.product_id
+        WHERE substr(sr.created_at, 1, 10) = date(?)
+      `).get(exchangeRate, targetDate) as any;
+
+      // 3. COGS & Units Sold on targetDate
+      const cogsRow = db.prepare(`
+        SELECT 
+          COALESCE(SUM(si.quantity), 0) as units_sold,
+          COALESCE(SUM(si.quantity * (COALESCE(si.cost, p.price_cost, 0) * COALESCE(s.exchange_rate, ?))), 0) as total_cogs_bob
+        FROM sale_items si
+        JOIN sales s ON s.id = si.sale_id
+        LEFT JOIN products p ON p.id = si.product_id
+        WHERE substr(s.created_at, 1, 10) = date(?)
+      `).get(exchangeRate, targetDate) as any;
+
+      // 4. Breakdown by payment method
+      const paymentBreakdown = db.prepare(`
+        SELECT 
+          COALESCE(payment_method, 'Efectivo') as method,
+          COUNT(id) as tx_count,
+          COALESCE(SUM(CASE WHEN currency='USD' THEN total * exchange_rate ELSE total END), 0) as total_bob
+        FROM sales
+        WHERE substr(created_at, 1, 10) = date(?)
+        GROUP BY payment_method
+        ORDER BY total_bob DESC
+      `).all(targetDate) as any[];
+
+      // 5. Credit payments (Abonos a cuentas por cobrar) collected today
+      let creditCollectedTodayBob = 0;
+      try {
+        const cpRow = db.prepare(`
+          SELECT COALESCE(SUM(amount), 0) as collected
+          FROM credit_payments
+          WHERE substr(registered_at, 1, 10) = date(?)
+            AND notes != 'Abono inicial de la venta'
+        `).get(targetDate) as any;
+        creditCollectedTodayBob = Number(cpRow?.collected || 0);
+      } catch (_) {}
+
+      // 6. Pending sales created or active today
+      const pendingStats = db.prepare(`
+        SELECT 
+          COUNT(id) as active_count,
+          SUM(CASE WHEN COALESCE(order_type, 'envio') = 'cotizacion' THEN 1 ELSE 0 END) as quotes_count,
+          SUM(CASE WHEN COALESCE(order_type, 'envio') = 'reserva' THEN 1 ELSE 0 END) as reserves_count,
+          SUM(CASE WHEN COALESCE(order_type, 'envio') = 'envio' THEN 1 ELSE 0 END) as shipments_count,
+          COALESCE(SUM(CASE WHEN currency='USD' THEN (total - COALESCE(paid_amount, 0)) * exchange_rate ELSE (total - COALESCE(paid_amount, 0)) END), 0) as pending_balance_bob
+        FROM pending_sales
+        WHERE status = 'pendiente'
+      `).get() as any;
+
+      // 7. Cash Drawer Accounts current total balance
+      const drawerRow = db.prepare(`
+        SELECT COALESCE(SUM(current_balance), 0) as drawer_balance_bob
+        FROM cash_accounts
+      `).get() as any;
+
+      // 8. Top 5 products sold on targetDate
+      const topProducts = db.prepare(`
+        SELECT 
+          COALESCE(p.name, si.product_name_snapshot, 'Producto') as name,
+          COALESCE(p.sku, si.product_sku_snapshot, '') as sku,
+          SUM(si.quantity) as qty,
+          SUM(CASE WHEN s.currency='USD' THEN si.quantity * si.price * s.exchange_rate ELSE si.quantity * si.price END) as revenue_bob
+        FROM sale_items si
+        JOIN sales s ON s.id = si.sale_id
+        LEFT JOIN products p ON p.id = si.product_id
+        WHERE substr(s.created_at, 1, 10) = date(?)
+        GROUP BY si.product_id
+        ORDER BY qty DESC, revenue_bob DESC
+        LIMIT 5
+      `).all(targetDate) as any[];
+
+      // 9. Critical low stock count
+      const lowStockRow = db.prepare(`
+        SELECT 
+          COUNT(id) as low_stock_count,
+          SUM(CASE WHEN stock <= 0 THEN 1 ELSE 0 END) as out_of_stock_count
+        FROM products
+        WHERE stock <= stock_alarm
+      `).get() as any;
+
+      const grossSalesBob = Number(salesRow?.gross_sales_bob || 0);
+      const discountsBob = Number(salesRow?.discounts_bob || 0);
+      const netInvoicedBob = Number(salesRow?.net_invoiced_bob || 0);
+      const refundsBob = Number(returnsRow?.refunds_bob || 0);
+      const returnedCogsBob = Number(returnsRow?.returned_cogs_bob || 0);
+      const netRevenueBob = netInvoicedBob - refundsBob;
+      const totalCogsBob = Math.max(0, Number(cogsRow?.total_cogs_bob || 0) - returnedCogsBob);
+      const netProfitBob = netRevenueBob - totalCogsBob;
+      const marginPct = netRevenueBob > 0 ? (netProfitBob / netRevenueBob) * 100 : 0;
+
+      // Build formatted WhatsApp text
+      const nowTime = new Date().toLocaleTimeString('es-BO', { timeZone: 'America/La_Paz', hour: '2-digit', minute: '2-digit' });
+      const lines: string[] = [];
+      lines.push(`📊 *RESUMEN EJECUTIVO DIARIO — GTR POS*`);
+      lines.push(`📅 *Fecha:* ${targetDate} (Corte: ${nowTime})`);
+      lines.push(`💱 *T.C. Oficial:* Bs. ${exchangeRate.toFixed(2)} / USD`);
+      lines.push(`────────────────────`);
+      lines.push(`💰 *RESULTADOS COMERCIALES*`);
+      lines.push(`• Ventas Brutas: *Bs. ${grossSalesBob.toFixed(2)}*`);
+      if (discountsBob > 0) lines.push(`• Descuentos: -Bs. ${discountsBob.toFixed(2)}`);
+      if (refundsBob > 0) lines.push(`• Devoluciones (${returnsRow?.return_count || 0}): -Bs. ${refundsBob.toFixed(2)}`);
+      lines.push(`• *Venta Neta Real:* *Bs. ${netRevenueBob.toFixed(2)}* ($${(netRevenueBob / exchangeRate).toFixed(2)} USD)`);
+      lines.push(`• Costo Mercadería (COGS): Bs. ${totalCogsBob.toFixed(2)}`);
+      lines.push(`• *Utilidad Neta Estimada:* *Bs. ${netProfitBob.toFixed(2)}* (*${marginPct.toFixed(1)}%* margen)`);
+      lines.push(`• Tickets Emitidos: ${salesRow?.tx_count || 0} (${cogsRow?.units_sold || 0} pzas)`);
+      lines.push(`────────────────────`);
+      lines.push(`💳 *DESGLOSE POR MÉTODO DE PAGO*`);
+      if (paymentBreakdown.length === 0) {
+        lines.push(`• Sin ventas registradas en la fecha.`);
+      } else {
+        for (const pm of paymentBreakdown) {
+          lines.push(`• ${pm.method}: *Bs. ${Number(pm.total_bob).toFixed(2)}* (${pm.tx_count} op.)`);
+        }
+      }
+      if (creditCollectedTodayBob > 0) {
+        lines.push(`• Cobros de Créditos Anteriores: *+Bs. ${creditCollectedTodayBob.toFixed(2)}*`);
+      }
+      lines.push(`• *Saldo Acumulado en Cajas:* *Bs. ${Number(drawerRow?.drawer_balance_bob || 0).toFixed(2)}*`);
+      lines.push(`────────────────────`);
+      if (topProducts.length > 0) {
+        lines.push(`🏆 *TOP 5 PRODUCTOS DEL DÍA*`);
+        topProducts.forEach((tp, idx) => {
+          lines.push(`${idx + 1}. ${tp.name} — *${tp.qty} pz* (Bs. ${Number(tp.revenue_bob).toFixed(2)})`);
+        });
+        lines.push(`────────────────────`);
+      }
+      lines.push(`📦 *ESTADO DE OPERACIONES Y ALMACÉN*`);
+      lines.push(`• Pedidos/Cotizaciones Activas: ${pendingStats?.active_count || 0} (Envíos: ${pendingStats?.shipments_count || 0}, Reservas: ${pendingStats?.reserves_count || 0}, Cotiz.: ${pendingStats?.quotes_count || 0})`);
+      lines.push(`• Alertas de Stock Bajo: *${lowStockRow?.low_stock_count || 0} prod.* (${lowStockRow?.out_of_stock_count || 0} agotados)`);
+
+      const whatsappText = lines.join('\n');
+
+      res.json({
+        success: true,
+        date: targetDate,
+        cutOffTime: nowTime,
+        exchangeRate,
+        metrics: {
+          txCount: Number(salesRow?.tx_count || 0),
+          unitsSold: Number(cogsRow?.units_sold || 0),
+          grossSalesBob: Number(grossSalesBob.toFixed(2)),
+          discountsBob: Number(discountsBob.toFixed(2)),
+          refundsBob: Number(refundsBob.toFixed(2)),
+          netRevenueBob: Number(netRevenueBob.toFixed(2)),
+          netRevenueUsd: Number((netRevenueBob / exchangeRate).toFixed(2)),
+          totalCogsBob: Number(totalCogsBob.toFixed(2)),
+          netProfitBob: Number(netProfitBob.toFixed(2)),
+          netProfitUsd: Number((netProfitBob / exchangeRate).toFixed(2)),
+          marginPct: Number(marginPct.toFixed(1)),
+          creditCollectedTodayBob: Number(creditCollectedTodayBob.toFixed(2)),
+          drawerBalanceBob: Number(Number(drawerRow?.drawer_balance_bob || 0).toFixed(2)),
+          lowStockCount: Number(lowStockRow?.low_stock_count || 0),
+          outOfStockCount: Number(lowStockRow?.out_of_stock_count || 0),
+          pendingOrdersCount: Number(pendingStats?.active_count || 0)
+        },
+        paymentBreakdown: paymentBreakdown.map(pm => ({
+          method: pm.method,
+          txCount: Number(pm.tx_count || 0),
+          totalBob: Number(Number(pm.total_bob || 0).toFixed(2))
+        })),
+        topProducts: topProducts.map(tp => ({
+          name: tp.name,
+          sku: tp.sku,
+          qty: Number(tp.qty || 0),
+          revenueBob: Number(Number(tp.revenue_bob || 0).toFixed(2))
+        })),
+        whatsappText
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // REST API: Phase 3 Automated Instant Snapshot with Rotation
   app.post("/api/backup/auto-snapshot", enforcePermission('admin_settings'), async (req, res) => {
     try {
@@ -5369,16 +6192,17 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   // REST API: Sales Operation
   app.get("/api/sales", (req, res) => {
     try {
-      const { startDate, endDate, limit, offset, lazy } = req.query as { startDate?: string; endDate?: string; limit?: string; offset?: string; lazy?: string };
+      const { startDate, endDate, limit, offset, lazy, kiosk_own_today } = req.query as { startDate?: string; endDate?: string; limit?: string; offset?: string; lazy?: string; kiosk_own_today?: string };
+      const isKioskRestricted = kiosk_own_today === 'true' || kiosk_own_today === '1';
       const verifiedUser = (req as any).verifiedUser;
       const verifiedRole = String(verifiedUser?.role || '').toLowerCase();
-      const isAdminOrPropietario = !!(verifiedUser && (
+      const isAdminOrPropietario = !isKioskRestricted && !!(verifiedUser && (
         isMainAdmin(verifiedUser) ||
         ['admin', 'administrador', 'propietario'].includes(verifiedRole)
       ));
       const userId = verifiedUser ? verifiedUser.id : (req.headers['x-user-id'] ? Number(req.headers['x-user-id']) : null);
       
-      let viewOwnSalesOnly = false;
+      let viewOwnSalesOnly = isKioskRestricted;
       if (!isAdminOrPropietario) {
         const perms = verifiedUser?.permissions || {};
         if (perms.view_own_sales_only !== false) {
@@ -5387,7 +6211,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       }
 
       let capitalSelect = `0.0 as capital`;
-      if (isAdminOrPropietario) {
+      if (isAdminOrPropietario && !isKioskRestricted) {
         capitalSelect = `(SELECT COALESCE(SUM(si.quantity * (COALESCE(si.cost, p.price_cost, 0) * s.exchange_rate)), 0) FROM sale_items si JOIN products p ON p.id = si.product_id WHERE si.sale_id = s.id) as capital`;
       }
 
@@ -6391,15 +7215,16 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   // REST API: Save and Share Ticket PDF for WhatsApp
   app.post("/api/tickets/share", (req, res) => {
     const { saleId, pdfBase64 } = req.body;
-    if (!saleId || !pdfBase64) {
-      return res.status(400).json({ error: "Falta el ID de venta o los datos del PDF en base64." });
+    const safeSaleId = String(saleId || '').replace(/[^a-zA-Z0-9_-]/g, '');
+    if (!safeSaleId || !pdfBase64) {
+      return res.status(400).json({ error: "Falta el ID de venta válido o los datos del PDF en base64." });
     }
     try {
       const cleanBase64 = pdfBase64.replace(/^data:application\/pdf;base64,/, "");
-      const filePath = path.join(process.cwd(), "shared_tickets", `${saleId}.pdf`);
+      const filePath = path.join(process.cwd(), "shared_tickets", `${safeSaleId}.pdf`);
       fs.writeFileSync(filePath, cleanBase64, 'base64');
       
-      const shareUrl = `${req.protocol}://${req.get('host')}/shared_tickets/${saleId}.pdf`;
+      const shareUrl = `${req.protocol}://${req.get('host')}/shared_tickets/${safeSaleId}.pdf`;
       res.json({ success: true, url: shareUrl });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -6614,10 +7439,11 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     }
   });
 
-  // REST API: Pending Sales (Ventas Pendientes / Envíos)
+  // REST API: Pending Sales (Ventas Pendientes / Cotizaciones / Reservas / Envíos)
   app.get("/api/pending-sales", (req, res) => {
     try {
       const sales = db.prepare(`SELECT * FROM pending_sales WHERE status = 'pendiente' ORDER BY created_at DESC`).all() as any[];
+      const nowMs = Date.now();
       const fullSales = sales.map(sale => {
         const items = db.prepare(`
           SELECT pi.*, p.name as product_name, p.sku as product_sku, p.stock as current_stock, p.price_unit, p.price_bulk
@@ -6625,7 +7451,22 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           JOIN products p ON p.id = pi.product_id
           WHERE pi.pending_sale_id = ?
         `).all(sale.id);
-        return { ...sale, items };
+        const orderType = sale.order_type || 'envio';
+        const reserveStock = sale.reserve_stock !== undefined && sale.reserve_stock !== null ? Number(sale.reserve_stock) : 1;
+        let isExpired = false;
+        if (sale.valid_until) {
+          const expDate = new Date(sale.valid_until.includes('T') ? sale.valid_until : `${sale.valid_until}T23:59:59`);
+          if (!isNaN(expDate.getTime()) && expDate.getTime() < nowMs) {
+            isExpired = true;
+          }
+        }
+        return {
+          ...sale,
+          order_type: orderType,
+          reserve_stock: reserveStock,
+          is_expired: isExpired,
+          items
+        };
       });
       res.json(fullSales);
     } catch (e: any) {
@@ -6634,15 +7475,45 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   });
 
   app.post("/api/pending-sales", (req, res) => {
-    const { client_name, destination, client_phone, transport_company, total, discount, exchange_rate, currency, items, paid_amount } = req.body;
+    const {
+      client_name,
+      destination,
+      client_phone,
+      transport_company,
+      total,
+      discount,
+      exchange_rate,
+      currency,
+      items,
+      paid_amount,
+      order_type,
+      valid_until,
+      reserve_stock,
+      notes
+    } = req.body;
     const clientOpId = req.body.clientOperationId || req.body.client_operation_id || null;
 
-    if (!client_name || !destination) {
-      return res.status(400).json({ error: "Nombre de cliente y destino son obligatorios para ventas pendientes." });
+    const normalizedOrderType = ['cotizacion', 'reserva', 'envio'].includes(String(order_type || '').toLowerCase())
+      ? String(order_type).toLowerCase()
+      : 'envio';
+
+    const effectiveDestination = (destination && String(destination).trim())
+      ? String(destination).trim()
+      : (normalizedOrderType === 'envio' ? '' : (normalizedOrderType === 'cotizacion' ? 'Cotización en Mostrador' : 'Reserva en Tienda'));
+
+    if (!client_name || !String(client_name).trim()) {
+      return res.status(400).json({ error: "El nombre del cliente es obligatorio." });
+    }
+    if (normalizedOrderType === 'envio' && !effectiveDestination) {
+      return res.status(400).json({ error: "El destino o dirección es obligatorio para pedidos de envío." });
     }
     if (!items || !Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ error: "No se puede guardar un pedido sin artículos." });
+      return res.status(400).json({ error: "No se puede guardar un registro sin artículos." });
     }
+
+    const shouldReserveStock = reserve_stock !== undefined && reserve_stock !== null
+      ? (Number(reserve_stock) === 1 || reserve_stock === true ? 1 : 0)
+      : (normalizedOrderType === 'cotizacion' ? 0 : 1);
 
     const verifiedUser = (req as any).verifiedUser;
     const uRole = String(verifiedUser?.role || '').toLowerCase();
@@ -6676,7 +7547,8 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       // E05 & E09: Canonical hash & deduplication check with clientOperationId in processed_operations
       const canonicalPendingPayload = {
         client_name: String(client_name).trim(),
-        destination: String(destination).trim(),
+        destination: effectiveDestination,
+        order_type: normalizedOrderType,
         items: items.map((it: any) => ({
           product_id: Number(it.product_id),
           quantity: Number(it.quantity),
@@ -6714,20 +7586,20 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         if (!prodCheck) {
           return res.status(400).json({ error: `El producto con ID ${pId} no existe en el inventario.` });
         }
-        const currentReserved = getReservedStock(pId);
-        const netAvailable = Math.max(0, (Number(prodCheck.stock) || 0) - currentReserved);
-        if (totalDemand > netAvailable) {
-          return res.status(400).json({ 
-            error: `Stock disponible insuficiente para reservar "${prodCheck.name}". Disponible neto: ${netAvailable} (Físico: ${prodCheck.stock}, Reservado: ${currentReserved}), Demanda total solicitada: ${totalDemand}.` 
-          });
+        if (shouldReserveStock === 1) {
+          const currentReserved = getReservedStock(pId);
+          const netAvailable = Math.max(0, (Number(prodCheck.stock) || 0) - currentReserved);
+          if (totalDemand > netAvailable) {
+            return res.status(400).json({ 
+              error: `Stock disponible insuficiente para reservar "${prodCheck.name}". Disponible neto: ${netAvailable} (Físico: ${prodCheck.stock}, Reservado: ${currentReserved}), Demanda solicitada: ${totalDemand}. Si solo deseas cotizar sin apartar mercadería, desactiva "Reservar stock físico".` 
+            });
+          }
         }
       }
 
       // P04: Validate official catalog prices
       for (const item of items) {
         const prodCheck = db.prepare('SELECT id, name, sku, price_unit, price_bulk, stock FROM products WHERE id = ?').get(item.product_id) as any;
-        const safeQty = Number(item.quantity);
-
         const safePrice = Math.max(0, Number(item.price || 0));
         if (!canModifyPrices) {
           let matchesUnit = false;
@@ -6753,9 +7625,23 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       
       const { pendingSaleId, itemIds } = db.transaction(() => {
         const result = db.prepare(`
-          INSERT INTO pending_sales (client_name, destination, client_phone, transport_company, total, discount, exchange_rate, currency, status, paid_amount)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pendiente', ?)
-        `).run(client_name, destination, client_phone || null, transport_company || null, safeTotal, discount || 0, currentRate, safeCurrency, safePaid);
+          INSERT INTO pending_sales (client_name, destination, client_phone, transport_company, total, discount, exchange_rate, currency, status, paid_amount, order_type, valid_until, reserve_stock, notes)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, ?, ?, ?, ?)
+        `).run(
+          String(client_name).trim(),
+          effectiveDestination,
+          client_phone || null,
+          transport_company || null,
+          safeTotal,
+          safeDiscount,
+          currentRate,
+          safeCurrency,
+          safePaid,
+          normalizedOrderType,
+          valid_until || null,
+          shouldReserveStock,
+          notes ? String(notes).trim() : null
+        );
         const pendingSaleId = result.lastInsertRowid;
         const itemIds: any[] = [];
         
@@ -6787,6 +7673,9 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         pending_sales: [pendingSaleId],
         pending_sale_items: itemIds
       });
+      if (shouldReserveStock === 1) {
+        incrementInventoryVersion();
+      }
       
       res.json({ success: true, pendingSaleId, itemIds });
     } catch (e: any) {
@@ -6796,11 +7685,24 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
   app.put("/api/pending-sales/:id", (req, res) => {
     const { id } = req.params;
-    const { client_name, destination, client_phone, transport_company, total, discount, items } = req.body;
-    if (!client_name || !destination) {
-      return res.status(400).json({ error: "Nombre de cliente y destino son obligatorios." });
+    const {
+      client_name,
+      destination,
+      client_phone,
+      transport_company,
+      total,
+      discount,
+      items,
+      order_type,
+      valid_until,
+      reserve_stock,
+      notes
+    } = req.body;
+
+    if (!client_name || !String(client_name).trim()) {
+      return res.status(400).json({ error: "El nombre del cliente es obligatorio." });
     }
-    if (!items || !Array.isArray(items)) {
+    if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: "Artículos inválidos." });
     }
     
@@ -6814,14 +7716,34 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         return res.status(400).json({ error: `El pedido pendiente #${id} ya fue ${existing.status} y no puede ser modificado.` });
       }
 
+      const normalizedOrderType = ['cotizacion', 'reserva', 'envio'].includes(String(order_type || existing.order_type || '').toLowerCase())
+        ? String(order_type || existing.order_type).toLowerCase()
+        : 'envio';
+
+      const effectiveDestination = (destination && String(destination).trim())
+        ? String(destination).trim()
+        : (normalizedOrderType === 'envio' ? '' : (normalizedOrderType === 'cotizacion' ? 'Cotización en Mostrador' : 'Reserva en Tienda'));
+
+      if (normalizedOrderType === 'envio' && !effectiveDestination) {
+        return res.status(400).json({ error: "El destino o dirección es obligatorio para pedidos de envío." });
+      }
+
+      const shouldReserveStock = reserve_stock !== undefined && reserve_stock !== null
+        ? (Number(reserve_stock) === 1 || reserve_stock === true ? 1 : 0)
+        : (existing.reserve_stock !== undefined && existing.reserve_stock !== null ? Number(existing.reserve_stock) : 1);
+
+      const wasReservingStock = existing.reserve_stock !== undefined && existing.reserve_stock !== null
+        ? Number(existing.reserve_stock) === 1
+        : true;
+
       const verifiedUser = (req as any).verifiedUser;
       const userPerms = verifiedUser?.permissions || {};
-      const isAdmin = verifiedUser && isMainAdmin(verifiedUser);
+      const isAdmin = verifiedUser && (['admin', 'administrador', 'propietario'].includes(String(verifiedUser?.role || '').toLowerCase()) || isMainAdmin(verifiedUser));
       const canModifyPrices = isAdmin || !!userPerms.modify_prices || !!userPerms.edit_prices;
       const currentRate = Number(existing.exchange_rate || 6.96);
       const safeCurrency = existing.currency || 'BOB';
 
-      const safeDiscount = Math.max(0, Number(discount || 0));
+      const safeDiscount = Math.max(0, Number(discount !== undefined ? discount : (existing.discount || 0)));
       const calculatedGross = items.reduce((sum: number, it: any) => sum + (Math.max(0, Number(it.quantity || 0)) * Math.max(0, Number(it.price || 0))), 0);
       const safeTotal = Math.max(0, Math.round((calculatedGross - safeDiscount) * 100) / 100);
 
@@ -6841,14 +7763,19 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         if (!prodCheck) {
           return res.status(400).json({ error: `El producto con ID ${pId} no existe en el inventario.` });
         }
-        const currentReserved = getReservedStock(pId);
-        const priorRows = db.prepare('SELECT SUM(quantity) as total_qty FROM pending_sale_items WHERE pending_sale_id = ? AND product_id = ?').get(id, pId) as any;
-        const priorThisOrderQty = Number(priorRows?.total_qty || 0);
-        const netAvailable = Math.max(0, (Number(prodCheck.stock) || 0) - (currentReserved - priorThisOrderQty));
-        if (totalDemand > netAvailable) {
-          return res.status(400).json({ 
-            error: `Stock disponible insuficiente para reservar "${prodCheck.name}". Disponible neto: ${netAvailable} (Físico: ${prodCheck.stock}, Reservado externo: ${currentReserved - priorThisOrderQty}), Demanda total solicitada: ${totalDemand}.` 
-          });
+        if (shouldReserveStock === 1) {
+          const currentReserved = getReservedStock(pId);
+          let priorThisOrderQty = 0;
+          if (wasReservingStock) {
+            const priorRows = db.prepare('SELECT SUM(quantity) as total_qty FROM pending_sale_items WHERE pending_sale_id = ? AND product_id = ?').get(id, pId) as any;
+            priorThisOrderQty = Number(priorRows?.total_qty || 0);
+          }
+          const netAvailable = Math.max(0, (Number(prodCheck.stock) || 0) - Math.max(0, currentReserved - priorThisOrderQty));
+          if (totalDemand > netAvailable) {
+            return res.status(400).json({ 
+              error: `Stock disponible insuficiente para reservar "${prodCheck.name}". Disponible neto: ${netAvailable} (Físico: ${prodCheck.stock}, Reservado externo: ${Math.max(0, currentReserved - priorThisOrderQty)}), Demanda solicitada: ${totalDemand}.` 
+            });
+          }
         }
       }
 
@@ -6877,9 +7804,21 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       db.transaction(() => {
         db.prepare(`
           UPDATE pending_sales
-          SET client_name = ?, destination = ?, client_phone = ?, transport_company = ?, total = ?, discount = ?
+          SET client_name = ?, destination = ?, client_phone = ?, transport_company = ?, total = ?, discount = ?, order_type = ?, valid_until = ?, reserve_stock = ?, notes = ?
           WHERE id = ?
-        `).run(client_name, destination, client_phone || null, transport_company || null, safeTotal, safeDiscount, id);
+        `).run(
+          String(client_name).trim(),
+          effectiveDestination,
+          client_phone || null,
+          transport_company || null,
+          safeTotal,
+          safeDiscount,
+          normalizedOrderType,
+          valid_until !== undefined ? (valid_until || null) : existing.valid_until,
+          shouldReserveStock,
+          notes !== undefined ? (notes ? String(notes).trim() : null) : existing.notes,
+          id
+        );
         
         db.prepare(`DELETE FROM pending_sale_items WHERE pending_sale_id = ?`).run(id);
         
@@ -6899,7 +7838,50 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         pending_sales: [id],
         pending_sale_items: itemIds
       });
+      incrementInventoryVersion();
       res.json({ success: true, itemIds });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // 1-Click Toggle Stock Reservation for Pending Sale / Quote
+  app.post("/api/pending-sales/:id/toggle-reserve", (req, res) => {
+    const { id } = req.params;
+    const { reserve_stock, order_type } = req.body;
+    try {
+      const existing = db.prepare('SELECT * FROM pending_sales WHERE id = ?').get(id) as any;
+      if (!existing) {
+        return res.status(404).json({ error: "Registro pendiente no encontrado." });
+      }
+      if (['completada', 'completado', 'finalizada', 'cancelada', 'cancelado'].includes(existing.status)) {
+        return res.status(400).json({ error: `El registro #${id} ya fue ${existing.status}.` });
+      }
+
+      const currentReserve = existing.reserve_stock !== undefined && existing.reserve_stock !== null ? Number(existing.reserve_stock) : 1;
+      const targetReserve = reserve_stock !== undefined ? (Number(reserve_stock) === 1 ? 1 : 0) : (currentReserve === 1 ? 0 : 1);
+      const targetOrderType = order_type || (targetReserve === 1 && existing.order_type === 'cotizacion' ? 'reserva' : existing.order_type || 'envio');
+
+      if (targetReserve === 1 && currentReserve === 0) {
+        // Validate available stock before locking reservation
+        const items = db.prepare('SELECT product_id, SUM(quantity) as qty FROM pending_sale_items WHERE pending_sale_id = ? GROUP BY product_id').all(id) as any[];
+        for (const it of items) {
+          const prod = db.prepare('SELECT id, name, stock FROM products WHERE id = ?').get(it.product_id) as any;
+          if (!prod) continue;
+          const reserved = getReservedStock(it.product_id);
+          const available = Math.max(0, Number(prod.stock || 0) - reserved);
+          if (Number(it.qty) > available) {
+            return res.status(400).json({
+              error: `No se puede activar la reserva física: "${prod.name}" solo tiene ${available} u. disponibles (Físico: ${prod.stock}, Reservado: ${reserved}), y el pedido requiere ${it.qty} u.`
+            });
+          }
+        }
+      }
+
+      db.prepare('UPDATE pending_sales SET reserve_stock = ?, order_type = ? WHERE id = ?').run(targetReserve, targetOrderType, id);
+      syncAfterWrite({ pending_sales: [id] });
+      incrementInventoryVersion();
+      res.json({ success: true, reserve_stock: targetReserve, order_type: targetOrderType });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -12259,45 +13241,48 @@ Responde de forma sumamente atenta, con alta proactividad, y con precisión mate
   });
 
   // Asynchronously restore and synchronize SQLite database state from Cloud Firestore in the background
-  (async () => {
-    try {
-      // 1. Health Diagnostics: Read-only check of catalog metrics without modifying database
+  // Always run inside production context ({ isSandbox: false }) so gtr_pos.db receives the authoritative production state
+  dbAsyncLocalStorage.run({ isSandbox: false }, () => {
+    (async () => {
       try {
-        const prodCount = db.prepare("SELECT count(*) as c FROM products").get() as any;
-        const stockHealth = db.prepare("SELECT SUM(CASE WHEN stock > 0 THEN 1 ELSE 0 END) as positive FROM products").get() as any;
-        const total = prodCount?.c || 0;
-        const positive = stockHealth?.positive || 0;
-        if (total < 50 || positive < 30) {
-          console.warn(`[Startup Health Warning] Low catalog count observed (Total: ${total}, Positive: ${positive}). Automatic overwrite disabled to preserve active transactions.`);
-        }
-      } catch (healErr: any) {
-        console.warn("[Startup Health] Notice:", healErr.message);
-      }
+        console.log("[Sync] Synchronizing production SQLite database (gtr_pos.db) from Cloud Firestore in background...");
+        await pullFirestoreToLocal();
+        console.log("[Sync] Startup production synchronization check completed.");
 
-      console.log("[Sync] Synchronizing SQLite database state from Cloud Firestore in background...");
-      await pullFirestoreToLocal();
-      console.log("[Sync] Startup synchronization check completed.");
-
-      // 2. Periodic Read-Only Health Diagnostics (Runs every 15 minutes) - Never auto-restores or overwrites
-      setInterval(() => {
+        // Ensure sandbox database is also initialized from verified production database if empty/outdated
         try {
-          const prodCount = db.prepare("SELECT count(*) as c FROM products").get() as any;
-          const stockHealth = db.prepare("SELECT SUM(CASE WHEN stock > 0 THEN 1 ELSE 0 END) as positive, SUM(COALESCE(stock, 0)) as totalUnits FROM products").get() as any;
-          const total = prodCount?.c || 0;
-          const positive = stockHealth?.positive || 0;
-          const totalUnits = stockHealth?.totalUnits || 0;
+          const prodSales = (db.prepare("SELECT COUNT(*) as c FROM sales").get() as any)?.c || 0;
+          dbAsyncLocalStorage.run({ isSandbox: true }, () => {
+            const sbSales = (db.prepare("SELECT COUNT(*) as c FROM sales").get() as any)?.c || 0;
+            if (prodSales >= 398 && sbSales < 398) {
+              cloneProductionToSandbox();
+            }
+          });
+        } catch (_) {}
 
-          if (total < 50 || (positive < 30 && totalUnits < 500)) {
-            console.warn(`[Catalog Health Alert] Low catalog metrics detected (Total: ${total}, Positive: ${positive}, Units: ${totalUnits}). Preserving live data; manual review recommended.`);
-          }
-        } catch (mErr: any) {
-          console.warn("[Health Monitor] Notice:", mErr.message);
-        }
-      }, 15 * 60 * 1000);
-    } catch (err: any) {
-      console.warn("[Sync] Startup pull bypassed or failed:", err.message);
-    }
-  })().catch(() => {});
+        // 2. Periodic Read-Only Health Diagnostics (Runs every 15 minutes) - Never auto-restores or overwrites
+        setInterval(() => {
+          dbAsyncLocalStorage.run({ isSandbox: false }, () => {
+            try {
+              const prodCount = db.prepare("SELECT count(*) as c FROM products").get() as any;
+              const stockHealth = db.prepare("SELECT SUM(CASE WHEN stock > 0 THEN 1 ELSE 0 END) as positive, SUM(COALESCE(stock, 0)) as totalUnits FROM products").get() as any;
+              const total = prodCount?.c || 0;
+              const positive = stockHealth?.positive || 0;
+              const totalUnits = stockHealth?.totalUnits || 0;
+
+              if (total < 50 || (positive < 30 && totalUnits < 500)) {
+                console.warn(`[Catalog Health Alert] Low catalog metrics detected (Total: ${total}, Positive: ${positive}, Units: ${totalUnits}). Preserving live data; manual review recommended.`);
+              }
+            } catch (mErr: any) {
+              console.warn("[Health Monitor] Notice:", mErr.message);
+            }
+          });
+        }, 15 * 60 * 1000);
+      } catch (err: any) {
+        console.warn("[Sync] Startup pull bypassed or failed:", err.message);
+      }
+    })().catch(() => {});
+  });
 }
 
 startServer();

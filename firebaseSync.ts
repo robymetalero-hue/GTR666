@@ -670,9 +670,9 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
           let snapshot;
           if (table === 'firestore_transaction_ledger' || table === 'system_audit_logs' || table === 'inventory_audit_logs') {
             try {
-              snapshot = await getDocs(query(collection(firestore, getCollectionName(table)), orderBy('created_at', 'desc'), limit(150)));
+              snapshot = await getDocs(query(collection(firestore, getCollectionName(table)), orderBy('id', 'desc'), limit(250)));
             } catch (_) {
-              snapshot = await getDocs(query(collection(firestore, getCollectionName(table)), limit(100)));
+              snapshot = await getDocs(query(collection(firestore, getCollectionName(table)), limit(200)));
             }
           } else {
             snapshot = await getDocs(collection(firestore, getCollectionName(table)));
@@ -924,6 +924,33 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
     });
 
     globalSyncTx();
+
+    // Hydrate incident_399_remediation_state from settings table if present (protects against container disk resets)
+    try {
+      const remRow = db.prepare("SELECT value FROM settings WHERE key = 'incident_399_remediation_state'").get() as any;
+      if (remRow && remRow.value) {
+        const remState = JSON.parse(remRow.value);
+        if (Array.isArray(remState.deleted_records)) {
+          const insDel = db.prepare("INSERT OR IGNORE INTO deleted_records (table_name, record_id, deleted_at) VALUES (?, ?, ?)");
+          for (const d of remState.deleted_records) {
+            insDel.run(d.table_name, d.record_id, d.deleted_at);
+          }
+        }
+        const qCount = (db.prepare("SELECT COUNT(*) as c FROM incident_quarantine_records WHERE incident_id = 'INCIDENT_399_20261027'").get() as any)?.c || 0;
+        if (qCount === 0 && Array.isArray(remState.quarantine_records)) {
+          const insQ = db.prepare("INSERT INTO incident_quarantine_records (incident_id, table_name, record_id, payload_json, reason, backup_path, quarantined_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
+          for (const q of remState.quarantine_records) {
+            insQ.run(q.incident_id, q.table_name, q.record_id, q.payload_json, q.reason, q.backup_path, q.quarantined_at);
+          }
+        }
+        if (Array.isArray(remState.processed_operations)) {
+          const insOp = db.prepare("INSERT OR REPLACE INTO processed_operations (client_operation_id, operation_type, response_body, status) VALUES (?, ?, ?, ?)");
+          for (const op of remState.processed_operations) {
+            insOp.run(op.client_operation_id, op.operation_type || 'sale', op.response_body, op.status || 'completed');
+          }
+        }
+      }
+    } catch (_) {}
 
     lastPullTimestamp = Date.now();
     

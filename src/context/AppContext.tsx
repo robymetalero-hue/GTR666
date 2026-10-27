@@ -112,6 +112,8 @@ interface AppContextType {
     isInitializing: boolean;
     kioskMode: boolean;
     setKioskMode: (k: boolean) => void;
+    isKioskLocked: boolean;
+    requestSupervisorAuth: (actionLabel: string, onAuthorized: () => void) => void;
     isSupervisorUnlocked: boolean;
     setIsSupervisorUnlocked: (val: boolean) => void;
     supervisorInfo: { id: number; username: string; role: string } | null;
@@ -288,6 +290,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setIsSupervisorUnlocked(false);
         setSupervisorInfo(null);
     }, []);
+
+    const requestSupervisorAuth = useCallback((actionLabel: string, onAuthorized: () => void) => {
+        if (isSupervisorUnlocked) {
+            onAuthorized();
+            return;
+        }
+        window.dispatchEvent(new CustomEvent('gtr-request-supervisor-auth', {
+            detail: { actionLabel, onAuthorized }
+        }));
+    }, [isSupervisorUnlocked]);
 
     // Kiosk V2 Security: Auto-relock kiosk after 5 minutes of inactivity when supervisor is unlocked
     useEffect(() => {
@@ -1244,6 +1256,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 setIsInitializing(false);
             });
         } else {
+            fetchKioskMode().catch(() => {});
             setIsInitializing(false);
         }
     }, [user?.id, user?.username]);
@@ -1253,13 +1266,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             const res = await fetchWithRetry('/api/settings/kiosk');
             if (res.ok) {
                 const data = await res.json();
-                setKioskMode(data.kiosk_mode);
-                localStorage.setItem('kioskMode', String(data.kiosk_mode));
+                const serverKiosk = Boolean(data.kiosk_mode);
+                setKioskMode(serverKiosk);
+                localStorage.setItem('kioskMode', String(serverKiosk));
             }
         } catch (e) {
             console.warn("Failed to fetch kiosk mode:", e);
         }
     };
+
+    // Enforce server-side Kiosk state periodically and protect unsynced data / active cart on tab close
+    useEffect(() => {
+        fetchKioskMode().catch(() => {});
+        const kioskSyncTimer = setInterval(() => {
+            if (navigator.onLine) {
+                fetchKioskMode().catch(() => {});
+            }
+        }, 20000);
+        return () => clearInterval(kioskSyncTimer);
+    }, []);
+
+    useEffect(() => {
+        const hasActiveData = cart.length > 0 || pendingSalesCount > 0 || pendingActionsCount > 0;
+        if (!hasActiveData) return;
+
+        const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+            if ((window as any).__pwaIsHandlingRefresh) return;
+            e.preventDefault();
+            e.returnValue = 'Tienes ventas pendientes de sincronizar o un carrito activo. ¿Seguro que deseas salir?';
+            return e.returnValue;
+        };
+
+        window.addEventListener('beforeunload', handleBeforeUnload);
+        return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+    }, [cart.length, pendingSalesCount, pendingActionsCount]);
 
     const fetchReceiptTemplate = async () => {
         try {
@@ -2121,6 +2161,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         });
     };
 
+    const isKioskLocked = !isSupervisorUnlocked && (
+        kioskMode || (
+            Boolean(user) &&
+            user?.role === 'vendedor' &&
+            !user?.permissions?.view_inventory &&
+            !user?.permissions?.access_admin_panel &&
+            user?.role !== 'admin' &&
+            user?.role !== 'propietario'
+        )
+    );
+
     return (
         <AppContext.Provider value={{
             isInitializing,
@@ -2132,6 +2183,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             setKioskMode: async (k) => { 
                 setKioskMode(k); 
                 localStorage.setItem('kioskMode', String(k)); 
+                if (k) {
+                    setIsSupervisorUnlocked(false);
+                    setSupervisorInfo(null);
+                }
                 try {
                     const token = typeof localStorage !== 'undefined' ? localStorage.getItem('auth_token') : null;
                     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -2145,6 +2200,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                     console.error("Error saving kiosk mode to server", e);
                 }
             },
+            isKioskLocked,
+            requestSupervisorAuth,
             isSupervisorUnlocked,
             setIsSupervisorUnlocked,
             supervisorInfo,

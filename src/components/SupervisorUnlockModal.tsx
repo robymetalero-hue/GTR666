@@ -6,12 +6,14 @@ interface SupervisorUnlockModalProps {
     isOpen: boolean;
     onClose: () => void;
     onSuccess: (supervisor: { id: number; username: string; role: string }) => void;
+    actionLabel?: string | null;
 }
 
 export const SupervisorUnlockModal: React.FC<SupervisorUnlockModalProps> = ({
     isOpen,
     onClose,
     onSuccess,
+    actionLabel,
 }) => {
     const [username, setUsername] = useState('');
     const [password, setPassword] = useState('');
@@ -62,6 +64,28 @@ export const SupervisorUnlockModal: React.FC<SupervisorUnlockModalProps> = ({
             onSuccess(data.supervisor);
             onClose();
         } catch (err: any) {
+            // Offline fallback: verify against cached_users in localStorage if network is down
+            try {
+                const cachedUsersRaw = localStorage.getItem('cached_users');
+                if (cachedUsersRaw) {
+                    const cachedUsers = JSON.parse(cachedUsersRaw);
+                    if (Array.isArray(cachedUsers)) {
+                        const matched = cachedUsers.find((u: any) => {
+                            const role = String(u.role || '').toLowerCase();
+                            const isAdmin = role === 'admin' || role === 'administrador' || role === 'propietario' || u.username?.toLowerCase() === 'admin';
+                            const userMatch = !username.trim() || u.username?.toLowerCase() === username.trim().toLowerCase();
+                            return isAdmin && userMatch && u.password === password.trim();
+                        });
+                        if (matched) {
+                            setPassword('');
+                            setUsername('');
+                            onSuccess({ id: matched.id, username: matched.username, role: matched.role });
+                            onClose();
+                            return;
+                        }
+                    }
+                }
+            } catch (_) {}
             setErrorMessage('No se pudo verificar las credenciales con el servidor. Revisa tu conexión.');
         } finally {
             setIsLoading(false);
@@ -99,7 +123,7 @@ export const SupervisorUnlockModal: React.FC<SupervisorUnlockModalProps> = ({
                                     Modo Kiosco • Seguridad
                                 </span>
                                 <h3 className="text-base font-black text-slate-900 dark:text-white leading-tight">
-                                    Desbloqueo de Supervisor
+                                    {actionLabel ? 'Autorización de Supervisor' : 'Desbloqueo de Supervisor'}
                                 </h3>
                             </div>
                         </div>
@@ -113,7 +137,11 @@ export const SupervisorUnlockModal: React.FC<SupervisorUnlockModalProps> = ({
                     </div>
 
                     <p className="text-xs text-slate-600 dark:text-slate-400 mb-5 leading-relaxed">
-                        Ingresa las credenciales de un <strong>Administrador</strong> o <strong>Propietario</strong> para habilitar temporalmente la navegación completa sin cerrar la sesión de caja.
+                        {actionLabel ? (
+                            <>Se requiere autorización de un <strong>Administrador</strong> o <strong>Propietario</strong> para: <strong className="text-amber-600 dark:text-amber-400">{actionLabel}</strong>.</>
+                        ) : (
+                            <>Ingresa las credenciales de un <strong>Administrador</strong> o <strong>Propietario</strong> para habilitar temporalmente la navegación completa sin cerrar la sesión de caja.</>
+                        )}
                     </p>
 
                     {errorMessage && (

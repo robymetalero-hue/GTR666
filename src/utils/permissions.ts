@@ -77,7 +77,7 @@ export const DEFAULT_PERMISSIONS: Record<string, boolean> = {
   admin_permissions: false,
   view_audit: false,
   view_audit_logs: false, // alias of view_audit
-  access_ai: true,
+  access_ai: false,
   view_diagnostics: false,
   access_forensic_audit: false, // Strict: only admins by default, or explicitly delegated by admin
 };

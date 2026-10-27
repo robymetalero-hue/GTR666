@@ -4,7 +4,7 @@ import { normalizeProductName } from '../utils/productUtils';
 import { useAppContext } from '../context/AppContext';
 import { hasPermission } from '../utils/permissions';
 import { safeDispatchEvent } from '../utils/events';
-import { Plus, Edit, Trash2, ShieldAlert, AlertTriangle, Check, X, Tag, ShoppingBag, Eye, RefreshCw, Camera, ChevronDown, ChevronRight, Maximize2, Search, History, Sparkles, ArrowUpRight, Download, ArrowDownLeft, Clock, User, ClipboardCheck, FileSpreadsheet, DollarSign, Loader2 } from 'lucide-react';
+import { Plus, Edit, Trash2, ShieldAlert, AlertTriangle, Check, X, Tag, ShoppingBag, Eye, RefreshCw, Camera, ChevronDown, ChevronRight, Maximize2, Search, History, Sparkles, ArrowUpRight, Download, ArrowDownLeft, Clock, User, ClipboardCheck, FileSpreadsheet, DollarSign, Loader2, Layers, FolderPlus, Sliders } from 'lucide-react';
 import { Product } from '../types';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import LowStockNotificationSystem from '../components/LowStockNotificationSystem';
@@ -271,6 +271,44 @@ export default function Inventory() {
     const [stockStatusFilter, setStockStatusFilter] = useState<'todos' | 'disponibles' | 'bajo_stock' | 'sin_stock'>('todos');
     const [searchQuery, setSearchQuery] = useState("");
     const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
+
+    // Multi-Select, Product Groups & Bulk Adjustment states
+    const [selectedProductIds, setSelectedProductIds] = useState<number[]>([]);
+    const [productGroups, setProductGroups] = useState<any[]>([]);
+    const [selectedGroupId, setSelectedGroupId] = useState<number | null>(null);
+    const [isGroupModalOpen, setIsGroupModalOpen] = useState(false);
+    const [editingGroup, setEditingGroup] = useState<any | null>(null);
+    const [groupName, setGroupName] = useState("");
+    const [groupDescription, setGroupDescription] = useState("");
+    const [groupColor, setGroupColor] = useState("#4f46e5");
+    const [isSavingGroup, setIsSavingGroup] = useState(false);
+
+    const [isBulkAdjustModalOpen, setIsBulkAdjustModalOpen] = useState(false);
+    const [bulkStep, setBulkStep] = useState<1 | 2>(1);
+    const [bulkField, setBulkField] = useState<'price_unit' | 'price_bulk' | 'price_cost' | 'category' | 'stock_alarm' | 'stock'>('price_unit');
+    const [bulkMode, setBulkMode] = useState<'percent' | 'fixed_delta' | 'exact'>('percent');
+    const [bulkCurrency, setBulkCurrency] = useState<'USD' | 'BOB'>('USD');
+    const [bulkValue, setBulkValue] = useState<string>("");
+    const [bulkRounding, setBulkRounding] = useState<'none' | '0.50' | '1.00'>('none');
+    const [bulkCategory, setBulkCategory] = useState<string>("");
+    const [bulkReason, setBulkReason] = useState<string>("");
+    const [isSubmittingBulk, setIsSubmittingBulk] = useState(false);
+
+    const fetchProductGroups = async () => {
+        try {
+            const res = await fetch('/api/product-groups');
+            if (res.ok) {
+                const data = await res.json();
+                if (Array.isArray(data)) setProductGroups(data);
+            }
+        } catch {
+            // Ignore transient error
+        }
+    };
+
+    useEffect(() => {
+        fetchProductGroups();
+    }, []);
 
     useEffect(() => {
         const timer = setTimeout(() => {
@@ -1475,6 +1513,9 @@ export default function Inventory() {
     const finalFilteredProducts = React.useMemo(() => {
         const query = debouncedSearchQuery.toLowerCase().trim();
         const cat = selectedCategory;
+        const activeGroup = selectedGroupId ? productGroups.find(g => g.id === selectedGroupId) : null;
+        const groupIdsSet = activeGroup && Array.isArray(activeGroup.product_ids) ? new Set(activeGroup.product_ids.map(Number)) : null;
+
         const baseFiltered = products.filter(p => {
             let matchesCategory = false;
             if (cat === "Todos") {
@@ -1484,10 +1525,217 @@ export default function Inventory() {
             } else {
                 matchesCategory = (p.category || "General") === cat;
             }
-            return matchesCategory;
+            if (!matchesCategory) return false;
+
+            if (stockStatusFilter === 'disponibles' && p.stock <= 0) return false;
+            if (stockStatusFilter === 'bajo_stock' && p.stock > p.stock_alarm) return false;
+            if (stockStatusFilter === 'sin_stock' && p.stock > 0) return false;
+
+            if (groupIdsSet && !groupIdsSet.has(Number(p.id))) return false;
+
+            return true;
         });
         return filterAndRankProducts(baseFiltered, query);
-    }, [products, debouncedSearchQuery, selectedCategory]);
+    }, [products, debouncedSearchQuery, selectedCategory, stockStatusFilter, selectedGroupId, productGroups]);
+
+    const toggleSelectProduct = (productId: number) => {
+        setSelectedProductIds(prev =>
+            prev.includes(productId) ? prev.filter(id => id !== productId) : [...prev, productId]
+        );
+    };
+
+    const toggleSelectAllFiltered = () => {
+        const filteredIds = finalFilteredProducts.map(p => p.id);
+        const allSelected = filteredIds.length > 0 && filteredIds.every(id => selectedProductIds.includes(id));
+        if (allSelected) {
+            const removeSet = new Set(filteredIds);
+            setSelectedProductIds(prev => prev.filter(id => !removeSet.has(id)));
+        } else {
+            const combined = new Set([...selectedProductIds, ...filteredIds]);
+            setSelectedProductIds(Array.from(combined));
+        }
+    };
+
+    const handleSaveGroup = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!groupName.trim()) {
+            showNotification("Ingresa un nombre para el grupo.", "error");
+            return;
+        }
+        setIsSavingGroup(true);
+        try {
+            const url = editingGroup ? `/api/product-groups/${editingGroup.id}` : '/api/product-groups';
+            const method = editingGroup ? 'PUT' : 'POST';
+            const payloadIds = editingGroup
+                ? (selectedProductIds.length > 0 ? selectedProductIds : editingGroup.product_ids || [])
+                : selectedProductIds;
+
+            const res = await fetch(url, {
+                method,
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    name: groupName.trim(),
+                    description: groupDescription.trim(),
+                    color: groupColor,
+                    productIds: payloadIds,
+                    user_id: user?.id,
+                    user_name: user?.name || user?.username
+                })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || "Error al guardar el grupo");
+            showNotification(editingGroup ? "Grupo actualizado correctamente" : `Grupo "${groupName.trim()}" creado con ${payloadIds.length} productos`, "success");
+            setIsGroupModalOpen(false);
+            setEditingGroup(null);
+            setGroupName("");
+            setGroupDescription("");
+            await fetchProductGroups();
+        } catch (err: any) {
+            showNotification(err.message || "Error al guardar el grupo", "error");
+        } finally {
+            setIsSavingGroup(false);
+        }
+    };
+
+    const handleAddSelectedToExistingGroup = async (group: any) => {
+        if (selectedProductIds.length === 0) {
+            showNotification("Selecciona al menos un producto primero.", "error");
+            return;
+        }
+        try {
+            const mergedIds = Array.from(new Set([...(group.product_ids || []).map(Number), ...selectedProductIds]));
+            const res = await fetch(`/api/product-groups/${group.id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    name: group.name,
+                    description: group.description,
+                    color: group.color,
+                    productIds: mergedIds
+                })
+            });
+            if (res.ok) {
+                showNotification(`Se asociaron ${selectedProductIds.length} productos al grupo "${group.name}".`, "success");
+                await fetchProductGroups();
+            }
+        } catch {
+            showNotification("Error al actualizar el grupo.", "error");
+        }
+    };
+
+    const handleDeleteGroup = async (groupId: number, name: string) => {
+        try {
+            const res = await fetch(`/api/product-groups/${groupId}`, { method: 'DELETE' });
+            if (res.ok) {
+                if (selectedGroupId === groupId) setSelectedGroupId(null);
+                showNotification(`Grupo "${name}" eliminado.`, "success");
+                await fetchProductGroups();
+            }
+        } catch {
+            showNotification("No se pudo eliminar el grupo.", "error");
+        }
+    };
+
+    const bulkPreviewRows = React.useMemo(() => {
+        const selectedSet = new Set(selectedProductIds);
+        const rate = Number(exchangeRate) || 6.96;
+        const numVal = parseFloat(bulkValue) || 0;
+
+        return products.filter(p => selectedSet.has(p.id)).map(p => {
+            if (bulkField === 'category') {
+                return {
+                    product: p,
+                    oldDisplay: p.category || 'General',
+                    newDisplay: bulkCategory.trim() || p.category || 'General',
+                    changed: (bulkCategory.trim() || p.category) !== p.category
+                };
+            }
+            if (bulkField === 'stock' || bulkField === 'stock_alarm') {
+                const oldVal = Number(p[bulkField]) || 0;
+                let nextVal = oldVal;
+                if (bulkMode === 'exact') nextVal = Math.max(0, Math.round(numVal));
+                else if (bulkMode === 'fixed_delta') nextVal = Math.max(0, Math.round(oldVal + numVal));
+                else if (bulkMode === 'percent') nextVal = Math.max(0, Math.round(oldVal * (1 + numVal / 100)));
+                return {
+                    product: p,
+                    oldDisplay: `${oldVal} pz`,
+                    newDisplay: `${nextVal} pz`,
+                    changed: nextVal !== oldVal
+                };
+            }
+            const oldUsd = Number(p[bulkField]) || 0;
+            const oldBob = oldUsd * rate;
+            let newUsd = oldUsd;
+
+            if (bulkMode === 'percent') {
+                newUsd = oldUsd * (1 + numVal / 100);
+            } else if (bulkMode === 'fixed_delta') {
+                const deltaUsd = bulkCurrency === 'BOB' ? (numVal / rate) : numVal;
+                newUsd = oldUsd + deltaUsd;
+            } else if (bulkMode === 'exact') {
+                newUsd = bulkCurrency === 'BOB' ? (numVal / rate) : numVal;
+            }
+            newUsd = Math.max(0, newUsd);
+
+            if (bulkRounding === '0.50') {
+                if (bulkCurrency === 'BOB') {
+                    const bobRounded = Math.round((newUsd * rate) * 2) / 2;
+                    newUsd = bobRounded / rate;
+                } else {
+                    newUsd = Math.round(newUsd * 2) / 2;
+                }
+            } else if (bulkRounding === '1.00') {
+                if (bulkCurrency === 'BOB') {
+                    const bobRounded = Math.round(newUsd * rate);
+                    newUsd = bobRounded / rate;
+                } else {
+                    newUsd = Math.round(newUsd);
+                }
+            }
+            newUsd = Math.round(newUsd * 10000) / 10000;
+            const newBob = newUsd * rate;
+
+            return {
+                product: p,
+                oldDisplay: `$${oldUsd.toFixed(2)} USD (${oldBob.toFixed(2)} Bs)`,
+                newDisplay: `$${newUsd.toFixed(2)} USD (${newBob.toFixed(2)} Bs)`,
+                changed: Math.abs(newUsd - oldUsd) > 0.0001
+            };
+        });
+    }, [products, selectedProductIds, bulkField, bulkMode, bulkCurrency, bulkValue, bulkRounding, bulkCategory, exchangeRate]);
+
+    const handleExecuteBulkAdjust = async () => {
+        if (selectedProductIds.length === 0) return;
+        setIsSubmittingBulk(true);
+        try {
+            const res = await fetch('/api/products/bulk-adjust', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    productIds: selectedProductIds,
+                    field: bulkField,
+                    mode: bulkMode,
+                    currency: bulkCurrency,
+                    value: bulkField === 'category' ? bulkCategory.trim() : parseFloat(bulkValue) || 0,
+                    rounding: bulkRounding,
+                    reason: bulkReason.trim() || 'Ajuste masivo de inventario',
+                    user_id: user?.id,
+                    user_name: user?.name || user?.username
+                })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || "Error al aplicar ajuste masivo");
+            showNotification(`¡Ajuste masivo completado! ${data.updatedCount || selectedProductIds.length} productos actualizados.`, "success");
+            setIsBulkAdjustModalOpen(false);
+            setBulkStep(1);
+            setSelectedProductIds([]);
+            await fetchProducts(undefined, true);
+        } catch (err: any) {
+            showNotification(err.message || "Error al ejecutar el ajuste masivo", "error");
+        } finally {
+            setIsSubmittingBulk(false);
+        }
+    };
 
     return (
         <div 
@@ -1600,6 +1848,35 @@ export default function Inventory() {
                                         >
                                             <ShieldAlert size={14} />
                                             <span>Diagnóstico Duplicados</span>
+                                        </button>
+                                        <button 
+                                            onClick={() => {
+                                                setEditingGroup(null);
+                                                setGroupName("");
+                                                setGroupDescription("");
+                                                setGroupColor("#4f46e5");
+                                                setIsGroupModalOpen(true);
+                                            }}
+                                            className="py-2.5 px-4.5 bg-indigo-600 hover:bg-indigo-500 hover:scale-[1.01] active:scale-95 text-white font-extrabold text-xs rounded-2xl shadow-md shadow-indigo-600/10 border border-indigo-500 transition-all cursor-pointer flex items-center gap-1.5"
+                                            title="Crear o gestionar grupos personalizados de productos"
+                                        >
+                                            <FolderPlus size={14} />
+                                            <span>Nuevo Grupo {selectedProductIds.length > 0 ? `(${selectedProductIds.length})` : ''}</span>
+                                        </button>
+                                        <button 
+                                            onClick={() => {
+                                                if (selectedProductIds.length === 0) {
+                                                    showNotification("Selecciona uno o más productos en la tabla o por grupo para realizar un ajuste masivo.", "error");
+                                                    return;
+                                                }
+                                                setBulkStep(1);
+                                                setIsBulkAdjustModalOpen(true);
+                                            }}
+                                            className="py-2.5 px-4.5 bg-amber-600 hover:bg-amber-500 hover:scale-[1.01] active:scale-95 text-white font-extrabold text-xs rounded-2xl shadow-md shadow-amber-600/10 border border-amber-500 transition-all cursor-pointer flex items-center gap-1.5"
+                                            title="Modificar precios, stock o categorías en bloque"
+                                        >
+                                            <Sliders size={14} />
+                                            <span>Ajuste Masivo {selectedProductIds.length > 0 ? `(${selectedProductIds.length})` : ''}</span>
                                         </button>
                                     </>
                                 )}
@@ -1720,18 +1997,120 @@ export default function Inventory() {
                                 {finalFilteredProducts.length} de {products.length} productos
                             </span>
 
-                            {(selectedCategory !== "Todos" || stockStatusFilter !== "todos" || searchQuery.trim() !== "") && (
+                            {(selectedCategory !== "Todos" || stockStatusFilter !== "todos" || selectedGroupId !== null || searchQuery.trim() !== "") && (
                                 <button
                                     type="button"
                                     onClick={() => {
                                         setSelectedCategory("Todos");
                                         setStockStatusFilter("todos");
+                                        setSelectedGroupId(null);
                                         setSearchQuery("");
                                         setDebouncedSearchQuery("");
                                     }}
                                     className="px-2.5 py-1 bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/30 dark:hover:bg-rose-900/50 text-rose-600 dark:text-rose-400 rounded-lg text-[9px] font-black uppercase tracking-wider transition-colors cursor-pointer"
                                 >
                                     Restablecer
+                                </button>
+                            )}
+                        </div>
+                    </div>
+
+                    {/* Product Groups Bar (Custom Collections & Quick Selection) */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-1.5 border-t border-slate-150 dark:border-slate-850/40">
+                        <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-none py-0.5">
+                            <span className="text-[9px] font-extrabold uppercase tracking-widest text-[#64748b] dark:text-slate-500 mr-1 shrink-0 flex items-center gap-1">
+                                <Layers size={11} className="text-indigo-500" />
+                                Grupos:
+                            </span>
+                            <button
+                                type="button"
+                                onClick={() => setSelectedGroupId(null)}
+                                className={`px-2.5 py-1 rounded-lg text-[9.5px] font-bold whitespace-nowrap transition-all cursor-pointer border ${
+                                    selectedGroupId === null
+                                        ? 'bg-slate-800 dark:bg-slate-200 text-white dark:text-slate-900 border-transparent font-black'
+                                        : 'bg-white dark:bg-[#070b13] border-slate-200/50 dark:border-slate-850 text-slate-500 dark:text-slate-400 hover:bg-slate-100'
+                                }`}
+                            >
+                                Todos
+                            </button>
+                            {productGroups.map((grp: any) => {
+                                const isSelected = selectedGroupId === grp.id;
+                                const count = Array.isArray(grp.product_ids) ? grp.product_ids.length : (grp.item_count || 0);
+                                return (
+                                    <div key={grp.id} className="inline-flex items-center rounded-lg border border-slate-200/60 dark:border-slate-800 overflow-hidden bg-slate-50 dark:bg-[#070b13]">
+                                        <button
+                                            type="button"
+                                            onClick={() => setSelectedGroupId(isSelected ? null : grp.id)}
+                                            className={`px-2.5 py-1 text-[9.5px] font-bold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${
+                                                isSelected
+                                                    ? 'bg-indigo-600 text-white font-black'
+                                                    : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-850'
+                                            }`}
+                                        >
+                                            <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: grp.color || '#4f46e5' }} />
+                                            <span>{grp.name}</span>
+                                            <span className="opacity-75 font-mono">({count})</span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                const ids = Array.isArray(grp.product_ids) ? grp.product_ids.map(Number) : [];
+                                                setSelectedGroupId(grp.id);
+                                                setSelectedProductIds(ids);
+                                                showNotification(`Seleccionados ${ids.length} productos del grupo "${grp.name}".`, "success");
+                                            }}
+                                            className="px-1.5 py-1 text-[9px] font-black text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 border-l border-slate-200/60 dark:border-slate-800 cursor-pointer"
+                                            title="Seleccionar todos los productos de este grupo para ajuste masivo"
+                                        >
+                                            ✓ Sel.
+                                        </button>
+                                        {user?.role === 'admin' && (
+                                            <button
+                                                type="button"
+                                                onClick={() => handleDeleteGroup(grp.id, grp.name)}
+                                                className="px-1.5 py-1 text-[9px] text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/40 border-l border-slate-200/60 dark:border-slate-800 cursor-pointer"
+                                                title="Eliminar grupo"
+                                            >
+                                                ×
+                                            </button>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                            {user?.role === 'admin' && (
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setEditingGroup(null);
+                                        setGroupName("");
+                                        setGroupDescription("");
+                                        setGroupColor("#4f46e5");
+                                        setIsGroupModalOpen(true);
+                                    }}
+                                    className="px-2.5 py-1 rounded-lg text-[9.5px] font-extrabold text-indigo-600 dark:text-indigo-400 bg-indigo-50/70 dark:bg-indigo-950/30 hover:bg-indigo-100 border border-indigo-200/60 dark:border-indigo-800/40 whitespace-nowrap cursor-pointer flex items-center gap-1"
+                                >
+                                    <Plus size={10} /> Crear Grupo
+                                </button>
+                            )}
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                            <button
+                                type="button"
+                                onClick={toggleSelectAllFiltered}
+                                className="px-2.5 py-1 rounded-lg text-[9.5px] font-extrabold bg-slate-100 hover:bg-slate-200 dark:bg-slate-900 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 cursor-pointer transition-colors"
+                            >
+                                {finalFilteredProducts.length > 0 && finalFilteredProducts.every(p => selectedProductIds.includes(p.id))
+                                    ? 'Deseleccionar visibles'
+                                    : `Seleccionar visibles (${finalFilteredProducts.length})`}
+                            </button>
+                            {selectedProductIds.length > 0 && (
+                                <button
+                                    type="button"
+                                    onClick={() => setSelectedProductIds([])}
+                                    className="px-2 py-1 rounded-lg text-[9.5px] font-bold text-rose-600 bg-rose-50 dark:bg-rose-950/30 hover:bg-rose-100 cursor-pointer"
+                                >
+                                    Limpiar ({selectedProductIds.length})
                                 </button>
                             )}
                         </div>
@@ -2594,10 +2973,17 @@ export default function Inventory() {
                             <div 
                                 key={p.id} 
                                 className={`bg-white dark:bg-[#0c111e] rounded-2xl border border-slate-200/60 dark:border-slate-850/40 p-4 shadow-xs transition duration-150 ${
-                                    isExpanded ? 'ring-2 ring-blue-500/50 dark:ring-indigo-500/50 bg-slate-50/20 dark:bg-[#0d1221]/10' : ''
+                                    selectedProductIds.includes(p.id) ? 'ring-2 ring-indigo-500 bg-indigo-50/15 dark:bg-indigo-950/20' : isExpanded ? 'ring-2 ring-blue-500/50 dark:ring-indigo-500/50 bg-slate-50/20 dark:bg-[#0d1221]/10' : ''
                                 }`}
                             >
                                 <div className="flex items-start gap-3">
+                                    <input
+                                        type="checkbox"
+                                        checked={selectedProductIds.includes(p.id)}
+                                        onChange={() => toggleSelectProduct(p.id)}
+                                        className="mt-1 w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer shrink-0"
+                                        title="Seleccionar producto para grupo o ajuste masivo"
+                                    />
                                     {/* Thumbnail Photo with Lightbox support */}
                                     {p.image ? (
                                         <button
@@ -2748,7 +3134,15 @@ export default function Inventory() {
                     <table className="w-full text-left border-collapse">
                         <thead>
                             <tr className="bg-slate-50/50 dark:bg-slate-950/40 border-b border-slate-150 dark:border-slate-850/60 text-[9px] font-bold text-slate-400 uppercase tracking-widest">
-                                <th className="p-4 pl-6 w-12"></th>
+                                <th className="p-4 pl-6 w-20">
+                                    <input
+                                        type="checkbox"
+                                        checked={finalFilteredProducts.length > 0 && finalFilteredProducts.every(p => selectedProductIds.includes(p.id))}
+                                        onChange={toggleSelectAllFiltered}
+                                        className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+                                        title="Seleccionar o deseleccionar productos filtrados"
+                                    />
+                                </th>
                                 <th className="p-4">Código SKU</th>
                                 <th className="p-4">Descripción / Artículo</th>
                                 <th className="p-4">Categoría</th>
@@ -2803,15 +3197,23 @@ export default function Inventory() {
                                     const isExpanded = expandedProductId === p.id;
                                     return (
                                         <React.Fragment key={p.id}>
-                                            <tr className={`hover:bg-slate-50/50 dark:hover:bg-[#0d1221]/45 transition duration-150 ${isExpanded ? 'bg-slate-50/30 dark:bg-[#0d1221]/20' : ''}`}>
+                                            <tr className={`hover:bg-slate-50/50 dark:hover:bg-[#0d1221]/45 transition duration-150 ${selectedProductIds.includes(p.id) ? 'bg-indigo-50/40 dark:bg-indigo-950/25' : isExpanded ? 'bg-slate-50/30 dark:bg-[#0d1221]/20' : ''}`}>
                                                 <td className="p-4 pl-6">
-                                                    <button
-                                                        onClick={() => setExpandedProductId(isExpanded ? null : p.id)}
-                                                        className="w-6 h-6 flex items-center justify-center text-slate-450 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-100 dark:hover:bg-black/20 rounded-lg transition shrink-0 cursor-pointer"
-                                                        title={isExpanded ? "Contraer detalles" : "Ver detalles expandidos"}
-                                                    >
-                                                        {isExpanded ? <ChevronDown size={14} className="text-blue-500" /> : <ChevronRight size={14} />}
-                                                    </button>
+                                                    <div className="flex items-center gap-2">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={selectedProductIds.includes(p.id)}
+                                                            onChange={() => toggleSelectProduct(p.id)}
+                                                            className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 cursor-pointer shrink-0"
+                                                        />
+                                                        <button
+                                                            onClick={() => setExpandedProductId(isExpanded ? null : p.id)}
+                                                            className="w-6 h-6 flex items-center justify-center text-slate-450 hover:text-indigo-600 dark:hover:text-indigo-400 hover:bg-slate-100 dark:hover:bg-black/20 rounded-lg transition shrink-0 cursor-pointer"
+                                                            title={isExpanded ? "Contraer detalles" : "Ver detalles expandidos"}
+                                                        >
+                                                            {isExpanded ? <ChevronDown size={14} className="text-blue-500" /> : <ChevronRight size={14} />}
+                                                        </button>
+                                                    </div>
                                                 </td>
                                                 <td className="p-4 font-mono font-bold text-slate-400">{p.sku}</td>
                                                 <td className="p-4">
@@ -3716,6 +4118,355 @@ export default function Inventory() {
                                 Cerrar Historial
                             </button>
                         </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Floating Action Bar when products are selected */}
+            {selectedProductIds.length > 0 && (
+                <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-40 bg-slate-900/95 dark:bg-[#111827]/95 text-white px-5 py-3 rounded-2xl shadow-2xl border border-indigo-500/40 backdrop-blur-md flex flex-wrap items-center gap-3 animate-in slide-in-from-bottom-5">
+                    <div className="flex items-center gap-2 pr-2 border-r border-slate-700">
+                        <span className="w-6 h-6 rounded-lg bg-indigo-600 flex items-center justify-center text-xs font-black">
+                            {selectedProductIds.length}
+                        </span>
+                        <span className="text-xs font-extrabold uppercase tracking-wider">Seleccionados</span>
+                    </div>
+
+                    {user?.role === 'admin' && (
+                        <>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setBulkStep(1);
+                                    setIsBulkAdjustModalOpen(true);
+                                }}
+                                className="px-3.5 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs rounded-xl transition cursor-pointer flex items-center gap-1.5"
+                            >
+                                <Sliders size={13} />
+                                <span>Ajuste Masivo</span>
+                            </button>
+
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setEditingGroup(null);
+                                    setGroupName("");
+                                    setGroupDescription("");
+                                    setGroupColor("#4f46e5");
+                                    setIsGroupModalOpen(true);
+                                }}
+                                className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white font-extrabold text-xs rounded-xl transition cursor-pointer flex items-center gap-1.5"
+                            >
+                                <FolderPlus size={13} />
+                                <span>Guardar como Grupo</span>
+                            </button>
+
+                            {productGroups.length > 0 && (
+                                <select
+                                    defaultValue=""
+                                    onChange={(e) => {
+                                        const grpId = Number(e.target.value);
+                                        const grp = productGroups.find(g => g.id === grpId);
+                                        if (grp) handleAddSelectedToExistingGroup(grp);
+                                        e.target.value = "";
+                                    }}
+                                    className="px-2.5 py-1.5 bg-slate-800 border border-slate-700 rounded-xl text-xs font-bold text-slate-200 cursor-pointer"
+                                >
+                                    <option value="" disabled>+ Añadir a grupo existente...</option>
+                                    {productGroups.map((g: any) => (
+                                        <option key={g.id} value={g.id}>{g.name}</option>
+                                    ))}
+                                </select>
+                            )}
+                        </>
+                    )}
+
+                    <button
+                        type="button"
+                        onClick={() => setSelectedProductIds([])}
+                        className="p-1.5 text-slate-400 hover:text-white rounded-lg cursor-pointer"
+                        title="Cancelar selección"
+                    >
+                        <X size={15} />
+                    </button>
+                </div>
+            )}
+
+            {/* Modal Crear / Editar Grupo de Productos */}
+            {isGroupModalOpen && (
+                <div className="fixed inset-0 bg-black/65 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-in fade-in duration-150">
+                    <div className="bg-white dark:bg-[#0f1424] rounded-3xl w-full max-w-md p-6 shadow-2xl border border-slate-200 dark:border-slate-850 flex flex-col gap-4">
+                        <div className="flex justify-between items-center border-b border-slate-100 dark:border-slate-850 pb-3">
+                            <div className="flex items-center gap-2">
+                                <FolderPlus className="text-indigo-500" size={18} />
+                                <h2 className="text-sm font-black uppercase tracking-wider text-slate-800 dark:text-white">
+                                    {editingGroup ? 'Editar Grupo de Productos' : 'Nuevo Grupo de Productos'}
+                                </h2>
+                            </div>
+                            <button onClick={() => setIsGroupModalOpen(false)} className="text-slate-400 hover:text-slate-600 cursor-pointer">
+                                <X size={18} />
+                            </button>
+                        </div>
+
+                        <form onSubmit={handleSaveGroup} className="space-y-4">
+                            <div>
+                                <label className="block text-[10px] font-black uppercase text-slate-400 mb-1">Nombre del Grupo *</label>
+                                <input
+                                    type="text"
+                                    required
+                                    value={groupName}
+                                    onChange={(e) => setGroupName(e.target.value)}
+                                    placeholder="Ej. Línea cascos LS2, Importación Octubre, Oferta..."
+                                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#070b13] text-xs font-bold text-slate-800 dark:text-white"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-[10px] font-black uppercase text-slate-400 mb-1">Descripción (Opcional)</label>
+                                <input
+                                    type="text"
+                                    value={groupDescription}
+                                    onChange={(e) => setGroupDescription(e.target.value)}
+                                    placeholder="Nota breve sobre el propósito del grupo"
+                                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#070b13] text-xs font-bold text-slate-800 dark:text-white"
+                                />
+                            </div>
+                            <div className="flex items-center justify-between gap-4">
+                                <div>
+                                    <label className="block text-[10px] font-black uppercase text-slate-400 mb-1">Color Identificador</label>
+                                    <input
+                                        type="color"
+                                        value={groupColor}
+                                        onChange={(e) => setGroupColor(e.target.value)}
+                                        className="w-12 h-8 rounded-lg cursor-pointer border border-slate-200 dark:border-slate-800"
+                                    />
+                                </div>
+                                <div className="text-right">
+                                    <span className="block text-[10px] font-black uppercase text-slate-400">Productos Incluidos</span>
+                                    <span className="text-sm font-black text-indigo-600 dark:text-indigo-400">
+                                        {selectedProductIds.length} seleccionados actualmente
+                                    </span>
+                                </div>
+                            </div>
+
+                            <div className="flex justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-850">
+                                <button
+                                    type="button"
+                                    onClick={() => setIsGroupModalOpen(false)}
+                                    className="px-4 py-2 rounded-xl text-xs font-bold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                                >
+                                    Cancelar
+                                </button>
+                                <button
+                                    type="submit"
+                                    disabled={isSavingGroup}
+                                    className="px-5 py-2 rounded-xl text-xs font-black bg-indigo-600 hover:bg-indigo-500 text-white shadow-md cursor-pointer disabled:opacity-50"
+                                >
+                                    {isSavingGroup ? 'Guardando...' : 'Guardar Grupo'}
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            )}
+
+            {/* Modal Asistente de Ajuste Masivo (2 Pasos con Vista Previa Antes vs. Después) */}
+            {isBulkAdjustModalOpen && (
+                <div className="fixed inset-0 bg-black/65 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-in fade-in duration-150">
+                    <div className="bg-white dark:bg-[#0f1424] rounded-3xl w-full max-w-3xl p-6 shadow-2xl border border-slate-200 dark:border-slate-850 flex flex-col gap-4 max-h-[90vh] overflow-hidden">
+                        <div className="flex justify-between items-center border-b border-slate-100 dark:border-slate-850 pb-3">
+                            <div className="flex items-center gap-2.5">
+                                <div className="p-2 rounded-xl bg-amber-500/10 text-amber-500">
+                                    <Sliders size={18} />
+                                </div>
+                                <div>
+                                    <h2 className="text-sm font-black uppercase tracking-wider text-slate-800 dark:text-white">
+                                        Asistente de Ajuste Masivo ({selectedProductIds.length} productos)
+                                    </h2>
+                                    <p className="text-[11px] text-slate-400 font-semibold">
+                                        {bulkStep === 1 ? 'Paso 1 de 2: Configura el campo y la regla de modificación' : 'Paso 2 de 2: Revisa la simulación Antes vs. Después antes de confirmar'}
+                                    </p>
+                                </div>
+                            </div>
+                            <button onClick={() => setIsBulkAdjustModalOpen(false)} className="text-slate-400 hover:text-slate-600 cursor-pointer">
+                                <X size={18} />
+                            </button>
+                        </div>
+
+                        {bulkStep === 1 ? (
+                            <div className="space-y-4 overflow-y-auto pr-1">
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                                    <div>
+                                        <label className="block text-[10px] font-black uppercase text-slate-400 mb-1.5">Campo a Modificar</label>
+                                        <select
+                                            value={bulkField}
+                                            onChange={(e) => setBulkField(e.target.value as any)}
+                                            className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#070b13] text-xs font-bold text-slate-800 dark:text-white"
+                                        >
+                                            <option value="price_unit">Precio de Venta Detalle (Unitario)</option>
+                                            <option value="price_bulk">Precio Mayorista</option>
+                                            <option value="price_cost">Precio de Costo</option>
+                                            <option value="category">Categoría / Departamento</option>
+                                            <option value="stock_alarm">Umbral de Alerta de Stock Mínimo</option>
+                                            <option value="stock">Stock Físico Actual</option>
+                                        </select>
+                                    </div>
+
+                                    {bulkField !== 'category' && (
+                                        <div>
+                                            <label className="block text-[10px] font-black uppercase text-slate-400 mb-1.5">Modo de Operación</label>
+                                            <select
+                                                value={bulkMode}
+                                                onChange={(e) => setBulkMode(e.target.value as any)}
+                                                className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#070b13] text-xs font-bold text-slate-800 dark:text-white"
+                                            >
+                                                <option value="percent">Porcentaje (+% aumento / -% descuento)</option>
+                                                <option value="fixed_delta">Suma o Resta de Monto Fijo (+/-)</option>
+                                                <option value="exact">Fijar Valor Exacto (=)</option>
+                                            </select>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {bulkField === 'category' ? (
+                                    <div>
+                                        <label className="block text-[10px] font-black uppercase text-slate-400 mb-1.5">Nueva Categoría / Departamento *</label>
+                                        <input
+                                            type="text"
+                                            value={bulkCategory}
+                                            onChange={(e) => setBulkCategory(e.target.value)}
+                                            placeholder="Ej. Cascos, Lubricantes, Accesorios..."
+                                            className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#070b13] text-xs font-bold text-slate-800 dark:text-white"
+                                        />
+                                    </div>
+                                ) : (
+                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                                        <div>
+                                            <label className="block text-[10px] font-black uppercase text-slate-400 mb-1.5">
+                                                {bulkMode === 'percent' ? 'Porcentaje (%) — usa negativo para rebajar' : 'Valor Numérico'}
+                                            </label>
+                                            <input
+                                                type="number"
+                                                step="any"
+                                                value={bulkValue}
+                                                onChange={(e) => setBulkValue(e.target.value)}
+                                                placeholder={bulkMode === 'percent' ? "Ej. 10 o -5" : "Ej. 15.50"}
+                                                className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#070b13] text-xs font-bold text-slate-800 dark:text-white font-mono"
+                                            />
+                                        </div>
+
+                                        {['price_unit', 'price_bulk', 'price_cost'].includes(bulkField) && (
+                                            <>
+                                                <div>
+                                                    <label className="block text-[10px] font-black uppercase text-slate-400 mb-1.5">Moneda de Referencia</label>
+                                                    <select
+                                                        value={bulkCurrency}
+                                                        onChange={(e) => setBulkCurrency(e.target.value as any)}
+                                                        className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#070b13] text-xs font-bold text-slate-800 dark:text-white"
+                                                    >
+                                                        <option value="USD">Dólares ($ USD)</option>
+                                                        <option value="BOB">Bolivianos (Bs. — TC {exchangeRate})</option>
+                                                    </select>
+                                                </div>
+
+                                                <div>
+                                                    <label className="block text-[10px] font-black uppercase text-slate-400 mb-1.5">Redondeo Comercial</label>
+                                                    <select
+                                                        value={bulkRounding}
+                                                        onChange={(e) => setBulkRounding(e.target.value as any)}
+                                                        className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#070b13] text-xs font-bold text-slate-800 dark:text-white"
+                                                    >
+                                                        <option value="none">Sin redondeo adicional</option>
+                                                        <option value="0.50">Múltiplos de 0.50</option>
+                                                        <option value="1.00">Entero exacto (1.00)</option>
+                                                    </select>
+                                                </div>
+                                            </>
+                                        )}
+                                    </div>
+                                )}
+
+                                <div>
+                                    <label className="block text-[10px] font-black uppercase text-slate-400 mb-1.5">Motivo de Auditoría</label>
+                                    <input
+                                        type="text"
+                                        value={bulkReason}
+                                        onChange={(e) => setBulkReason(e.target.value)}
+                                        placeholder="Ej. Actualización de lista proveedor / Promoción de temporada"
+                                        className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#070b13] text-xs font-bold text-slate-800 dark:text-white"
+                                    />
+                                </div>
+
+                                <div className="flex justify-end gap-2 pt-3 border-t border-slate-100 dark:border-slate-850">
+                                    <button
+                                        type="button"
+                                        onClick={() => setIsBulkAdjustModalOpen(false)}
+                                        className="px-4 py-2 rounded-xl text-xs font-bold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                                    >
+                                        Cancelar
+                                    </button>
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            if (bulkField === 'category' && !bulkCategory.trim()) {
+                                                showNotification("Ingresa el nombre de la categoría destino.", "error");
+                                                return;
+                                            }
+                                            if (bulkField !== 'category' && (bulkValue === "" || isNaN(parseFloat(bulkValue)))) {
+                                                showNotification("Ingresa un valor numérico válido.", "error");
+                                                return;
+                                            }
+                                            setBulkStep(2);
+                                        }}
+                                        className="px-5 py-2 rounded-xl text-xs font-black bg-indigo-600 hover:bg-indigo-500 text-white shadow-md cursor-pointer"
+                                    >
+                                        Ver Simulación Antes vs. Después →
+                                    </button>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="flex flex-col gap-4 overflow-hidden flex-1">
+                                <div className="overflow-y-auto border border-slate-200 dark:border-slate-800 rounded-2xl max-h-[50vh]">
+                                    <table className="w-full text-left border-collapse text-xs">
+                                        <thead>
+                                            <tr className="bg-slate-50 dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 text-[10px] font-black uppercase text-slate-400">
+                                                <th className="p-3">SKU</th>
+                                                <th className="p-3">Producto</th>
+                                                <th className="p-3 text-right">Valor Actual</th>
+                                                <th className="p-3 text-right">Nuevo Valor Calculado</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-slate-100 dark:divide-slate-850 font-bold">
+                                            {bulkPreviewRows.map(row => (
+                                                <tr key={row.product.id} className="hover:bg-slate-50/60 dark:hover:bg-slate-900/40">
+                                                    <td className="p-3 font-mono text-slate-400">{row.product.sku}</td>
+                                                    <td className="p-3 text-slate-800 dark:text-slate-200 uppercase">{row.product.name}</td>
+                                                    <td className="p-3 text-right font-mono text-slate-500">{row.oldDisplay}</td>
+                                                    <td className="p-3 text-right font-mono text-emerald-600 dark:text-emerald-400 font-black">{row.newDisplay}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+
+                                <div className="flex justify-between items-center pt-2 border-t border-slate-100 dark:border-slate-850">
+                                    <button
+                                        type="button"
+                                        onClick={() => setBulkStep(1)}
+                                        className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 cursor-pointer"
+                                    >
+                                        ← Volver a Configurar
+                                    </button>
+                                    <button
+                                        type="button"
+                                        disabled={isSubmittingBulk}
+                                        onClick={handleExecuteBulkAdjust}
+                                        className="px-5 py-2.5 rounded-xl text-xs font-black bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg cursor-pointer disabled:opacity-50"
+                                    >
+                                        {isSubmittingBulk ? 'Aplicando Cambios...' : `Confirmar y Actualizar ${bulkPreviewRows.length} Productos`}
+                                    </button>
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </div>
             )}

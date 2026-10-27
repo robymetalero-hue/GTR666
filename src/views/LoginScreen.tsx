@@ -70,11 +70,12 @@ export default function LoginScreen() {
         } catch {}
 
         if (!optimisticUser) {
+            const isAdminLogin = cleanUsername.toLowerCase() === 'admin';
             optimisticUser = {
                 id: 1,
                 username: cleanUsername,
-                role: cleanUsername.toLowerCase() === 'admin' ? 'admin' : 'trabajador',
-                permissions: {
+                role: isAdminLogin ? 'admin' : 'vendedor',
+                permissions: isAdminLogin ? {
                     view_reports: true,
                     edit_prices: true,
                     view_inventory: true,
@@ -84,6 +85,16 @@ export default function LoginScreen() {
                     delete_sales: true,
                     view_sales: true,
                     access_ai: true
+                } : {
+                    view_reports: false,
+                    edit_prices: false,
+                    view_inventory: false,
+                    apply_discounts: false,
+                    manage_credits: false,
+                    manage_caja: true,
+                    delete_sales: false,
+                    view_sales: true,
+                    access_ai: false
                 }
             };
         }

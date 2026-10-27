@@ -39,7 +39,7 @@ interface PaymentHistory {
 }
 
 export default function CuentasPorCobrarView() {
-    const { user, exchangeRate, clients, receiptTemplate } = useAppContext();
+    const { user, exchangeRate, clients, receiptTemplate, fetchProducts, isKioskLocked, requestSupervisorAuth } = useAppContext();
     
     // Module Tabs
     const [activeTab, setActiveTab] = useState<'pendientes' | 'creditos'>('pendientes');
@@ -61,10 +61,12 @@ export default function CuentasPorCobrarView() {
     const [paymentHistory, setPaymentHistory] = useState<PaymentHistory[]>([]);
     const [loadingHistory, setLoadingHistory] = useState(false);
 
-    // State for Pending Sales / Envíos
+    // State for Pending Sales / Envíos / Cotizaciones / Reservas
     const [pendingSales, setPendingSales] = useState<any[]>([]);
     const [loadingPending, setLoadingPending] = useState(false);
     const [pendingSearchQuery, setPendingSearchQuery] = useState('');
+    const [pendingModeFilter, setPendingModeFilter] = useState<'todos' | 'cotizacion' | 'reserva' | 'envio' | 'vencidas'>('todos');
+    const [togglingReserveId, setTogglingReserveId] = useState<number | null>(null);
 
     // Editing Pending Sale Modal State
     const [editingSale, setEditingSale] = useState<any | null>(null);
@@ -72,6 +74,11 @@ export default function CuentasPorCobrarView() {
     const [editedDestination, setEditedDestination] = useState('');
     const [editedClientPhone, setEditedClientPhone] = useState('');
     const [editedTransportCompany, setEditedTransportCompany] = useState('');
+    const [editedOrderType, setEditedOrderType] = useState<'cotizacion' | 'reserva' | 'envio'>('envio');
+    const [editedReserveStock, setEditedReserveStock] = useState<boolean>(true);
+    const [editedValidUntil, setEditedValidUntil] = useState<string>('');
+    const [editedDiscount, setEditedDiscount] = useState<number>(0);
+    const [editedNotes, setEditedNotes] = useState<string>('');
     const [editedItems, setEditedItems] = useState<any[]>([]); // items currently in the edited order
     const [productList, setProductList] = useState<any[]>([]); // full product list for adding items
     const [productSearchQuery, setProductSearchQuery] = useState('');
@@ -473,18 +480,40 @@ export default function CuentasPorCobrarView() {
 
     const handleShareWhatsApp = (sale: any) => {
         const remaining = sale.total - (sale.paid_amount || 0);
-        const itemsText = sale.items && sale.items.map((it: any) => `• ${it.product_name} x${it.quantity} (Bs. ${(it.price || 0).toFixed(2)})`).join('\n') || '';
+        const discount = Number(sale.discount || 0);
+        const subtotal = Number(sale.total || 0) + discount;
+        const orderType = sale.order_type || 'envio';
+        const isReserved = Number(sale.reserve_stock ?? 1) === 1;
+        const headerTitle = orderType === 'cotizacion'
+            ? `*PROFORMA / COTIZACIÓN #${sale.id}*`
+            : orderType === 'reserva'
+            ? `*NOTA DE RESERVA #${sale.id}*`
+            : `*DETALLE DE PEDIDO / ENVÍO #${sale.id}*`;
+
+        const itemsText = sale.items && sale.items.map((it: any) => `• ${it.product_name} x${it.quantity} (Bs. ${(it.price || 0).toFixed(2)} c/u = Bs. ${((it.price || 0) * it.quantity).toFixed(2)})`).join('\n') || '';
         
-        let message = `*DETALLE DE VENTA PENDIENTE #${sale.id}*\n`;
-        message += `_Fecha de registro: ${new Date(sale.created_at).toLocaleString('es-BO')}_\n\n`;
-        message += `*Cliente:* ${sale.client_name}\n`;
-        if (sale.client_phone) message += `*Teléfono:* ${sale.client_phone}\n`;
-        if (sale.destination) message += `*Destino:* ${sale.destination}\n`;
+        let message = `${headerTitle}\n`;
+        message += `_Fecha de emisión: ${new Date(sale.created_at).toLocaleString('es-BO')}_\n`;
+        if (sale.valid_until) {
+            message += `⏳ *Válido hasta:* ${sale.valid_until}\n`;
+        }
+        message += `${isReserved ? '🔒 *Estado de Stock:* Reservado en almacén' : '📄 *Estado de Stock:* Cotización sujeta a disponibilidad'}\n\n`;
+        message += `👤 *Cliente:* ${sale.client_name}\n`;
+        if (sale.client_phone) message += `📞 *Teléfono:* ${sale.client_phone}\n`;
+        if (sale.destination) message += `📍 *Destino / Entrega:* ${sale.destination}\n`;
+        if (sale.transport_company) message += `🚛 *Transporte:* ${sale.transport_company}\n`;
+        if (sale.notes) message += `📝 *Observaciones:* ${sale.notes}\n`;
         message += `\n*Detalle de Productos:*\n${itemsText}\n\n`;
-        message += `*Monto Total:* Bs. ${sale.total.toFixed(2)}\n`;
-        message += `*Monto Abonado:* Bs. ${(sale.paid_amount || 0).toFixed(2)}\n`;
-        message += `*Saldo Restante:* *Bs. ${remaining.toFixed(2)}*\n\n`;
-        message += `¡Gracias por su preferencia!`;
+        if (discount > 0) {
+            message += `*Subtotal:* Bs. ${subtotal.toFixed(2)}\n`;
+            message += `*Descuento Comercial:* -Bs. ${discount.toFixed(2)}\n`;
+        }
+        message += `*Monto Total:* *Bs. ${Number(sale.total || 0).toFixed(2)}*\n`;
+        if ((sale.paid_amount || 0) > 0 || orderType !== 'cotizacion') {
+            message += `*Monto Abonado:* Bs. ${(sale.paid_amount || 0).toFixed(2)}\n`;
+            message += `*Saldo Restante:* *Bs. ${remaining.toFixed(2)}*\n`;
+        }
+        message += `\n¡Gracias por su preferencia!`;
         
         const encodedMessage = encodeURIComponent(message);
         const phone = sale.client_phone ? sale.client_phone.replace(/\D/g, '') : '';
@@ -499,17 +528,41 @@ export default function CuentasPorCobrarView() {
         }
     };
 
-    const handleDeletePendingSale = async (id: number) => {
-        if (!confirm('¿Está seguro de que desea cancelar y eliminar permanentemente esta venta pendiente?')) {
-            return;
+    const handleToggleReserveStock = async (sale: any) => {
+        if (togglingReserveId === sale.id) return;
+        const nextReserve = Number(sale.reserve_stock ?? 1) === 1 ? 0 : 1;
+        setTogglingReserveId(sale.id);
+        try {
+            const res = await fetch(`/api/pending-sales/${sale.id}/toggle-reserve`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ reserve_stock: nextReserve })
+            });
+            if (res.ok) {
+                showToast(nextReserve === 1 ? '🔒 Stock físico reservado para este registro.' : '📄 Reserva liberada: ahora actúa solo como cotización.');
+                loadPendingSales();
+                fetchProducts?.(undefined, true);
+            } else {
+                const err = await res.json();
+                showToast(err.error || 'No se pudo cambiar la reserva de stock', 'error');
+            }
+        } catch (e) {
+            console.error(e);
+            showToast('Error de red al actualizar reserva de stock', 'error');
+        } finally {
+            setTogglingReserveId(null);
         }
+    };
+
+    const executeDeletePendingSale = async (id: number) => {
         try {
             const res = await fetch(`/api/pending-sales/${id}`, {
                 method: 'DELETE'
             });
             if (res.ok) {
-                showToast('✓ Venta pendiente eliminada.');
+                showToast('✓ Registro eliminado y reserva liberada.');
                 loadPendingSales();
+                fetchProducts?.(undefined, true);
             } else {
                 const err = await res.json();
                 showToast(err.error || 'No se pudo eliminar', 'error');
@@ -518,6 +571,16 @@ export default function CuentasPorCobrarView() {
             console.error(e);
             showToast('Error de red al eliminar', 'error');
         }
+    };
+
+    const handleDeletePendingSale = async (id: number) => {
+        if (isKioskLocked) {
+            requestSupervisorAuth(`Eliminar Venta Pendiente / Cotización #${id}`, () => {
+                executeDeletePendingSale(id);
+            });
+            return;
+        }
+        await executeDeletePendingSale(id);
     };
 
     // Generate full format elegant A4/Letter invoice quote PDF
@@ -540,6 +603,15 @@ export default function CuentasPorCobrarView() {
                 fontSizeBody: 8,
                 ticketWidth: 80
             };
+
+            const orderType = sale.order_type || 'envio';
+            const isReserved = Number(sale.reserve_stock ?? 1) === 1;
+            const docTitle = orderType === 'cotizacion'
+                ? "PROFORMA / COTIZACIÓN"
+                : orderType === 'reserva'
+                ? "NOTA DE RESERVA"
+                : "PEDIDO / VENTA PENDIENTE";
+            const docPrefix = orderType === 'cotizacion' ? 'COT' : orderType === 'reserva' ? 'RES' : 'PED';
 
             const doc = new jsPDF({
                 orientation: 'portrait',
@@ -596,23 +668,32 @@ export default function CuentasPorCobrarView() {
             const rightAlignX = pageWidth - margin;
             
             doc.setFont("helvetica", "bold");
-            doc.setFontSize(16);
+            doc.setFontSize(15);
             doc.setTextColor(37, 99, 235); // Blue primary
-            doc.text("VENTA PENDIENTE", rightAlignX, y + 4, { align: 'right' });
+            doc.text(docTitle, rightAlignX, y + 4, { align: 'right' });
             
             doc.setFont("helvetica", "bold");
             doc.setFontSize(10);
             doc.setTextColor(15, 23, 42);
-            doc.text(`Nº de Pedido: PED-${sale.id}`, rightAlignX, y + 10, { align: 'right' });
+            doc.text(`Nº Documento: ${docPrefix}-${sale.id}`, rightAlignX, y + 9.5, { align: 'right' });
 
             doc.setFont("helvetica", "normal");
             doc.setFontSize(8.5);
             doc.setTextColor(100, 116, 139);
-            doc.text(`Fecha de Registro: ${new Date(sale.created_at || Date.now()).toLocaleString()}`, rightAlignX, y + 15, { align: 'right' });
-            doc.text(`Moneda: ${sale.currency || 'BOB'}`, rightAlignX, y + 20, { align: 'right' });
+            doc.text(`Fecha de Emisión: ${new Date(sale.created_at || Date.now()).toLocaleString('es-BO')}`, rightAlignX, y + 14.5, { align: 'right' });
+            if (sale.valid_until) {
+                doc.setFont("helvetica", "bold");
+                doc.setTextColor(217, 119, 6);
+                doc.text(`Vigencia hasta: ${sale.valid_until}`, rightAlignX, y + 19, { align: 'right' });
+                doc.setFont("helvetica", "normal");
+                doc.setTextColor(100, 116, 139);
+                doc.text(`Moneda: ${sale.currency || 'BOB'}`, rightAlignX, y + 23.5, { align: 'right' });
+            } else {
+                doc.text(`Moneda: ${sale.currency || 'BOB'}`, rightAlignX, y + 19.5, { align: 'right' });
+            }
 
             // Set Y coordinate to below the highest header element
-            y = Math.max(headerY, y + 24) + 2;
+            y = Math.max(headerY, y + 26) + 2;
 
             // Thin Slate divider line
             doc.setDrawColor(226, 232, 240);
@@ -622,14 +703,15 @@ export default function CuentasPorCobrarView() {
             y += 6;
 
             // Client & Delivery Information Box (Styled like a modern card)
+            const cardHeight = sale.notes ? 36 : 30;
             doc.setFillColor(248, 250, 252); // slate-50
             doc.setDrawColor(241, 245, 249); // slate-100
-            doc.roundedRect(margin, y, contentWidth, 30, 3, 3, 'FD');
+            doc.roundedRect(margin, y, contentWidth, cardHeight, 3, 3, 'FD');
 
             doc.setFont("helvetica", "bold");
             doc.setFontSize(9.5);
             doc.setTextColor(15, 23, 42); // slate-900
-            doc.text("DATOS DEL CLIENTE Y DETALLES DE ENVÍO", margin + 6, y + 6.5);
+            doc.text("DATOS DEL CLIENTE Y CONDICIONES DE OPERACIÓN", margin + 6, y + 6.5);
 
             // Left info column
             doc.setFont("helvetica", "bold");
@@ -647,21 +729,35 @@ export default function CuentasPorCobrarView() {
             // Right info column
             doc.setFont("helvetica", "bold");
             doc.setTextColor(100, 116, 139);
-            doc.text("DESTINO / DIRECCIÓN:", margin + 95, y + 14);
-            doc.text("ESTADO:", margin + 95, y + 21);
+            doc.text("ENTREGA / DESTINO:", margin + 95, y + 14);
+            doc.text("RESERVA STOCK:", margin + 95, y + 21);
 
             doc.setFont("helvetica", "bold");
-            doc.setTextColor(37, 99, 235); // Blue
-            doc.text("PENDIENTE DE ENVÍO / COBRO", margin + 132, y + 21);
+            if (isReserved) {
+                doc.setTextColor(217, 119, 6); // Amber
+                doc.text("STOCK RESERVADO EN ALMACÉN", margin + 130, y + 21);
+            } else {
+                doc.setTextColor(37, 99, 235); // Blue
+                doc.text("SUJETO A DISPONIBILIDAD", margin + 130, y + 21);
+            }
 
             doc.setFont("helvetica", "normal");
             doc.setTextColor(15, 23, 42);
-            // Wrap address in case it's too long
             const destText = sale.destination || "Entrega en Tienda / Por definir";
-            const wrappedDest = doc.splitTextToSize(destText, contentWidth - 100);
-            doc.text(wrappedDest, margin + 132, y + 14);
+            const wrappedDest = doc.splitTextToSize(destText, contentWidth - 135);
+            doc.text(wrappedDest, margin + 130, y + 14);
 
-            y += 37;
+            if (sale.notes) {
+                doc.setFont("helvetica", "bold");
+                doc.setTextColor(100, 116, 139);
+                doc.text("OBSERVACIONES:", margin + 6, y + 28);
+                doc.setFont("helvetica", "italic");
+                doc.setTextColor(15, 23, 42);
+                const cleanNotes = sale.notes.length > 85 ? sale.notes.substring(0, 82) + '...' : sale.notes;
+                doc.text(cleanNotes, margin + 36, y + 28);
+            }
+
+            y += cardHeight + 6;
 
             // Product Detail Table Header
             doc.setFillColor(30, 41, 59); // Dark slate header
@@ -699,7 +795,7 @@ export default function CuentasPorCobrarView() {
 
                 // Draw SKU
                 const itemSku = item.product_sku || item.sku || 'N/A';
-                doc.setFont("courier", "bold"); // monospace-like look for SKU
+                doc.setFont("courier", "bold");
                 doc.text(itemSku, margin + 4, y + 4.8);
 
                 // Draw Name (truncated gracefully)
@@ -729,41 +825,71 @@ export default function CuentasPorCobrarView() {
 
             y += 5;
 
-            // Total Block (aligned to the right)
-            const totalBoxWidth = 75;
-            const totalBoxX = rightAlignX - totalBoxWidth;
+            const discountVal = Number(sale.discount || 0);
+            const finalTotalVal = Number(sale.total || Math.max(0, totalItemsSum - discountVal));
+            const paidVal = Number(sale.paid_amount || 0);
+            const remainingVal = Math.max(0, finalTotalVal - paidVal);
 
-            // Draw a subtle box for totals
+            // Total Block (aligned to the right)
+            const totalBoxWidth = 82;
+            const totalBoxX = rightAlignX - totalBoxWidth;
+            const totalBoxHeight = (discountVal > 0 ? 24 : 19) + (paidVal > 0 ? 10 : 0);
+
             doc.setFillColor(248, 250, 252);
             doc.setDrawColor(226, 232, 240);
-            doc.roundedRect(totalBoxX, y, totalBoxWidth, 18, 2, 2, 'FD');
+            doc.roundedRect(totalBoxX, y, totalBoxWidth, totalBoxHeight, 2, 2, 'FD');
 
+            let ty = y + 5;
             doc.setFont("helvetica", "normal");
-            doc.setFontSize(9);
+            doc.setFontSize(8.5);
             doc.setTextColor(100, 116, 139);
-            doc.text("SUBTOTAL:", totalBoxX + 4, y + 5);
+            doc.text("SUBTOTAL:", totalBoxX + 4, ty);
             doc.setFont("helvetica", "bold");
             doc.setTextColor(15, 23, 42);
-            doc.text(`Bs. ${totalItemsSum.toFixed(2)}`, rightAlignX - 4, y + 5, { align: 'right' });
+            doc.text(`Bs. ${totalItemsSum.toFixed(2)}`, rightAlignX - 4, ty, { align: 'right' });
 
+            if (discountVal > 0) {
+                ty += 4.8;
+                doc.setFont("helvetica", "bold");
+                doc.setTextColor(225, 29, 72);
+                doc.text("DESCUENTO:", totalBoxX + 4, ty);
+                doc.text(`-Bs. ${discountVal.toFixed(2)}`, rightAlignX - 4, ty, { align: 'right' });
+            }
+
+            ty += 5.5;
             doc.setFont("helvetica", "bold");
             doc.setFontSize(10);
-            doc.setTextColor(37, 99, 235); // Blue accent
-            doc.text("TOTAL ESTIMADO:", totalBoxX + 4, y + 11);
-            doc.text(`Bs. ${totalItemsSum.toFixed(2)}`, rightAlignX - 4, y + 11, { align: 'right' });
+            doc.setTextColor(37, 99, 235);
+            doc.text("TOTAL:", totalBoxX + 4, ty);
+            doc.text(`Bs. ${finalTotalVal.toFixed(2)}`, rightAlignX - 4, ty, { align: 'right' });
+
+            if (paidVal > 0) {
+                ty += 4.8;
+                doc.setFont("helvetica", "bold");
+                doc.setFontSize(8.5);
+                doc.setTextColor(16, 185, 129);
+                doc.text("ABONADO:", totalBoxX + 4, ty);
+                doc.text(`Bs. ${paidVal.toFixed(2)}`, rightAlignX - 4, ty, { align: 'right' });
+
+                ty += 4.5;
+                doc.setTextColor(217, 119, 6);
+                doc.text("SALDO PENDIENTE:", totalBoxX + 4, ty);
+                doc.text(`Bs. ${remainingVal.toFixed(2)}`, rightAlignX - 4, ty, { align: 'right' });
+            }
 
             // USD conversion underneath
+            ty += 4.8;
             const activeExRate = sale.exchange_rate || exchangeRate || 6.96;
-            const usdTotalAmount = totalItemsSum / activeExRate;
+            const usdTotalAmount = finalTotalVal / activeExRate;
             doc.setFont("helvetica", "normal");
-            doc.setFontSize(8);
+            doc.setFontSize(7.5);
             doc.setTextColor(100, 116, 139);
-            doc.text(`Equivalente en Dólares:`, totalBoxX + 4, y + 15.5);
+            doc.text(`Equivalente en USD (T.C. ${activeExRate}):`, totalBoxX + 4, ty);
             doc.setFont("helvetica", "bold");
-            doc.text(`$ ${usdTotalAmount.toFixed(2)} USD`, rightAlignX - 4, y + 15.5, { align: 'right' });
+            doc.text(`$ ${usdTotalAmount.toFixed(2)} USD`, rightAlignX - 4, ty, { align: 'right' });
 
             // Terms / Footer text section at the bottom
-            y = Math.max(y + 26, 230); // Push to bottom of the letter page
+            y = Math.max(y + totalBoxHeight + 10, 230);
 
             doc.setDrawColor(226, 232, 240);
             doc.setLineWidth(0.3);
@@ -773,16 +899,18 @@ export default function CuentasPorCobrarView() {
             doc.setFont("helvetica", "bold");
             doc.setFontSize(8);
             doc.setTextColor(100, 116, 139);
-            doc.text("TÉRMINOS Y CONDICIONES:", margin, y);
+            doc.text("TÉRMINOS Y CONDICIONES COMERCIALES:", margin, y);
 
             y += 4;
             doc.setFont("helvetica", "italic");
             doc.setFontSize(7.5);
             doc.setTextColor(148, 163, 184);
             
-            doc.text("• Los precios cotizados corresponden a una Venta Pendiente guardada para su posterior procesamiento y despacho.", margin, y);
-            doc.text("• Esta cotización/proforma no es válida como factura de compra ni recibo oficial hasta que se liquide el saldo.", margin, y + 3.5);
-            doc.text("• Los productos reservados están sujetos a los plazos de entrega pactados y la disponibilidad física en almacén.", margin, y + 7);
+            doc.text(`• Documento emitido en modalidad: ${docTitle}. No equivale a factura fiscal hasta liquidar la operación.`, margin, y);
+            doc.text(isReserved
+                ? "• Las unidades detalladas se encuentran físicamente reservadas en almacén hasta la fecha de vigencia acordada."
+                : "• Esta cotización es informativa y está sujeta a disponibilidad de stock al momento de confirmar el pedido.", margin, y + 3.5);
+            doc.text("• Para confirmar su pedido o coordinar el envío, comuníquese presentando el número de documento indicado arriba.", margin, y + 7);
 
             if (tpl.footerText) {
                 y += 12;
@@ -796,8 +924,8 @@ export default function CuentasPorCobrarView() {
                 });
             }
 
-            doc.save(`Cotizacion_Pedido_${sale.id}_${sale.client_name.replace(/\s+/g, '_')}.pdf`);
-            showToast('✓ Cotización PDF descargada correctamente.');
+            doc.save(`${docPrefix}_${sale.id}_${(sale.client_name || 'Cliente').replace(/\s+/g, '_')}.pdf`);
+            showToast('✓ Proforma / Documento PDF descargado correctamente.');
         } catch (err: any) {
             console.error(err);
             showToast('Error generando PDF', 'error');
@@ -1151,6 +1279,11 @@ export default function CuentasPorCobrarView() {
         setEditedDestination(sale.destination || '');
         setEditedClientPhone(sale.client_phone || '');
         setEditedTransportCompany(sale.transport_company || '');
+        setEditedOrderType(sale.order_type || 'envio');
+        setEditedReserveStock(Number(sale.reserve_stock ?? 1) === 1);
+        setEditedValidUntil(sale.valid_until ? String(sale.valid_until).split('T')[0] : '');
+        setEditedDiscount(Number(sale.discount || 0));
+        setEditedNotes(sale.notes || '');
         setEditedItems(sale.items.map((i: any) => ({
             product_id: i.product_id,
             product_name: i.product_name,
@@ -1205,18 +1338,24 @@ export default function CuentasPorCobrarView() {
     const handleSaveEditPending = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!editingSale) return;
-        if (!editedClientName.trim() || !editedDestination.trim()) {
-            showToast('⚠️ Nombre del cliente y destino son requeridos', 'error');
+        if (!editedClientName.trim()) {
+            showToast('⚠️ El nombre del cliente es requerido', 'error');
+            return;
+        }
+        if (editedOrderType === 'envio' && !editedDestination.trim()) {
+            showToast('⚠️ El destino de envío es requerido para pedidos de despacho', 'error');
             return;
         }
         if (editedItems.length === 0) {
-            showToast('⚠️ Debe haber al menos un artículo en el pedido', 'error');
+            showToast('⚠️ Debe haber al menos un artículo en el registro', 'error');
             return;
         }
 
         setSavingEdit(true);
-        // Calculate new total
-        const newTotal = editedItems.reduce((acc, item) => acc + (item.quantity * item.price), 0);
+        const newSubtotal = editedItems.reduce((acc, item) => acc + (item.quantity * item.price), 0);
+        const cleanDiscount = Math.min(newSubtotal, Math.max(0, Number(editedDiscount) || 0));
+        const newTotal = Math.max(0, newSubtotal - cleanDiscount);
+        const defaultDest = editedOrderType === 'cotizacion' ? 'Cotización en Mostrador' : editedOrderType === 'reserva' ? 'Reserva en Tienda' : 'Envío por definir';
 
         try {
             const res = await fetch(`/api/pending-sales/${editingSale.id}`, {
@@ -1224,11 +1363,15 @@ export default function CuentasPorCobrarView() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     client_name: editedClientName.trim(),
-                    destination: editedDestination.trim(),
+                    destination: editedDestination.trim() || defaultDest,
                     client_phone: editedClientPhone.trim() || null,
                     transport_company: editedTransportCompany.trim() || null,
+                    order_type: editedOrderType,
+                    reserve_stock: editedReserveStock ? 1 : 0,
+                    valid_until: editedValidUntil || null,
+                    notes: editedNotes.trim() || null,
                     total: newTotal,
-                    discount: 0,
+                    discount: cleanDiscount,
                     items: editedItems.map(i => ({
                         product_id: i.product_id,
                         quantity: i.quantity,
@@ -1238,9 +1381,10 @@ export default function CuentasPorCobrarView() {
             });
 
             if (res.ok) {
-                showToast('✓ Pedido editado y actualizado con éxito.');
+                showToast('✓ Registro actualizado con éxito.');
                 setEditingSale(null);
                 loadPendingSales();
+                fetchProducts?.(undefined, true);
             } else {
                 const err = await res.json();
                 showToast(err.error || 'No se pudo actualizar el pedido', 'error');
@@ -1284,6 +1428,7 @@ export default function CuentasPorCobrarView() {
                 setFinalizePaymentMethod('Efectivo');
                 loadPendingSales();
                 loadAccountsReceivable();
+                fetchProducts?.(undefined, true);
             } else {
                 const err = await res.json();
                 showToast(err.error || 'Error al finalizar la venta', 'error');
@@ -1296,16 +1441,29 @@ export default function CuentasPorCobrarView() {
         }
     };
 
-    // Filter pending sales list based on search query
+    const isPendingSaleExpired = (s: any) => {
+        if (!s.valid_until) return false;
+        const expDate = new Date(String(s.valid_until).split('T')[0] + 'T23:59:59');
+        return !isNaN(expDate.getTime()) && expDate < new Date();
+    };
+
+    // Filter pending sales list based on search query & mode filter
     const filteredPendingSales = pendingSales.filter(s => {
+        const orderType = s.order_type || 'envio';
+        const expired = isPendingSaleExpired(s);
+        if (pendingModeFilter === 'vencidas' && !expired) return false;
+        if (pendingModeFilter !== 'todos' && pendingModeFilter !== 'vencidas' && orderType !== pendingModeFilter) return false;
+
         const query = pendingSearchQuery.toLowerCase().trim();
         if (!query) return true;
         const searchTerms = query.split(/\s+/);
-        const searchableText = `${s.client_name} ${s.destination} ${s.client_phone || ""} ${s.id}`.toLowerCase();
+        const searchableText = `${s.client_name} ${s.destination} ${s.client_phone || ""} ${s.notes || ""} ${s.id}`.toLowerCase();
         return searchTerms.every(term => searchableText.includes(term));
     });
 
     const totalPendingValueSum = pendingSales.reduce((acc, curr) => acc + curr.total, 0);
+    const totalReservedCount = pendingSales.filter(s => Number(s.reserve_stock ?? 1) === 1).length;
+    const totalQuotesOnlyCount = pendingSales.filter(s => Number(s.reserve_stock ?? 1) === 0).length;
 
     // Filter credit debts based on search query and status tab
     const filteredDebts = debts.filter(d => {
@@ -1332,10 +1490,10 @@ export default function CuentasPorCobrarView() {
                 <div>
                     <h1 className="text-lg md:text-xl font-sans font-black tracking-tight text-slate-850 dark:text-white uppercase flex items-center gap-2">
                         <Clock className="text-indigo-600 animate-pulse" size={18} />
-                        Módulo de Ventas Pendientes y CxC
+                        Módulo de Ventas Pendientes, Cotizaciones y CxC
                     </h1>
                     <p className="text-[10.5px] font-bold text-slate-400 mt-1 uppercase tracking-wider font-mono">
-                        Gestión unificada de envíos retenidos, pedidos de clientes y créditos pendientes por cobrar.
+                        Gestión profesional de cotizaciones con vigencia, reservas de stock, envíos retenidos y créditos por cobrar.
                     </p>
                 </div>
 
@@ -1350,7 +1508,7 @@ export default function CuentasPorCobrarView() {
                         }`}
                     >
                         <Truck size={13} />
-                        Pedidos / Ventas Pendientes ({pendingSales.length})
+                        Cotizaciones / Reservas / Envíos ({pendingSales.length})
                     </button>
                     <button
                         onClick={() => setActiveTab('creditos')}
@@ -1370,15 +1528,27 @@ export default function CuentasPorCobrarView() {
             {activeTab === 'pendientes' ? (
                 <>
                     {/* Ventas Pendientes KPIs */}
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
                         <div className="bg-white dark:bg-[#0c111e] border border-slate-200/60 dark:border-slate-850 p-3.5 rounded-2xl flex items-center gap-3.5 shadow-xs">
                             <div className="w-10 h-10 rounded-xl bg-amber-500/10 flex items-center justify-center text-amber-500 shrink-0">
                                 <Clock size={18} />
                             </div>
                             <div>
-                                <span className="text-[8.5px] font-black uppercase text-slate-400 block tracking-wider">Pedidos Retenidos / Pendientes</span>
-                                <span className="text-base font-black font-mono text-slate-800 dark:text-slate-200 block mt-0.5">
-                                    {pendingSales.length} Envío(s)
+                                <span className="text-[8.5px] font-black uppercase text-slate-400 block tracking-wider">Con Reserva de Stock</span>
+                                <span className="text-base font-black font-mono text-amber-600 dark:text-amber-400 block mt-0.5">
+                                    {totalReservedCount} Registro(s)
+                                </span>
+                            </div>
+                        </div>
+
+                        <div className="bg-white dark:bg-[#0c111e] border border-slate-200/60 dark:border-slate-850 p-3.5 rounded-2xl flex items-center gap-3.5 shadow-xs">
+                            <div className="w-10 h-10 rounded-xl bg-blue-500/10 flex items-center justify-center text-blue-500 shrink-0">
+                                <FileText size={18} />
+                            </div>
+                            <div>
+                                <span className="text-[8.5px] font-black uppercase text-slate-400 block tracking-wider">Solo Cotización (Sin Reserva)</span>
+                                <span className="text-base font-black font-mono text-blue-600 dark:text-blue-400 block mt-0.5">
+                                    {totalQuotesOnlyCount} Proforma(s)
                                 </span>
                             </div>
                         </div>
@@ -1397,18 +1567,40 @@ export default function CuentasPorCobrarView() {
                     </div>
 
                     {/* Filter controls */}
-                    <div className="bg-white dark:bg-[#0c111e] p-3 rounded-2xl border border-slate-200/60 dark:border-slate-850 flex items-center">
-                        <div className="relative w-full">
+                    <div className="bg-white dark:bg-[#0c111e] p-3 rounded-2xl border border-slate-200/60 dark:border-slate-850 flex flex-col md:flex-row gap-3 items-center justify-between">
+                        <div className="relative w-full md:w-96">
                             <span className="absolute inset-y-0 left-0 pl-3.5 flex items-center text-slate-400 pointer-events-none">
                                 <Search size={14} />
                             </span>
                             <input 
                                 type="text" 
-                                placeholder="Buscar por cliente, destino de envío o ID de cotización..." 
+                                placeholder="Buscar por cliente, destino, notas o #ID..." 
                                 className="pl-10 pr-4 py-2 bg-slate-50/50 dark:bg-black/10 border border-slate-200 dark:border-slate-850 rounded-xl focus:outline-none focus:border-indigo-500 dark:text-white text-xs transition placeholder-slate-400 font-semibold w-full"
                                 value={pendingSearchQuery}
                                 onChange={(e) => setPendingSearchQuery(e.target.value)}
                             />
+                        </div>
+
+                        <div className="flex flex-wrap gap-1.5 w-full md:w-auto">
+                            {[
+                                { id: 'todos', label: `Todos (${pendingSales.length})` },
+                                { id: 'cotizacion', label: `Cotizaciones (${pendingSales.filter(s => (s.order_type || 'envio') === 'cotizacion').length})` },
+                                { id: 'reserva', label: `Reservas (${pendingSales.filter(s => (s.order_type || 'envio') === 'reserva').length})` },
+                                { id: 'envio', label: `Envíos (${pendingSales.filter(s => (s.order_type || 'envio') === 'envio').length})` },
+                                { id: 'vencidas', label: `Vencidas (${pendingSales.filter(s => isPendingSaleExpired(s)).length})` }
+                            ].map(tab => (
+                                <button
+                                    key={tab.id}
+                                    onClick={() => setPendingModeFilter(tab.id as any)}
+                                    className={`px-3 py-1.5 rounded-xl text-[10px] font-extrabold uppercase tracking-wider transition cursor-pointer ${
+                                        pendingModeFilter === tab.id
+                                            ? 'bg-indigo-600 text-white shadow-xs'
+                                            : 'bg-slate-50 dark:bg-slate-900 border border-slate-200/60 dark:border-slate-800 text-slate-500 hover:bg-slate-100'
+                                    }`}
+                                >
+                                    {tab.label}
+                                </button>
+                            ))}
                         </div>
                     </div>
 
@@ -1422,10 +1614,10 @@ export default function CuentasPorCobrarView() {
                             <div className="p-8 my-auto">
                                 <EmptyState
                                     icon={Truck}
-                                    title="No hay pedidos o ventas pendientes"
-                                    description="No se encontraron registros de pedidos en espera o retenidos que coincidan con la búsqueda activa."
-                                    actionLabel={pendingSearchQuery ? "Limpiar Búsqueda" : undefined}
-                                    onAction={pendingSearchQuery ? () => setPendingSearchQuery('') : undefined}
+                                    title="No hay registros en esta categoría"
+                                    description="No se encontraron cotizaciones, reservas o envíos pendientes que coincidan con el filtro activo."
+                                    actionLabel={(pendingSearchQuery || pendingModeFilter !== 'todos') ? "Restablecer Filtros" : undefined}
+                                    onAction={(pendingSearchQuery || pendingModeFilter !== 'todos') ? () => { setPendingSearchQuery(''); setPendingModeFilter('todos'); } : undefined}
                                 />
                             </div>
                         ) : (
@@ -1434,30 +1626,86 @@ export default function CuentasPorCobrarView() {
                                     {filteredPendingSales.map(sale => {
                                         const paid = Number(sale.paid_amount || 0);
                                         const total = Number(sale.total || 0);
+                                        const discount = Number(sale.discount || 0);
                                         const remaining = Math.max(0, total - paid);
                                         const pct = total > 0 ? Math.min(100, Math.round((paid / total) * 100)) : 0;
+                                        const orderType = sale.order_type || 'envio';
+                                        const isReserved = Number(sale.reserve_stock ?? 1) === 1;
+                                        const expired = isPendingSaleExpired(sale);
+                                        const modeLabel = orderType === 'cotizacion' ? 'Cotización' : orderType === 'reserva' ? 'Reserva' : 'Envío';
+                                        const modeBadgeClass = orderType === 'cotizacion'
+                                            ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20'
+                                            : orderType === 'reserva'
+                                            ? 'bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20'
+                                            : 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20';
                                         
                                         return (
                                             <div 
                                                 key={sale.id} 
-                                                className="bg-white dark:bg-[#0c111e]/80 border border-slate-200/70 dark:border-slate-850/70 rounded-3xl p-4 sm:p-5 flex flex-col justify-between gap-4 transition-all duration-200 hover:shadow-lg hover:border-slate-300 dark:hover:border-slate-700/60 relative group"
+                                                className={`bg-white dark:bg-[#0c111e]/80 border rounded-3xl p-4 sm:p-5 flex flex-col justify-between gap-3.5 transition-all duration-200 hover:shadow-lg relative group ${
+                                                    expired
+                                                        ? 'border-rose-300 dark:border-rose-900/60'
+                                                        : 'border-slate-200/70 dark:border-slate-850/70 hover:border-slate-300 dark:hover:border-slate-700/60'
+                                                }`}
                                             >
                                                 {/* Header info */}
                                                 <div className="flex flex-col gap-2.5">
-                                                    <div className="flex justify-between items-center">
-                                                        <div className="bg-indigo-50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400 text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-xl border border-indigo-100/50 dark:border-indigo-900/30">
-                                                            Pedido #{sale.id}
+                                                    <div className="flex justify-between items-center gap-1 flex-wrap">
+                                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                                            <div className="bg-indigo-50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400 text-[10px] font-black uppercase tracking-wider px-2.5 py-1 rounded-xl border border-indigo-100/50 dark:border-indigo-900/30">
+                                                                #{sale.id}
+                                                            </div>
+                                                            <span className={`text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-lg border ${modeBadgeClass}`}>
+                                                                {modeLabel}
+                                                            </span>
                                                         </div>
-                                                        <span className="text-[9px] text-slate-400 font-mono font-bold flex items-center gap-1">
-                                                            <Clock size={11} className="text-slate-400" />
-                                                            {new Date(sale.created_at).toLocaleString('es-BO', {
-                                                                day: '2-digit',
-                                                                month: '2-digit',
-                                                                year: 'numeric',
-                                                                hour: '2-digit',
-                                                                minute: '2-digit'
-                                                            })}
-                                                        </span>
+                                                        <div className="flex items-center gap-1.5">
+                                                            <span className="text-[9px] text-slate-400 font-mono font-bold flex items-center gap-1">
+                                                                <Clock size={11} className="text-slate-400" />
+                                                                {new Date(sale.created_at).toLocaleString('es-BO', {
+                                                                    day: '2-digit',
+                                                                    month: '2-digit',
+                                                                    year: 'numeric',
+                                                                    hour: '2-digit',
+                                                                    minute: '2-digit'
+                                                                })}
+                                                            </span>
+                                                            <button
+                                                                onClick={() => handleDeletePendingSale(sale.id)}
+                                                                className="p-1 text-slate-400 hover:text-rose-500 hover:bg-rose-500/10 rounded-lg transition cursor-pointer"
+                                                                title="Eliminar este registro y liberar reserva"
+                                                            >
+                                                                <Trash2 size={13} />
+                                                            </button>
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Stock Reservation & Validity Banner */}
+                                                    <div className="flex flex-wrap items-center justify-between gap-1.5">
+                                                        <button
+                                                            type="button"
+                                                            disabled={togglingReserveId === sale.id}
+                                                            onClick={() => handleToggleReserveStock(sale)}
+                                                            className={`px-2.5 py-1 rounded-xl text-[9px] font-extrabold uppercase tracking-wider border transition cursor-pointer flex items-center gap-1 ${
+                                                                isReserved
+                                                                    ? 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/25 hover:bg-amber-500/20'
+                                                                    : 'bg-slate-100 dark:bg-slate-900 text-slate-500 dark:text-slate-400 border-slate-200 dark:border-slate-800 hover:bg-slate-200'
+                                                            }`}
+                                                            title="Haz clic para activar o desactivar la reserva física de stock de este pedido"
+                                                        >
+                                                            <span>{isReserved ? '🔒 Stock Reservado' : '📄 Sin Reserva Stock'}</span>
+                                                            <span className="underline text-[8px] opacity-80 ml-0.5">(Cambiar)</span>
+                                                        </button>
+
+                                                        {sale.valid_until && (
+                                                            <span className={`px-2 py-0.5 rounded-lg text-[9px] font-mono font-bold border uppercase ${
+                                                                expired
+                                                                    ? 'bg-rose-500/15 text-rose-600 dark:text-rose-400 border-rose-500/30'
+                                                                    : 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20'
+                                                            }`}>
+                                                                {expired ? `⚠️ Vencida (${String(sale.valid_until).split('T')[0]})` : `⏳ Vigente: ${String(sale.valid_until).split('T')[0]}`}
+                                                            </span>
+                                                        )}
                                                     </div>
 
                                                     {/* Client and destination details */}
@@ -1484,12 +1732,17 @@ export default function CuentasPorCobrarView() {
                                                                 <span className="leading-normal break-words">{sale.destination}</span>
                                                             </div>
                                                         )}
+                                                        {sale.notes && (
+                                                            <div className="text-[10px] text-indigo-600 dark:text-indigo-400 font-semibold italic border-t border-slate-100/60 dark:border-slate-800/40 pt-1">
+                                                                📝 {sale.notes}
+                                                            </div>
+                                                        )}
                                                     </div>
 
                                                     {/* Product descriptions/items */}
                                                     <div>
-                                                        <span className="text-[9px] font-black uppercase text-slate-400 dark:text-slate-500 tracking-wider block mb-1.5">Artículos del Pedido</span>
-                                                        <div className="flex flex-col gap-1.5 pr-0.5">
+                                                        <span className="text-[9px] font-black uppercase text-slate-400 dark:text-slate-500 tracking-wider block mb-1.5">Artículos ({sale.items?.length || 0})</span>
+                                                        <div className="flex flex-col gap-1.5 pr-0.5 max-h-40 overflow-y-auto">
                                                             {sale.items && sale.items.map((it: any, idx: number) => (
                                                                 <div key={idx} className="flex justify-between items-center text-[10.5px] bg-slate-50/40 dark:bg-black/10 px-2.5 py-1.5 rounded-xl border border-slate-150/40 dark:border-slate-850/40 transition hover:bg-slate-50 dark:hover:bg-black/20">
                                                                     <div className="flex flex-col gap-0.5 min-w-0 flex-1">
@@ -1506,7 +1759,13 @@ export default function CuentasPorCobrarView() {
                                                 </div>
 
                                                 {/* Financial summary blocks */}
-                                                <div className="flex flex-col gap-2.5 border-t border-slate-100 dark:border-slate-850/50 pt-3.5 mt-1">
+                                                <div className="flex flex-col gap-2.5 border-t border-slate-100 dark:border-slate-850/50 pt-3 mt-1">
+                                                    {discount > 0 && (
+                                                        <div className="flex justify-between items-center text-[10px] font-bold text-rose-500 px-1">
+                                                            <span>Descuento aplicado:</span>
+                                                            <span className="font-mono">-Bs. {discount.toFixed(2)}</span>
+                                                        </div>
+                                                    )}
                                                     <div className="grid grid-cols-3 gap-1 bg-slate-50/50 dark:bg-black/20 p-2 rounded-2xl border border-slate-100 dark:border-slate-900/30 text-center">
                                                         <div className="flex flex-col">
                                                             <span className="text-[8px] font-black uppercase text-slate-400">Total</span>
@@ -1539,7 +1798,7 @@ export default function CuentasPorCobrarView() {
                                                     )}
 
                                                     {/* Card action buttons */}
-                                                    <div className="grid grid-cols-4 gap-1.5 mt-2">
+                                                    <div className="grid grid-cols-4 gap-1.5 mt-1">
                                                         {/* Ticket / Printing options */}
                                                         <button
                                                             onClick={() => generatePendingThermalTicket(sale)}
@@ -1553,7 +1812,7 @@ export default function CuentasPorCobrarView() {
                                                         <button
                                                             onClick={() => generateQuotePDF(sale)}
                                                             className="p-2 bg-slate-50 dark:bg-slate-900/50 hover:bg-slate-100 dark:hover:bg-slate-800/50 text-slate-600 dark:text-slate-400 border border-slate-200/60 dark:border-slate-800/60 rounded-xl transition cursor-pointer flex flex-col items-center gap-1 justify-center"
-                                                            title="Imprimir Cotización/Proforma PDF"
+                                                            title="Imprimir Cotización/Proforma PDF Carta"
                                                         >
                                                             <FileText size={13} />
                                                             <span className="text-[8px] font-extrabold uppercase">Proforma</span>
@@ -1599,7 +1858,7 @@ export default function CuentasPorCobrarView() {
                                                         <button
                                                             onClick={() => handleStartEdit(sale)}
                                                             className="p-2.5 bg-amber-50/40 dark:bg-amber-950/10 hover:bg-amber-100/40 dark:hover:bg-amber-900/20 text-amber-600 hover:text-amber-500 border border-amber-200/30 dark:border-amber-800/30 rounded-xl transition cursor-pointer flex items-center gap-1.5 justify-center"
-                                                            title="Editar pedido"
+                                                            title="Editar cotización o pedido"
                                                         >
                                                             <Edit size={12} />
                                                             <span className="text-[9px] font-black uppercase font-bold">Editar</span>
@@ -1609,14 +1868,14 @@ export default function CuentasPorCobrarView() {
                                                         <button
                                                             onClick={() => setFinalizingSale(sale)}
                                                             className="p-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl transition cursor-pointer flex items-center gap-1.5 justify-center font-sans shadow-sm shadow-emerald-500/10"
-                                                            title="Finalizar Venta / Despachar"
+                                                            title="Convertir en Venta Oficial / Cobrar"
                                                         >
                                                             <CheckCircle2 size={12} />
                                                             <span className="text-[9px] font-black uppercase">Cobrar</span>
                                                         </button>
                                                     </div>
 
-                                                    <div className="mt-1.5">
+                                                    <div className="mt-1">
                                                         {/* Unificado: Orden Almacén (PDF + WhatsApp) */}
                                                         <button
                                                             onClick={() => generateWarehouseOrderPDF(sale)}
@@ -1884,7 +2143,59 @@ export default function CuentasPorCobrarView() {
                                 
                                 {/* Left Side: Client fields & Selected products */}
                                 <div className="flex-1 flex flex-col gap-3">
-                                    <span className="text-[10px] font-extrabold text-slate-450 uppercase tracking-widest border-b border-slate-100 dark:border-slate-850 pb-1">Datos del Envío</span>
+                                    <span className="text-[10px] font-extrabold text-slate-450 uppercase tracking-widest border-b border-slate-100 dark:border-slate-850 pb-1">Modalidad, Vigencia y Datos del Cliente</span>
+
+                                    <div className="grid grid-cols-3 gap-2">
+                                        {[
+                                            { id: 'cotizacion', label: 'Cotización' },
+                                            { id: 'reserva', label: 'Reserva' },
+                                            { id: 'envio', label: 'Pedido Envío' }
+                                        ].map(m => (
+                                            <button
+                                                key={m.id}
+                                                type="button"
+                                                onClick={() => {
+                                                    setEditedOrderType(m.id as any);
+                                                    if (m.id === 'cotizacion') setEditedReserveStock(false);
+                                                    else setEditedReserveStock(true);
+                                                }}
+                                                className={`py-2 px-2.5 rounded-xl text-[10px] font-black uppercase border transition cursor-pointer ${
+                                                    editedOrderType === m.id
+                                                        ? 'bg-indigo-600 text-white border-indigo-500'
+                                                        : 'bg-slate-50 dark:bg-black/20 border-slate-200 dark:border-slate-800 text-slate-500'
+                                                }`}
+                                            >
+                                                {m.label}
+                                            </button>
+                                        ))}
+                                    </div>
+
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-center">
+                                        <button
+                                            type="button"
+                                            onClick={() => setEditedReserveStock(!editedReserveStock)}
+                                            className={`p-2.5 rounded-xl border text-left flex items-center justify-between transition cursor-pointer ${
+                                                editedReserveStock
+                                                    ? 'bg-amber-500/10 border-amber-500/30 text-amber-600 dark:text-amber-400'
+                                                    : 'bg-slate-50 dark:bg-black/20 border-slate-200 dark:border-slate-800 text-slate-500'
+                                            }`}
+                                        >
+                                            <span className="text-[10px] font-black uppercase">
+                                                {editedReserveStock ? '🔒 Reservar Stock' : '📄 No Reservar Stock'}
+                                            </span>
+                                            <span className="text-[9px] font-bold underline">Cambiar</span>
+                                        </button>
+
+                                        <div className="flex flex-col gap-0.5">
+                                            <label className="text-[8.5px] font-black text-slate-400 uppercase tracking-widest">Válido hasta (Opcional)</label>
+                                            <input
+                                                type="date"
+                                                value={editedValidUntil}
+                                                onChange={(e) => setEditedValidUntil(e.target.value)}
+                                                className="bg-slate-50 dark:bg-black/20 border border-slate-200 dark:border-slate-800 rounded-xl p-1.5 text-xs font-bold focus:outline-none focus:border-indigo-500 dark:text-slate-200"
+                                            />
+                                        </div>
+                                    </div>
                                     
                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                                         <div className="flex flex-col gap-1">
@@ -1908,30 +2219,58 @@ export default function CuentasPorCobrarView() {
                                         </div>
                                     </div>
 
-                                    <div className="flex flex-col gap-1">
-                                        <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Dirección Destino *</label>
-                                        <input 
-                                            type="text"
-                                            required
-                                            value={editedDestination}
-                                            onChange={(e) => setEditedDestination(e.target.value)}
-                                            className="bg-slate-50 dark:bg-black/20 border border-slate-200 dark:border-slate-800 rounded-xl p-2.5 text-xs font-bold focus:outline-none focus:border-indigo-500 dark:text-slate-200"
-                                        />
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                        <div className="flex flex-col gap-1">
+                                            <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">
+                                                {editedOrderType === 'envio' ? 'Dirección Destino *' : 'Lugar / Referencia (Opcional)'}
+                                            </label>
+                                            <input 
+                                                type="text"
+                                                required={editedOrderType === 'envio'}
+                                                value={editedDestination}
+                                                onChange={(e) => setEditedDestination(e.target.value)}
+                                                className="bg-slate-50 dark:bg-black/20 border border-slate-200 dark:border-slate-800 rounded-xl p-2 text-xs font-bold focus:outline-none focus:border-indigo-500 dark:text-slate-200"
+                                            />
+                                        </div>
+
+                                        <div className="flex flex-col gap-1">
+                                            <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Empresa de Transporte</label>
+                                            <input 
+                                                type="text"
+                                                value={editedTransportCompany}
+                                                onChange={(e) => setEditedTransportCompany(e.target.value)}
+                                                placeholder="Ej. Trans Copacabana, Delivery..."
+                                                className="bg-slate-50 dark:bg-black/20 border border-slate-200 dark:border-slate-800 rounded-xl p-2 text-xs font-bold focus:outline-none focus:border-indigo-500 dark:text-slate-200"
+                                            />
+                                        </div>
                                     </div>
 
-                                    <div className="flex flex-col gap-1">
-                                        <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Empresa de Transporte</label>
-                                        <input 
-                                            type="text"
-                                            value={editedTransportCompany}
-                                            onChange={(e) => setEditedTransportCompany(e.target.value)}
-                                            placeholder="Ej. Trans Copacabana, Delivery Moto, etc."
-                                            className="bg-slate-50 dark:bg-black/20 border border-slate-200 dark:border-slate-800 rounded-xl p-2.5 text-xs font-bold focus:outline-none focus:border-indigo-500 dark:text-slate-200"
-                                        />
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                        <div className="flex flex-col gap-1">
+                                            <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Descuento Comercial (Bs.)</label>
+                                            <input 
+                                                type="number"
+                                                step="0.50"
+                                                min="0"
+                                                value={editedDiscount}
+                                                onChange={(e) => setEditedDiscount(Math.max(0, Number(e.target.value) || 0))}
+                                                className="bg-slate-50 dark:bg-black/20 border border-slate-200 dark:border-slate-800 rounded-xl p-2 text-xs font-mono font-bold focus:outline-none focus:border-indigo-500 dark:text-slate-200"
+                                            />
+                                        </div>
+                                        <div className="flex flex-col gap-1">
+                                            <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Observaciones / Notas</label>
+                                            <input 
+                                                type="text"
+                                                value={editedNotes}
+                                                onChange={(e) => setEditedNotes(e.target.value)}
+                                                placeholder="Condiciones, entrega..."
+                                                className="bg-slate-50 dark:bg-black/20 border border-slate-200 dark:border-slate-800 rounded-xl p-2 text-xs font-bold focus:outline-none focus:border-indigo-500 dark:text-slate-200"
+                                            />
+                                        </div>
                                     </div>
 
                                     <span className="text-[10px] font-extrabold text-slate-450 uppercase tracking-widest border-b border-slate-100 dark:border-slate-850 pb-1 mt-1">Artículos en este pedido</span>
-                                    <div className="flex flex-col gap-2 overflow-y-auto max-h-[220px] pr-1">
+                                    <div className="flex flex-col gap-2 overflow-y-auto max-h-[180px] pr-1">
                                         {editedItems.length === 0 ? (
                                             <span className="text-[10px] text-slate-400 italic text-center py-6">No hay artículos agregados.</span>
                                         ) : (
@@ -2026,10 +2365,10 @@ export default function CuentasPorCobrarView() {
 
                             {/* Modal Footer with dynamically computed totals */}
                             <div className="shrink-0 flex flex-col sm:flex-row items-center justify-between border-t border-slate-150 dark:border-slate-850 pt-4 gap-3">
-                                <div className="flex items-center gap-2">
+                                <div className="flex items-center gap-3 flex-wrap">
                                     <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Nuevo Total Calculado:</span>
                                     <span className="font-mono text-sm font-black text-indigo-600 dark:text-indigo-400">
-                                        Bs. {editedItems.reduce((acc, i) => acc + (i.quantity * i.price), 0).toFixed(2)}
+                                        Bs. {Math.max(0, editedItems.reduce((acc, i) => acc + (i.quantity * i.price), 0) - (Number(editedDiscount) || 0)).toFixed(2)}
                                     </span>
                                 </div>
                                 <div className="flex gap-2.5 w-full sm:w-auto">

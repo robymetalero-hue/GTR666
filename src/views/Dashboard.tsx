@@ -4,7 +4,8 @@ import { useAppContext } from '../context/AppContext';
 import { 
     TrendingUp, AlertTriangle, RefreshCw, BarChart2, ShieldAlert, DollarSign, Wallet, 
     ArrowUpRight, ArrowDownRight, Sparkles, BrainCircuit, Loader2, Clock, Users,
-    Filter, CreditCard, ShoppingBag, Layers, Percent, Zap, ChevronRight, BarChart3, PieChart as PieIcon
+    Filter, CreditCard, ShoppingBag, Layers, Percent, Zap, ChevronRight, BarChart3, PieChart as PieIcon,
+    Share2, Copy, Download, Check, X, MessageSquare
 } from 'lucide-react';
 import { 
     AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
@@ -79,6 +80,23 @@ export default function Dashboard() {
     const [insights, setInsights] = useState<any[]>([]);
     const [loadingInsights, setLoadingInsights] = useState(false);
     const [notification, setNotification] = useState<{ message: string; type: 'success' | 'warn' | 'error' } | null>(null);
+
+    // Profitability Report & Executive Summary states
+    const [profitabilityData, setProfitabilityData] = useState<{ byCategory: any[]; bySeller: any[]; totals: any }>({
+        byCategory: [],
+        bySeller: [],
+        totals: { units_sold: 0, gross_revenue: 0, total_discounts: 0, net_revenue: 0, total_cost: 0, net_profit: 0, margin_pct: 0 }
+    });
+    const [loadingProfitability, setLoadingProfitability] = useState(false);
+    const [profitabilityTab, setProfitabilityTab] = useState<'categories' | 'sellers'>('categories');
+
+    const [isExecSummaryOpen, setIsExecSummaryOpen] = useState(false);
+    const [execSummaryDate, setExecSummaryDate] = useState<string>(() => {
+        const d = new Date();
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    });
+    const [execSummaryData, setExecSummaryData] = useState<any | null>(null);
+    const [loadingExecSummary, setLoadingExecSummary] = useState(false);
 
     const showNotification = (message: string, type: 'success' | 'warn' | 'error' = 'success') => {
         setNotification({ message, type });
@@ -167,9 +185,68 @@ export default function Dashboard() {
         }
     };
 
+    const loadProfitability = async () => {
+        setLoadingProfitability(true);
+        try {
+            const res = await fetch(`/api/reports/profitability?startDate=${dateRange.startDate}&endDate=${dateRange.endDate}`);
+            if (res.ok) {
+                const data = await res.json();
+                if (data) setProfitabilityData(data);
+            }
+        } catch {
+            // Keep existing profitability state
+        } finally {
+            setLoadingProfitability(false);
+        }
+    };
+
+    const loadExecutiveSummary = async (targetDate?: string) => {
+        const d = targetDate || execSummaryDate;
+        setLoadingExecSummary(true);
+        try {
+            const res = await fetch(`/api/reports/executive-summary?date=${d}`);
+            if (res.ok) {
+                const data = await res.json();
+                setExecSummaryData(data);
+            }
+        } catch {
+            showNotification("No se pudo cargar el resumen ejecutivo del día.", "error");
+        } finally {
+            setLoadingExecSummary(false);
+        }
+    };
+
+    const exportProfitabilityCSV = () => {
+        const isCat = profitabilityTab === 'categories';
+        const rows = isCat ? profitabilityData.byCategory : profitabilityData.bySeller;
+        if (!rows || rows.length === 0) {
+            showNotification("No hay datos de rentabilidad para exportar en este rango.", "warn");
+            return;
+        }
+        const headers = isCat
+            ? ['Categoria', 'Unidades Vendidas', 'Ingresos Brutos (USD)', 'Descuentos (USD)', 'Ventas Netas (USD)', 'Costo Mercaderia (USD)', 'Utilidad Neta (USD)', 'Margen (%)']
+            : ['Vendedor', 'Transacciones', 'Unidades Vendidas', 'Ingresos Brutos (USD)', 'Descuentos (USD)', 'Ventas Netas (USD)', 'Costo Mercaderia (USD)', 'Utilidad Neta (USD)', 'Margen (%)'];
+
+        const csvLines = [
+            headers.join(','),
+            ...rows.map((r: any) => isCat
+                ? [`"${r.category}"`, r.units_sold, r.gross_revenue.toFixed(2), r.allocated_discount.toFixed(2), r.net_revenue.toFixed(2), r.total_cost.toFixed(2), r.net_profit.toFixed(2), r.margin_pct.toFixed(2)].join(',')
+                : [`"${r.seller_name}"`, r.transactions_count, r.units_sold, r.gross_revenue.toFixed(2), r.total_discounts.toFixed(2), r.net_revenue.toFixed(2), r.total_cost.toFixed(2), r.net_profit.toFixed(2), r.margin_pct.toFixed(2)].join(',')
+            )
+        ];
+        const blob = new Blob([csvLines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `rentabilidad_${isCat ? 'categorias' : 'vendedores'}_${dateRange.startDate}_a_${dateRange.endDate}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+    };
+
     useEffect(() => {
         loadStats();
         loadInsights();
+        loadProfitability();
     }, [dateRange, sellerId, paymentMethodFilter]);
 
     useEffect(() => {
@@ -276,12 +353,29 @@ export default function Dashboard() {
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2.5 w-full lg:w-auto">
+                    {/* Executive Daily Summary Button */}
+                    <button
+                        type="button"
+                        onClick={() => {
+                            setIsExecSummaryOpen(true);
+                            loadExecutiveSummary(execSummaryDate);
+                        }}
+                        className="px-3.5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-black text-xs rounded-2xl shadow-md shadow-emerald-600/10 flex items-center gap-1.5 transition-all hover:scale-[1.02] active:scale-95 cursor-pointer shrink-0"
+                        title="Generar Resumen Ejecutivo Diario listo para WhatsApp"
+                    >
+                        <MessageSquare size={15} />
+                        <span>Resumen Diario (WhatsApp)</span>
+                    </button>
+
                     {/* Date Range Picker */}
                     <DateRangePicker value={dateRange} onChange={setDateRange} />
 
                     {/* Refresh Button */}
                     <button 
-                        onClick={loadStats}
+                        onClick={() => {
+                            loadStats();
+                            loadProfitability();
+                        }}
                         className="p-2.5 bg-slate-100 dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-300 hover:text-blue-600 dark:hover:text-blue-400 rounded-2xl hover:scale-105 active:scale-95 transition-all cursor-pointer shrink-0"
                         title="Actualizar Estadísticas"
                     >
@@ -794,6 +888,196 @@ export default function Dashboard() {
 
             </div>
 
+            {/* Reporte de Rentabilidad Neta por Categoría y por Vendedor */}
+            <div className="bg-white dark:bg-[#0c111e] p-5 md:p-6 rounded-3xl border border-slate-200/80 dark:border-slate-850/80 shadow-xs flex flex-col gap-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 dark:border-slate-850 pb-4">
+                    <div className="flex items-center gap-2.5">
+                        <div className="p-2.5 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 rounded-2xl">
+                            <DollarSign size={20} />
+                        </div>
+                        <div>
+                            <h2 className="text-sm font-black uppercase tracking-wider text-slate-900 dark:text-white">
+                                Reporte de Rentabilidad Neta Real ({dateRange.startDate} a {dateRange.endDate})
+                            </h2>
+                            <p className="text-[11px] text-slate-400 font-medium">
+                                Desglose auditado de ingresos brutos, descuentos prorrateados, costo real de mercadería (COGS) y margen neto.
+                            </p>
+                        </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                        <div className="inline-flex rounded-xl bg-slate-100 dark:bg-slate-900 p-1 border border-slate-200/60 dark:border-slate-800">
+                            <button
+                                type="button"
+                                onClick={() => setProfitabilityTab('categories')}
+                                className={`px-3 py-1.5 rounded-lg text-xs font-extrabold transition cursor-pointer ${
+                                    profitabilityTab === 'categories'
+                                        ? 'bg-white dark:bg-[#0c111e] text-indigo-600 dark:text-indigo-400 shadow-xs'
+                                        : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+                                }`}
+                            >
+                                Por Categoría ({profitabilityData.byCategory?.length || 0})
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setProfitabilityTab('sellers')}
+                                className={`px-3 py-1.5 rounded-lg text-xs font-extrabold transition cursor-pointer ${
+                                    profitabilityTab === 'sellers'
+                                        ? 'bg-white dark:bg-[#0c111e] text-indigo-600 dark:text-indigo-400 shadow-xs'
+                                        : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+                                }`}
+                            >
+                                Por Vendedor ({profitabilityData.bySeller?.length || 0})
+                            </button>
+                        </div>
+
+                        <button
+                            type="button"
+                            onClick={exportProfitabilityCSV}
+                            className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 dark:bg-slate-800 dark:hover:bg-slate-700 text-white text-xs font-extrabold rounded-xl flex items-center gap-1.5 transition cursor-pointer"
+                        >
+                            <Download size={13} />
+                            <span>Exportar CSV</span>
+                        </button>
+                    </div>
+                </div>
+
+                {/* Summary KPI Strip */}
+                {profitabilityData.totals && (
+                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+                        <div className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200/60 dark:border-slate-800">
+                            <span className="text-[9px] font-black uppercase text-slate-400 block">Ventas Brutas</span>
+                            <span className="text-sm font-black font-mono text-slate-800 dark:text-white">
+                                ${(Number(profitabilityData.totals.gross_revenue) || 0).toFixed(2)}
+                            </span>
+                        </div>
+                        <div className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200/60 dark:border-slate-800">
+                            <span className="text-[9px] font-black uppercase text-slate-400 block">Descuentos</span>
+                            <span className="text-sm font-black font-mono text-rose-500">
+                                -${(Number(profitabilityData.totals.total_discounts) || 0).toFixed(2)}
+                            </span>
+                        </div>
+                        <div className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200/60 dark:border-slate-800">
+                            <span className="text-[9px] font-black uppercase text-slate-400 block">Ventas Netas</span>
+                            <span className="text-sm font-black font-mono text-blue-600 dark:text-blue-400">
+                                ${(Number(profitabilityData.totals.net_revenue) || 0).toFixed(2)}
+                            </span>
+                        </div>
+                        <div className="p-3 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200/60 dark:border-slate-800">
+                            <span className="text-[9px] font-black uppercase text-slate-400 block">Costo Total (COGS)</span>
+                            <span className="text-sm font-black font-mono text-amber-600 dark:text-amber-400">
+                                ${(Number(profitabilityData.totals.total_cost) || 0).toFixed(2)}
+                            </span>
+                        </div>
+                        <div className="p-3 rounded-2xl bg-emerald-500/10 border border-emerald-500/30">
+                            <span className="text-[9px] font-black uppercase text-emerald-600 dark:text-emerald-400 block">Utilidad Neta Real</span>
+                            <div className="flex items-baseline gap-2">
+                                <span className="text-sm font-black font-mono text-emerald-600 dark:text-emerald-400">
+                                    ${(Number(profitabilityData.totals.net_profit) || 0).toFixed(2)}
+                                </span>
+                                <span className="text-[10px] font-black text-emerald-600 dark:text-emerald-300">
+                                    ({(Number(profitabilityData.totals.margin_pct) || 0).toFixed(1)}%)
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                <div className="overflow-x-auto">
+                    {loadingProfitability ? (
+                        <div className="py-8 text-center text-xs text-slate-400 font-bold flex items-center justify-center gap-2">
+                            <Loader2 size={15} className="animate-spin" /> Calculando rentabilidad auditada...
+                        </div>
+                    ) : profitabilityTab === 'categories' ? (
+                        <table className="w-full text-left border-collapse text-xs">
+                            <thead>
+                                <tr className="border-b border-slate-200 dark:border-slate-800 text-[10px] font-black uppercase text-slate-400">
+                                    <th className="p-3">Categoría / Departamento</th>
+                                    <th className="p-3 text-right">Unidades</th>
+                                    <th className="p-3 text-right">Ventas Brutas</th>
+                                    <th className="p-3 text-right">Descuentos</th>
+                                    <th className="p-3 text-right">Ventas Netas</th>
+                                    <th className="p-3 text-right">Costo (COGS)</th>
+                                    <th className="p-3 text-right">Utilidad Neta</th>
+                                    <th className="p-3 text-right">Margen %</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100 dark:divide-slate-850/60 font-bold">
+                                {(profitabilityData.byCategory || []).length === 0 ? (
+                                    <tr>
+                                        <td colSpan={8} className="p-6 text-center text-slate-400">Sin ventas registradas en este periodo.</td>
+                                    </tr>
+                                ) : (
+                                    profitabilityData.byCategory.map((row: any, idx: number) => (
+                                        <tr key={idx} className="hover:bg-slate-50/70 dark:hover:bg-slate-900/40">
+                                            <td className="p-3 uppercase text-slate-800 dark:text-slate-100 font-black">{row.category}</td>
+                                            <td className="p-3 text-right font-mono">{row.units_sold} pz</td>
+                                            <td className="p-3 text-right font-mono">${Number(row.gross_revenue).toFixed(2)}</td>
+                                            <td className="p-3 text-right font-mono text-rose-500">-${Number(row.allocated_discount).toFixed(2)}</td>
+                                            <td className="p-3 text-right font-mono text-blue-600 dark:text-blue-400">${Number(row.net_revenue).toFixed(2)}</td>
+                                            <td className="p-3 text-right font-mono text-slate-500">${Number(row.total_cost).toFixed(2)}</td>
+                                            <td className="p-3 text-right font-mono text-emerald-600 dark:text-emerald-400 font-black">
+                                                ${Number(row.net_profit).toFixed(2)}
+                                                <span className="block text-[9px] text-slate-400">({(Number(row.net_profit) * (exchangeRate || 6.96)).toFixed(2)} Bs)</span>
+                                            </td>
+                                            <td className="p-3 text-right font-mono">
+                                                <span className={`px-2 py-0.5 rounded-md text-[10px] font-black ${Number(row.margin_pct) >= 25 ? 'bg-emerald-500/10 text-emerald-500' : 'bg-amber-500/10 text-amber-500'}`}>
+                                                    {Number(row.margin_pct).toFixed(1)}%
+                                                </span>
+                                            </td>
+                                        </tr>
+                                    ))
+                                )}
+                            </tbody>
+                        </table>
+                    ) : (
+                        <table className="w-full text-left border-collapse text-xs">
+                            <thead>
+                                <tr className="border-b border-slate-200 dark:border-slate-800 text-[10px] font-black uppercase text-slate-400">
+                                    <th className="p-3">Vendedor / Cajero</th>
+                                    <th className="p-3 text-right">Ventas (Tx)</th>
+                                    <th className="p-3 text-right">Unidades</th>
+                                    <th className="p-3 text-right">Ventas Brutas</th>
+                                    <th className="p-3 text-right">Descuentos Otorgados</th>
+                                    <th className="p-3 text-right">Ventas Netas</th>
+                                    <th className="p-3 text-right">Costo (COGS)</th>
+                                    <th className="p-3 text-right">Utilidad Generada</th>
+                                    <th className="p-3 text-right">Margen %</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100 dark:divide-slate-850/60 font-bold">
+                                {(profitabilityData.bySeller || []).length === 0 ? (
+                                    <tr>
+                                        <td colSpan={9} className="p-6 text-center text-slate-400">Sin ventas registradas en este periodo.</td>
+                                    </tr>
+                                ) : (
+                                    profitabilityData.bySeller.map((row: any, idx: number) => (
+                                        <tr key={idx} className="hover:bg-slate-50/70 dark:hover:bg-slate-900/40">
+                                            <td className="p-3 uppercase text-slate-800 dark:text-slate-100 font-black">{row.seller_name}</td>
+                                            <td className="p-3 text-right font-mono">{row.transactions_count}</td>
+                                            <td className="p-3 text-right font-mono">{row.units_sold} pz</td>
+                                            <td className="p-3 text-right font-mono">${Number(row.gross_revenue).toFixed(2)}</td>
+                                            <td className="p-3 text-right font-mono text-rose-500">-${Number(row.total_discounts).toFixed(2)}</td>
+                                            <td className="p-3 text-right font-mono text-blue-600 dark:text-blue-400">${Number(row.net_revenue).toFixed(2)}</td>
+                                            <td className="p-3 text-right font-mono text-slate-500">${Number(row.total_cost).toFixed(2)}</td>
+                                            <td className="p-3 text-right font-mono text-emerald-600 dark:text-emerald-400 font-black">
+                                                ${Number(row.net_profit).toFixed(2)}
+                                                <span className="block text-[9px] text-slate-400">({(Number(row.net_profit) * (exchangeRate || 6.96)).toFixed(2)} Bs)</span>
+                                            </td>
+                                            <td className="p-3 text-right font-mono">
+                                                <span className={`px-2 py-0.5 rounded-md text-[10px] font-black ${Number(row.margin_pct) >= 25 ? 'bg-emerald-500/10 text-emerald-500' : 'bg-amber-500/10 text-amber-500'}`}>
+                                                    {Number(row.margin_pct).toFixed(1)}%
+                                                </span>
+                                            </td>
+                                        </tr>
+                                    ))
+                                )}
+                            </tbody>
+                        </table>
+                    )}
+                </div>
+            </div>
+
             {/* Phase 3: Advanced Predictive Analytics & Operational Resilience */}
             <Phase3ResiliencePanel />
 
@@ -851,6 +1135,86 @@ export default function Dashboard() {
                     )}
                 </div>
             </div>
+
+            {/* Modal Resumen Diario Ejecutivo para WhatsApp */}
+            {isExecSummaryOpen && (
+                <div className="fixed inset-0 bg-black/65 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-in fade-in duration-150">
+                    <div className="bg-white dark:bg-[#0f1424] rounded-3xl w-full max-w-xl p-6 shadow-2xl border border-slate-200 dark:border-slate-850 flex flex-col gap-4 max-h-[90vh] overflow-hidden">
+                        <div className="flex justify-between items-center border-b border-slate-100 dark:border-slate-850 pb-3">
+                            <div className="flex items-center gap-2.5">
+                                <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-500">
+                                    <MessageSquare size={18} />
+                                </div>
+                                <div>
+                                    <h2 className="text-sm font-black uppercase tracking-wider text-slate-800 dark:text-white">
+                                        Resumen Ejecutivo Diario (WhatsApp)
+                                    </h2>
+                                    <p className="text-[11px] text-slate-400 font-semibold">
+                                        Cierre gerencial consolidado con ventas, utilidad, métodos de pago y alertas.
+                                    </p>
+                                </div>
+                            </div>
+                            <button onClick={() => setIsExecSummaryOpen(false)} className="text-slate-400 hover:text-slate-600 cursor-pointer">
+                                <X size={18} />
+                            </button>
+                        </div>
+
+                        <div className="flex items-center justify-between gap-3">
+                            <label className="text-xs font-black uppercase text-slate-400">Fecha de Cierre:</label>
+                            <input
+                                type="date"
+                                value={execSummaryDate}
+                                onChange={(e) => {
+                                    setExecSummaryDate(e.target.value);
+                                    loadExecutiveSummary(e.target.value);
+                                }}
+                                className="px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#070b13] text-xs font-bold text-slate-800 dark:text-white"
+                            />
+                        </div>
+
+                        {loadingExecSummary ? (
+                            <div className="py-12 text-center text-xs font-bold text-slate-400 flex items-center justify-center gap-2">
+                                <Loader2 size={16} className="animate-spin" /> Generando reporte ejecutivo...
+                            </div>
+                        ) : execSummaryData ? (
+                            <>
+                                <textarea
+                                    readOnly
+                                    value={execSummaryData.whatsappText || ''}
+                                    rows={12}
+                                    className="w-full p-3.5 rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-[#070b13] text-xs font-mono text-slate-800 dark:text-slate-200 resize-none"
+                                />
+
+                                <div className="flex flex-wrap justify-end gap-2.5 pt-2 border-t border-slate-100 dark:border-slate-850">
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            if (execSummaryData?.whatsappText) {
+                                                navigator.clipboard.writeText(execSummaryData.whatsappText);
+                                                showNotification("Resumen copiado al portapapeles.", "success");
+                                            }
+                                        }}
+                                        className="px-4 py-2.5 rounded-xl text-xs font-black bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 flex items-center gap-1.5 cursor-pointer"
+                                    >
+                                        <Copy size={14} />
+                                        <span>Copiar Resumen</span>
+                                    </button>
+
+                                    <a
+                                        href={`https://wa.me/?text=${encodeURIComponent(execSummaryData?.whatsappText || '')}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="px-5 py-2.5 rounded-xl text-xs font-black bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg flex items-center gap-1.5 cursor-pointer"
+                                    >
+                                        <Share2 size={14} />
+                                        <span>Enviar por WhatsApp</span>
+                                    </a>
+                                </div>
+                            </>
+                        ) : null}
+                    </div>
+                </div>
+            )}
 
         </div>
     );
