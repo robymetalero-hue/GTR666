@@ -309,5 +309,24 @@
   transform: translateY(-1px) !important;
 }
 
+/* Accessibility & High Contrast Protections (M10) */
+.theme-rgb button:disabled,
+.theme-rgb button[disabled] {
+  background: rgba(100, 116, 139, 0.25) !important;
+  color: rgba(148, 163, 184, 0.6) !important;
+  box-shadow: none !important;
+  transform: none !important;
+  cursor: not-allowed !important;
+  animation: none !important;
+}
+
+.text-slate-450 {
+  color: #718096;
+}
+
+.dark .text-slate-450 {
+  color: #94a3b8;
+}
+
 
 

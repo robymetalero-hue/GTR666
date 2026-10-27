@@ -4,6 +4,7 @@
 const STORAGE_PREFIX = 'gtr_favs_';
 
 export function getFavorites(userId?: number | string | null): number[] {
+  if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') return [];
   try {
     const key = `${STORAGE_PREFIX}${userId || 'anon'}`;
     const data = localStorage.getItem(key);
@@ -20,6 +21,7 @@ export function getFavorites(userId?: number | string | null): number[] {
 }
 
 export function saveFavorites(userId: number | string | null | undefined, favorites: number[]): boolean {
+  if (typeof window === 'undefined' || typeof window.localStorage === 'undefined') return false;
   try {
     const key = `${STORAGE_PREFIX}${userId || 'anon'}`;
     const cleanList = Array.from(new Set(favorites)).filter(id => typeof id === 'number' && Number.isInteger(id) && id > 0);

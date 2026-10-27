@@ -4,15 +4,18 @@ const jwt = require('jsonwebtoken');
 const Database = require('better-sqlite3');
 
 const PORT = 3000;
-const DB_PATH = fs.existsSync('./gtr_pos.db') ? './gtr_pos.db' : './gtr_pos_sandbox.db';
+const DB_PATH = './gtr_pos_sandbox.db';
 const db = new Database(DB_PATH);
 
 function request(options, body = null) {
   return new Promise((resolve, reject) => {
+    const headers = options.headers || {};
+    headers['x-app-environment'] = 'sandbox';
     const req = http.request({
       hostname: 'localhost',
       port: PORT,
-      ...options
+      ...options,
+      headers
     }, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);

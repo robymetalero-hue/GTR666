@@ -330,6 +330,10 @@ export default function POS() {
 
     const [isScannerOpen, setIsScannerOpen] = useState(false);
     const [selectedCategory, setSelectedCategory] = useState("Todos");
+    const [favorites, setFavorites] = useState<number[]>(() => getFavorites(user?.id));
+    useEffect(() => {
+        setFavorites(getFavorites(user?.id));
+    }, [user?.id]);
     const [isMobileCartOpen, setIsMobileCartOpen] = useState(false);
 
     const [receiptConfirmation, setReceiptConfirmation] = useState<{
@@ -1024,22 +1028,23 @@ export default function POS() {
             };
 
             const width = tpl.ticketWidth || 80;
-            const ml = 6;
+            const is58mm = width <= 62;
+            const ml = is58mm ? 4 : 6;
             const mr = width - ml;
             const cx = width / 2;
             const font = tpl.fontFamily || 'Helvetica';
             
-            let totalLines = 0;
-            if (tpl.showLogo) totalLines += 2;
-            if (tpl.showLogo && tpl.logoImage) totalLines += 3;
-            if (tpl.headerText) totalLines += tpl.headerText.split('\n').length;
-            if (tpl.showDate) totalLines += 1;
-            if (tpl.showCashier) totalLines += 1;
-            if (tpl.showClientInfo && sale.client_name) totalLines += 1;
-            totalLines += items.length * 1.5;
-            totalLines += 8;
-
-            const predictedHeight = Math.max(120, Math.round(totalLines * 4.2) + 20);
+            const predictedHeight = calculateDynamicTicketHeight(
+                items.map(it => ({ name: it.product_name || 'Producto' })),
+                {
+                    width,
+                    ml,
+                    headerLines: (tpl.headerText ? tpl.headerText.split('\n').length : 0) + (tpl.showLogo ? 3 : 0),
+                    hasClient: !!(tpl.showClientInfo && sale.client_name),
+                    hasPaymentMethod: !!tpl.showPaymentMethod,
+                    footerLines: tpl.footerText ? tpl.footerText.split('\n').length : 3
+                }
+            );
 
             const doc = new jsPDF({
                 unit: 'mm',
@@ -1127,11 +1132,15 @@ export default function POS() {
 
             // Header columns
             doc.setFont(font, "bold");
-            doc.setFontSize(8.5);
-            doc.text("CANT  PRODUCTO", ml, y);
-            const colPriceX = mr;
-            const currencyStr = sale.currency === 'USD' ? "SUB ($)" : "SUB (Bs.)";
-            doc.text(currencyStr, colPriceX, y, { align: 'right' });
+            doc.setFontSize(8);
+            if (is58mm) {
+                doc.text("PRODUCTO / CANTIDAD", ml, y);
+                doc.text(sale.currency === 'USD' ? "TOTAL ($)" : "TOTAL (Bs.)", mr, y, { align: 'right' });
+            } else {
+                doc.text("CANT  PRODUCTO", ml, y);
+                const currencyStr = sale.currency === 'USD' ? "SUB ($)" : "SUB (Bs.)";
+                doc.text(currencyStr, mr, y, { align: 'right' });
+            }
             y += 2.5;
 
             doc.setLineWidth(0.22);
@@ -1141,40 +1150,26 @@ export default function POS() {
 
             // Render products
             items.forEach(item => {
-                doc.setFontSize(tpl.fontSizeBody ? tpl.fontSizeBody + 1 : 9);
-                
-                doc.setFont(font, "bold");
-                doc.text(`${item.quantity}x`, ml, y);
-                
-                doc.setFont(font, "normal");
-                const detailX = ml + 8;
-                const maxNameWidth = mr - detailX - 20;
-                const nameText = item.product_name || 'Producto';
-                const wrappedName = doc.splitTextToSize(nameText, maxNameWidth);
-                
-                const firstLine = wrappedName[0] || "";
-                doc.text(firstLine, detailX, y);
-                
-                doc.setFont(font, "bold");
                 const subVal = (item.quantity * item.price);
-                const itemSub = sale.currency === 'USD' ? `$${subVal.toFixed(2)}` : `Bs.${subVal.toFixed(2)}`;
-                doc.text(itemSub, colPriceX, y, { align: 'right' });
-                y += 4.2;
-
-                if (wrappedName.length > 1) {
-                    doc.setFont(font, "normal");
-                    for (let i = 1; i < wrappedName.length; i++) {
-                        doc.text(wrappedName[i], detailX, y);
-                        y += 4.2;
+                y = drawTicketItem(
+                    doc,
+                    {
+                        name: item.product_name || 'Producto',
+                        quantity: item.quantity,
+                        unitPrice: item.price,
+                        subtotal: subVal,
+                        currency: sale.currency === 'USD' ? 'USD' : 'BOB',
+                        sku: tpl.showItemSKU ? item.product_sku : undefined
+                    },
+                    y,
+                    {
+                        width,
+                        ml,
+                        mr,
+                        font,
+                        fontSize: tpl.fontSizeBody ? tpl.fontSizeBody : (is58mm ? 8 : 8.5)
                     }
-                }
-
-                if (tpl.showItemSKU && item.product_sku) {
-                    doc.setFont(font, "italic");
-                    doc.setFontSize(7.5);
-                    doc.text(`SKU: ${item.product_sku}`, detailX, y - 0.5);
-                    y += 3.5;
-                }
+                );
             });
 
             y += 1;
@@ -1195,7 +1190,7 @@ export default function POS() {
             const subStr = sale.currency === 'USD'
                 ? `$ ${subtotal.toFixed(2)}`
                 : `Bs. ${subtotal.toFixed(2)}`;
-            doc.text(subStr, colPriceX, y, { align: 'right' });
+            doc.text(subStr, mr, y, { align: 'right' });
             y += 4;
 
             if (discount > 0) {
@@ -1205,7 +1200,7 @@ export default function POS() {
                 const descStr = sale.currency === 'USD'
                     ? `-$ ${discount.toFixed(2)}`
                     : `-Bs. ${discount.toFixed(2)}`;
-                doc.text(descStr, colPriceX, y, { align: 'right' });
+                doc.text(descStr, mr, y, { align: 'right' });
                 y += 4;
                 doc.setTextColor(15, 23, 42);
             }
@@ -1216,7 +1211,7 @@ export default function POS() {
             const totalStr = sale.currency === 'USD'
                 ? `$ ${finalTotal.toFixed(2)} USD`
                 : `Bs. ${finalTotal.toFixed(2)}`;
-            doc.text(totalStr, colPriceX, y, { align: 'right' });
+            doc.text(totalStr, mr, y, { align: 'right' });
             y += 5;
 
             if (tpl.showPaymentMethod) {
@@ -1453,7 +1448,7 @@ export default function POS() {
     // Calculate Categorias with memoization
     const categories = React.useMemo(() => {
         const uniqueCats = Array.from(new Set(products.map(p => p.category ? p.category.trim() : "")));
-        const list = ["Todos", ...uniqueCats.filter(cat => cat !== "")];
+        const list = ["Todos", "★ Favoritos", ...uniqueCats.filter(cat => cat !== "")];
         const hasLowStock = products.some(p => p.stock <= p.stock_alarm);
         if (hasLowStock) {
             list.push("⚠️ Bajo Stock");
@@ -1469,6 +1464,8 @@ export default function POS() {
             let matchesCategory = false;
             if (categoryFilter === "Todos") {
                 matchesCategory = true;
+            } else if (categoryFilter === "★ Favoritos") {
+                matchesCategory = favorites.includes(p.id);
             } else if (categoryFilter === "⚠️ Bajo Stock") {
                 matchesCategory = p.stock <= p.stock_alarm;
             } else {
@@ -1478,7 +1475,7 @@ export default function POS() {
         });
         
         return filterAndRankProducts(categoryMatched, query);
-    }, [products, debouncedSearch, selectedCategory]);
+    }, [products, debouncedSearch, selectedCategory, favorites]);
 
     // Reset visible catalog limit on search/category change
     React.useEffect(() => {
@@ -1813,33 +1810,26 @@ export default function POS() {
                 ticketWidth: 80
             };
 
-            const width = 80; // Optimized primarily for 80-millimeter thermal printers
-            const ml = 6;
+            const width = tpl.ticketWidth || 80;
+            const is58mm = width <= 62;
+            const ml = is58mm ? 4 : 6;
             const mr = width - ml;
             const cx = width / 2;
             const font = tpl.fontFamily || 'Helvetica';
             
-            // Calculate dynamic height precisely to avoid wasting paper (make ticket short but readable)
-            let headerLines = 0;
-            if (tpl.showLogo) headerLines += 2;
-            if (tpl.showLogo && tpl.logoImage) headerLines += 3;
-            if (tpl.headerText) headerLines += tpl.headerText.split('\n').length;
-            if (tpl.showDate) headerLines += 1;
-            if (tpl.showCashier) headerLines += 1;
-            if (tpl.showClientInfo && activeClientName) headerLines += 1;
-
-            let itemLines = activeCart.length * 1.5;
-            activeCart.forEach(item => {
-                if (tpl.showItemSKU && item.sku) itemLines += 0.8;
-            });
-
-            let footerLines = 3;
-            if (activeDiscountValue > 0) footerLines += 1.5;
-            if (tpl.showPaymentMethod) footerLines += 1.5;
-            if (tpl.footerText) footerLines += tpl.footerText.split('\n').length;
-            
-            const totalEstimatedLines = headerLines + itemLines + footerLines + 8;
-            const predictedHeight = Math.max(120, Math.round(totalEstimatedLines * 4.2) + 20);
+            const predictedHeight = calculateDynamicTicketHeight(
+                activeCart.map(it => ({ name: it.name || 'Producto' })),
+                {
+                    width,
+                    ml,
+                    headerLines: (tpl.headerText ? tpl.headerText.split('\n').length : 0) + (tpl.showLogo ? 3 : 0),
+                    hasClient: !!(tpl.showClientInfo && activeClientName),
+                    hasNotes: !!(activeNotes && activeNotes.trim() !== ""),
+                    notesLines: activeNotes ? activeNotes.split('\n').length : 1,
+                    hasPaymentMethod: !!tpl.showPaymentMethod,
+                    footerLines: tpl.footerText ? tpl.footerText.split('\n').length : 3
+                }
+            );
 
             const doc = new jsPDF({
                 unit: 'mm',
@@ -1940,10 +1930,14 @@ export default function POS() {
 
             // Header columns for the items table
             doc.setFont(font, "bold");
-            doc.setFontSize(8.5);
-            doc.text("CANT  PRODUCTO", ml, y);
-            const colPriceX = mr;
-            doc.text(activeCurrency === 'USD' ? "SUB ($)" : "SUB (Bs.)", colPriceX, y, { align: 'right' });
+            doc.setFontSize(8);
+            if (is58mm) {
+                doc.text("PRODUCTO / CANTIDAD", ml, y);
+                doc.text(activeCurrency === 'USD' ? "TOTAL ($)" : "TOTAL (Bs.)", mr, y, { align: 'right' });
+            } else {
+                doc.text("CANT  PRODUCTO", ml, y);
+                doc.text(activeCurrency === 'USD' ? "SUB ($)" : "SUB (Bs.)", mr, y, { align: 'right' });
+            }
             y += 2.5;
 
             // Thin table divider line
@@ -1952,45 +1946,29 @@ export default function POS() {
             doc.line(ml, y, mr, y);
             y += 4;
 
-            // Items mapping - Larger details, bold quantities and prices
+            // Items mapping
             activeCart.forEach(item => {
-                doc.setFontSize(tpl.fontSizeBody ? tpl.fontSizeBody + 1 : 9); // Slightly larger font for details
-                
-                // Draw bold quantity
-                doc.setFont(font, "bold");
-                doc.text(`${item.cartQuantity}x`, ml, y);
-                
-                // Draw normal name with small indent
-                doc.setFont(font, "normal");
-                const detailX = ml + 9;
-                const maxNameWidth = mr - detailX - 22; // leaving space for price
-                const wrappedName = doc.splitTextToSize(item.name, maxNameWidth);
-                
-                const firstLine = wrappedName[0] || "";
-                doc.text(firstLine, detailX, y);
-                
-                // Draw bold price subtotal on the right
-                doc.setFont(font, "bold");
-                const itemSub = activeCurrency === 'USD' 
-                    ? `$${(getCartItemPriceUSD(item) * item.cartQuantity).toFixed(2)}`
-                    : `Bs.${(getCartItemPriceBs(item) * item.cartQuantity).toFixed(2)}`;
-                doc.text(itemSub, colPriceX, y, { align: 'right' });
-                y += 4.2;
-
-                if (wrappedName.length > 1) {
-                    doc.setFont(font, "normal");
-                    for (let i = 1; i < wrappedName.length; i++) {
-                        doc.text(wrappedName[i], detailX, y);
-                        y += 4.2;
+                const itemUnitPrice = activeCurrency === 'USD' ? getCartItemPriceUSD(item) : getCartItemPriceBs(item);
+                const itemSub = itemUnitPrice * item.cartQuantity;
+                y = drawTicketItem(
+                    doc,
+                    {
+                        name: item.name || 'Producto',
+                        quantity: item.cartQuantity,
+                        unitPrice: itemUnitPrice,
+                        subtotal: itemSub,
+                        currency: activeCurrency,
+                        sku: tpl.showItemSKU ? item.sku : undefined
+                    },
+                    y,
+                    {
+                        width,
+                        ml,
+                        mr,
+                        font,
+                        fontSize: tpl.fontSizeBody ? tpl.fontSizeBody : (is58mm ? 8 : 8.5)
                     }
-                }
-
-                if (tpl.showItemSKU && item.sku) {
-                    doc.setFont(font, "italic");
-                    doc.setFontSize(7.5);
-                    doc.text(`SKU: ${item.sku}`, detailX, y - 0.5);
-                    y += 3.5;
-                }
+                );
             });
 
             y += 1;
@@ -2008,7 +1986,7 @@ export default function POS() {
             const subStr = activeCurrency === 'USD'
                 ? `$ ${activeSubtotalUsd.toFixed(2)}`
                 : `Bs. ${activeSubtotal.toFixed(2)}`;
-            doc.text(subStr, colPriceX, y, { align: 'right' });
+            doc.text(subStr, mr, y, { align: 'right' });
             y += 4;
 
             if (activeDiscountValue > 0) {
@@ -2018,7 +1996,7 @@ export default function POS() {
                 const descStr = activeCurrency === 'USD'
                     ? `-$ ${(activeDiscountValue / activeExchangeRate).toFixed(2)}`
                     : `-Bs. ${activeDiscountValue.toFixed(2)}`;
-                doc.text(descStr, colPriceX, y, { align: 'right' });
+                doc.text(descStr, mr, y, { align: 'right' });
                 y += 4;
                 doc.setTextColor(15, 23, 42); // Reset color
             }
@@ -2028,7 +2006,7 @@ export default function POS() {
                 doc.setFont(font, "bold");
                 doc.setTextColor(16, 185, 129); // Green color for loyalty points
                 doc.text(`Canje Puntos:`, ml, y);
-                doc.text(`-${overridePointsRedeemed} pts`, colPriceX, y, { align: 'right' });
+                doc.text(`-${overridePointsRedeemed} pts`, mr, y, { align: 'right' });
                 y += 4;
                 doc.setTextColor(15, 23, 42); // Reset color
             }
@@ -2042,7 +2020,7 @@ export default function POS() {
                 doc.setTextColor(79, 70, 229); // Indigo for points earned
                 doc.text(`Puntos Ganados hoy:`, ml, y);
                 doc.setFont(font, "bold");
-                doc.text(`+${pointsEarned} pts`, colPriceX, y, { align: 'right' });
+                doc.text(`+${pointsEarned} pts`, mr, y, { align: 'right' });
                 y += 4;
                 doc.setTextColor(15, 23, 42); // Reset color
             }
@@ -2055,7 +2033,7 @@ export default function POS() {
                 doc.setFontSize(7.5);
                 doc.setTextColor(100, 116, 139);
                 doc.text(`Saldo Total Puntos:`, ml, y);
-                doc.text(`${projectedBalance} pts`, colPriceX, y, { align: 'right' });
+                doc.text(`${projectedBalance} pts`, mr, y, { align: 'right' });
                 y += 3.8;
                 doc.setTextColor(15, 23, 42); // Reset color
             }
@@ -2070,7 +2048,7 @@ export default function POS() {
             const totalStr = activeCurrency === 'USD'
                 ? `$ ${activeTotal.toFixed(2)} USD`
                 : `Bs. ${activeTotal.toFixed(2)}`;
-            doc.text(totalStr, colPriceX, y, { align: 'right' });
+            doc.text(totalStr, mr, y, { align: 'right' });
             y += 5;
 
             if (tpl.showPaymentMethod) {
@@ -2083,13 +2061,13 @@ export default function POS() {
                     const recNum = parseFloat(activeCashReceived);
                     if (!isNaN(recNum)) {
                         doc.text(`Entregado:`, ml, y);
-                        doc.text(`${activeCurrency === 'USD' ? '$' : 'Bs.'} ${recNum.toFixed(2)}`, colPriceX, y, { align: 'right' });
+                        doc.text(`${activeCurrency === 'USD' ? '$' : 'Bs.'} ${recNum.toFixed(2)}`, mr, y, { align: 'right' });
                         y += 4;
 
                         const finalChange = recNum - activeTotal;
                         doc.setFont(font, "bold");
                         doc.text(`Cambio:`, ml, y);
-                        doc.text(`${activeCurrency === 'USD' ? '$' : 'Bs.'} ${Math.max(0, finalChange).toFixed(2)}`, colPriceX, y, { align: 'right' });
+                        doc.text(`${activeCurrency === 'USD' ? '$' : 'Bs.'} ${Math.max(0, finalChange).toFixed(2)}`, mr, y, { align: 'right' });
                         doc.setFont(font, "normal");
                         y += 4.5;
                     }
@@ -2535,7 +2513,7 @@ export default function POS() {
                                                             addToCart(item, -1);
                                                             setSelectedCartItemId(item.id);
                                                         }}
-                                                        className="w-6 h-6 flex items-center justify-center text-[10px] font-black bg-slate-100 dark:bg-slate-800 border border-slate-200/50 dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-md transition shrink-0 cursor-pointer text-slate-800 dark:text-white"
+                                                        className="w-8 h-8 sm:w-6 sm:h-6 min-w-[36px] min-h-[36px] sm:min-w-0 sm:min-h-0 flex items-center justify-center text-xs sm:text-[10px] font-black bg-slate-100 dark:bg-slate-800 border border-slate-200/50 dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-md transition shrink-0 cursor-pointer text-slate-800 dark:text-white"
                                                         title="Restar cantidad"
                                                     >
                                                         -
@@ -2544,7 +2522,7 @@ export default function POS() {
                                                         type="text" 
                                                         inputMode="numeric" 
                                                         pattern="[0-9]*"
-                                                        className="min-w-[36px] max-w-[130px] h-6 px-1 text-center font-mono text-[11px] font-black bg-white dark:bg-slate-950 border border-slate-250 dark:border-slate-800 rounded-md focus:outline-none focus:ring-1 focus:ring-indigo-500 text-slate-800 dark:text-white pointer-events-auto transition-all"
+                                                        className="min-w-[36px] max-w-[130px] h-8 sm:h-6 px-1 text-center font-mono text-[11px] font-black bg-white dark:bg-slate-950 border border-slate-250 dark:border-slate-800 rounded-md focus:outline-none focus:ring-1 focus:ring-indigo-500 text-slate-800 dark:text-white pointer-events-auto transition-all"
                                                         style={{ width: `${Math.max(2.5, ((item.cartQuantity || '').toString().length || 1) * 0.65 + 0.8)}rem` }}
                                                         value={item.cartQuantity || ''} 
                                                         onFocus={(e) => {
@@ -2591,7 +2569,7 @@ export default function POS() {
                                                             addToCart(item, 1);
                                                             setSelectedCartItemId(item.id);
                                                         }}
-                                                        className="w-6 h-6 flex items-center justify-center text-[10px] font-black bg-slate-100 dark:bg-slate-800 border border-slate-200/50 dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-md transition shrink-0 cursor-pointer text-slate-800 dark:text-white"
+                                                        className="w-8 h-8 sm:w-6 sm:h-6 min-w-[36px] min-h-[36px] sm:min-w-0 sm:min-h-0 flex items-center justify-center text-xs sm:text-[10px] font-black bg-slate-100 dark:bg-slate-800 border border-slate-200/50 dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-md transition shrink-0 cursor-pointer text-slate-800 dark:text-white"
                                                         title="Sumar cantidad"
                                                     >
                                                         +
@@ -2929,7 +2907,9 @@ export default function POS() {
                                         className={`px-2.5 py-1 rounded-xl text-[10px] font-black whitespace-nowrap relative transition-colors duration-200 cursor-pointer shrink-0 ${
                                             selectedCategory === cat 
                                                 ? 'text-white shadow-md font-extrabold' 
-                                                : 'bg-slate-55 dark:bg-[#070b13] border border-slate-100 dark:border-slate-850/60 text-slate-500 dark:text-slate-400 hover:bg-slate-100/80'
+                                                : cat === '★ Favoritos'
+                                                    ? 'bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400 hover:bg-amber-500/20 font-black'
+                                                    : 'bg-slate-55 dark:bg-[#070b13] border border-slate-100 dark:border-slate-850/60 text-slate-500 dark:text-slate-400 hover:bg-slate-100/80'
                                         }`}
                                     >
                                         {selectedCategory === cat && (
@@ -3063,9 +3043,21 @@ export default function POS() {
                                         onClick={() => addToCart(p, 1)}
                                         className={`group bg-white dark:bg-[#0c111e] border border-slate-150 dark:border-slate-850 p-2 rounded-2xl flex flex-row items-center justify-between gap-3 cursor-pointer select-none min-h-[52px]`}
                                     >
-                                        {/* Row Left: ID + Indicator + Thumbnail + Name/Sku */}
+                                        {/* Row Left: ID + Indicator + Favorite + Thumbnail + Name/Sku */}
                                         <div className="flex items-center gap-2.5 min-w-0 flex-1">
                                             <div className="flex items-center gap-1 shrink-0">
+                                                <button
+                                                    type="button"
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        setFavorites(toggleFavorite(p.id, favorites, user?.id));
+                                                    }}
+                                                    className="p-1 rounded-md text-slate-300 dark:text-slate-600 hover:text-amber-500 transition-colors cursor-pointer"
+                                                    title={favorites.includes(p.id) ? "Quitar de favoritos" : "Marcar como favorito"}
+                                                    aria-label={favorites.includes(p.id) ? "Quitar de favoritos" : "Marcar como favorito"}
+                                                >
+                                                    <Star size={12} className={favorites.includes(p.id) ? "fill-amber-400 text-amber-500" : ""} />
+                                                </button>
                                                 <span className={`w-2 h-2 rounded-full ${qtyInCart > 0 ? "bg-indigo-600 animate-pulse" : "bg-neutral-200 dark:bg-neutral-800"}`}></span>
                                                 <span className="text-[9px] font-mono font-bold text-slate-450">#{p.id}</span>
                                             </div>
@@ -3090,7 +3082,7 @@ export default function POS() {
 
                                             <div className="min-w-0 flex-1">
                                                 <div className="flex items-center gap-2">
-                                                    <h4 className="font-extrabold text-[12px] text-slate-800 dark:text-gray-150 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors leading-tight truncate">
+                                                    <h4 className="font-extrabold text-[12px] text-slate-800 dark:text-gray-150 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors leading-snug break-words line-clamp-2">
                                                         {p.name}
                                                     </h4>
                                                     <span className="hidden sm:inline-block text-[8px] font-bold text-slate-450 bg-slate-100 dark:bg-slate-900/40 px-1.5 py-0.5 rounded uppercase max-w-[80px] truncate">
@@ -3178,6 +3170,18 @@ export default function POS() {
                                             {/* Compact Header: Index code & Cart quant indicator */}
                                             <div className="flex justify-between items-center text-[8.5px] mb-1.5">
                                                 <div className="flex items-center gap-1 min-w-0">
+                                                    <button
+                                                        type="button"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            setFavorites(toggleFavorite(p.id, favorites, user?.id));
+                                                        }}
+                                                        className="p-0.5 rounded text-slate-300 dark:text-slate-600 hover:text-amber-500 transition-colors cursor-pointer"
+                                                        title={favorites.includes(p.id) ? "Quitar de favoritos" : "Marcar como favorito"}
+                                                        aria-label={favorites.includes(p.id) ? "Quitar de favoritos" : "Marcar como favorito"}
+                                                    >
+                                                        <Star size={10} className={favorites.includes(p.id) ? "fill-amber-400 text-amber-500" : ""} />
+                                                    </button>
                                                     <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${qtyInCart > 0 ? "bg-indigo-600 animate-pulse" : "bg-neutral-300 dark:bg-neutral-700"}`}></span>
                                                     <span className="font-bold text-slate-400 font-mono truncate">#{p.id}</span>
                                                 </div>
@@ -3218,7 +3222,7 @@ export default function POS() {
                                                     </div>
                                                 )}
                                                 <div className="flex-1 min-w-0">
-                                                    <h3 className="font-extrabold text-[11px] text-slate-800 dark:text-gray-150 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 leading-snug line-clamp-2 h-7" title={p.name}>
+                                                    <h3 className="font-extrabold text-[11px] text-slate-800 dark:text-gray-150 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 leading-snug break-words line-clamp-3 min-h-[2.4rem]" title={p.name}>
                                                         {p.name}
                                                     </h3>
                                                     <p className="text-[8px] font-mono text-slate-400 dark:text-slate-500 mt-0.5 truncate">SKU: {p.sku || 'N/A'}</p>
@@ -3299,6 +3303,18 @@ export default function POS() {
                                         {/* Top Meta: ID + In-Cart / Stock alert */}
                                         <div className="flex items-center justify-between gap-1.5 mb-2.5">
                                             <div className="flex items-center gap-1.5 min-w-0">
+                                                <button
+                                                    type="button"
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        setFavorites(toggleFavorite(p.id, favorites, user?.id));
+                                                    }}
+                                                    className="p-1 rounded-md text-slate-300 dark:text-slate-600 hover:text-amber-500 transition-colors cursor-pointer"
+                                                    title={favorites.includes(p.id) ? "Quitar de favoritos" : "Marcar como favorito"}
+                                                    aria-label={favorites.includes(p.id) ? "Quitar de favoritos" : "Marcar como favorito"}
+                                                >
+                                                    <Star size={12} className={favorites.includes(p.id) ? "fill-amber-400 text-amber-500" : ""} />
+                                                </button>
                                                 <span className={`w-2 h-2 rounded-full shrink-0 ${qtyInCart > 0 ? "bg-indigo-600 animate-pulse" : "bg-neutral-300 dark:bg-neutral-700"}`}></span>
                                                 <span className="text-[10px] font-mono font-bold text-slate-400 dark:text-slate-500 truncate">#{p.id}</span>
                                             </div>
@@ -3347,7 +3363,7 @@ export default function POS() {
                                             )}
 
                                             <div className="flex-1 min-w-0">
-                                                <h3 className="font-extrabold text-[12px] text-slate-850 dark:text-gray-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors leading-snug line-clamp-2 h-8" title={p.name}>
+                                                <h3 className="font-extrabold text-[12px] text-slate-850 dark:text-gray-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors leading-snug break-words line-clamp-3 min-h-[2.5rem]" title={p.name}>
                                                     {p.name}
                                                 </h3>
                                                 <div className="flex items-center gap-1.5 mt-1">

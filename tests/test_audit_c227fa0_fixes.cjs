@@ -10,6 +10,8 @@ function makeToken(user) {
 
 function request(options, body = null) {
   return new Promise((resolve, reject) => {
+    options.headers = options.headers || {};
+    options.headers['x-app-environment'] = 'sandbox';
     const req = http.request(options, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
@@ -121,7 +123,7 @@ async function runTests() {
   // 3. E05 & E09: Pending sales deduplication via processed_operations
   try {
     const Database = require('better-sqlite3');
-    const db = new Database('gtr_pos.db');
+    const db = new Database('gtr_pos_sandbox.db');
     const inStockProd = db.prepare('SELECT id, stock FROM products WHERE stock >= 20 LIMIT 1').get();
     db.close();
 
@@ -273,7 +275,7 @@ async function runTests() {
 
     // Verify stored row in database has user_id = 3 (authenticated user) and not 999
     const Database = require('better-sqlite3');
-    const db = new Database('gtr_pos.db');
+    const db = new Database('gtr_pos_sandbox.db');
     const storedOffline = db.prepare('SELECT user_id, user_name FROM offline_pending_sales WHERE id = ?').get(offlineId);
     assert("B07 & K13: user_id guardado es el usuario autenticado (3) y no el del cuerpo (999)", storedOffline && storedOffline.user_id === 3);
     db.close();
@@ -284,7 +286,7 @@ async function runTests() {
   // 9. N06: Order edit aggregates duplicate lines
   try {
     const Database = require('better-sqlite3');
-    const db = new Database('gtr_pos.db');
+    const db = new Database('gtr_pos_sandbox.db');
     const inStockProd = db.prepare('SELECT id, stock FROM products WHERE stock >= 20 LIMIT 1').get();
     db.close();
 

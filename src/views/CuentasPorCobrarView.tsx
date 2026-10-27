@@ -1429,7 +1429,7 @@ export default function CuentasPorCobrarView() {
                                 />
                             </div>
                         ) : (
-                            <div className="overflow-y-auto flex-grow max-h-[62vh] p-4">
+                            <div className="p-2 sm:p-4">
                                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
                                     {filteredPendingSales.map(sale => {
                                         const paid = Number(sale.paid_amount || 0);
@@ -1463,25 +1463,25 @@ export default function CuentasPorCobrarView() {
                                                     {/* Client and destination details */}
                                                     <div className="bg-slate-50/50 dark:bg-black/15 p-2.5 rounded-2xl border border-slate-100 dark:border-slate-900/40 flex flex-col gap-1.5">
                                                         <div className="flex items-center gap-1.5 text-xs text-slate-800 dark:text-slate-200 font-extrabold uppercase">
-                                                            <User size={13} className="text-slate-400" />
-                                                            <span className="truncate">{sale.client_name}</span>
+                                                            <User size={13} className="text-slate-400 shrink-0" />
+                                                            <span className="break-words font-extrabold">{sale.client_name}</span>
                                                         </div>
                                                         {sale.client_phone && (
                                                             <div className="flex items-center gap-1.5 text-[10px] text-slate-500 font-bold font-mono">
-                                                                <Phone size={11} className="text-slate-400" />
+                                                                <Phone size={11} className="text-slate-400 shrink-0" />
                                                                 <span>{sale.client_phone}</span>
                                                             </div>
                                                         )}
                                                         {sale.transport_company && (
                                                             <div className="flex items-center gap-1.5 text-[10px] text-amber-600 dark:text-amber-400 font-extrabold uppercase font-mono">
-                                                                <span className="text-[8px] bg-amber-500/10 text-amber-500 px-1.5 py-0.5 rounded-md border border-amber-500/20">TRSP:</span>
-                                                                <span className="truncate">{sale.transport_company}</span>
+                                                                <span className="text-[8px] bg-amber-500/10 text-amber-500 px-1.5 py-0.5 rounded-md border border-amber-500/20 shrink-0">TRSP:</span>
+                                                                <span className="break-words">{sale.transport_company}</span>
                                                             </div>
                                                         )}
                                                         {sale.destination && (
                                                             <div className="flex items-start gap-1.5 text-[10px] text-slate-400 font-bold border-t border-slate-100/60 dark:border-slate-800/40 pt-1.5 mt-0.5">
                                                                 <Truck size={12} className="text-slate-400 shrink-0 mt-0.5" />
-                                                                <span className="leading-normal break-all">{sale.destination}</span>
+                                                                <span className="leading-normal break-words">{sale.destination}</span>
                                                             </div>
                                                         )}
                                                     </div>
@@ -1489,11 +1489,11 @@ export default function CuentasPorCobrarView() {
                                                     {/* Product descriptions/items */}
                                                     <div>
                                                         <span className="text-[9px] font-black uppercase text-slate-400 dark:text-slate-500 tracking-wider block mb-1.5">Artículos del Pedido</span>
-                                                        <div className="flex flex-col gap-1.5 max-h-[120px] overflow-y-auto pr-0.5">
+                                                        <div className="flex flex-col gap-1.5 pr-0.5">
                                                             {sale.items && sale.items.map((it: any, idx: number) => (
                                                                 <div key={idx} className="flex justify-between items-center text-[10.5px] bg-slate-50/40 dark:bg-black/10 px-2.5 py-1.5 rounded-xl border border-slate-150/40 dark:border-slate-850/40 transition hover:bg-slate-50 dark:hover:bg-black/20">
                                                                     <div className="flex flex-col gap-0.5 min-w-0 flex-1">
-                                                                        <span className="font-extrabold text-slate-700 dark:text-slate-200 truncate pr-2">{it.product_name}</span>
+                                                                        <span className="font-extrabold text-slate-700 dark:text-slate-200 break-words pr-2">{it.product_name}</span>
                                                                         <span className="text-[9px] text-slate-400 font-mono">P.U: Bs. {(it.price || 0).toFixed(2)}</span>
                                                                     </div>
                                                                     <span className="font-black text-indigo-600 dark:text-indigo-400 shrink-0 text-xs bg-indigo-50/50 dark:bg-indigo-950/30 px-2 py-0.5 rounded-lg border border-indigo-100/30 dark:border-indigo-900/20">
@@ -1731,7 +1731,7 @@ export default function CuentasPorCobrarView() {
                                 />
                             </div>
                         ) : (
-                            <div className="overflow-x-auto flex-grow max-h-[58vh]">
+                            <div className="overflow-x-auto flex-grow">
                                 <table className="w-full text-left border-collapse">
                                     <thead>
                                         <tr className="border-b border-slate-150 dark:border-slate-850 bg-slate-50/70 dark:bg-black/10 text-[9.5px] font-extrabold text-slate-400 dark:text-slate-500 uppercase tracking-wider">

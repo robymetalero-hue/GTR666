@@ -45,15 +45,16 @@ export function isCurrentContextSandbox(): boolean {
   if (store !== undefined) {
     return store.isSandbox;
   }
+  if (process.env.APP_ENV === 'test' || process.env.APP_ENV === 'sandbox') {
+    return true;
+  }
   if (process.env.APP_ENV === 'production') {
     return false;
   }
-  if (process.env.APP_ENV === 'sandbox') {
-    return true;
-  }
   return Boolean(
     process.env.K_SERVICE?.startsWith('ais-dev') || 
-    process.env.APP_URL?.includes('ais-dev')
+    process.env.APP_URL?.includes('ais-dev') ||
+    process.env.NODE_ENV !== 'production'
   );
 }
 
@@ -965,6 +966,9 @@ try {
 }
 
 export function getProdDb(): Database.Database {
+  if (process.env.APP_ENV === 'test') {
+    throw new Error("[Security Guard] Access to production database (gtr_pos.db) is strictly forbidden when APP_ENV=test.");
+  }
   if (!prodDbInstance) {
     ensureProdDbExists();
     prodDbInstance = new Database(prodDbPath, { timeout: 10000 });

@@ -42,7 +42,7 @@ function generateToken(user) {
 
 function requestJson(urlPath, method = 'GET', token = null) {
   return new Promise((resolve, reject) => {
-    const headers = { 'Accept': 'application/json' };
+    const headers = { 'Accept': 'application/json', 'x-app-environment': 'sandbox' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
     const req = http.request({
@@ -77,7 +77,7 @@ async function run() {
   console.log(' RUNNING PRODUCT HISTORY MULTI-SOURCE SYNTHESIS TESTS');
   console.log('='.repeat(70));
 
-  const dbPath = path.resolve(process.cwd(), fs.existsSync(path.resolve(process.cwd(), 'gtr_pos.db')) ? 'gtr_pos.db' : 'gtr_pos_sandbox.db');
+  const dbPath = path.resolve(process.cwd(), 'gtr_pos_sandbox.db');
   const db = new Database(dbPath);
 
   // Set up test users from database: admin (id: 4) & cashier (id: 3)
@@ -87,25 +87,14 @@ async function run() {
   const adminToken = generateToken({ id: adminUser.id, username: adminUser.username, role: adminUser.role });
   const cashierToken = generateToken({ id: cashierUser.id, username: cashierUser.username, role: cashierUser.role, permissions: { view_costs: false } });
 
-  // 1. Create a product like Samsung S26 Ultra (SKU: TEST-S26, stock: 1, price_unit: 1.00)
-  const existing = db.prepare('SELECT id FROM products WHERE sku = ?').get('TEST-S26');
-  let testProdId;
-  if (existing) {
-    testProdId = existing.id;
-    db.prepare('UPDATE products SET stock = 1, price_unit = 1.00, price_cost = 0.50 WHERE id = ?').run(testProdId);
-    db.prepare('DELETE FROM stock_arrivals WHERE product_id = ?').run(testProdId);
-    db.prepare('DELETE FROM sale_items WHERE product_id = ?').run(testProdId);
-    db.prepare('DELETE FROM sale_returns WHERE product_id = ?').run(testProdId);
-    db.prepare('DELETE FROM inventory_count_items WHERE product_id = ?').run(testProdId);
-    db.prepare('DELETE FROM inventory_audit_logs WHERE product_id = ?').run(testProdId);
-    db.prepare('DELETE FROM system_audit_logs WHERE related_product_id = ?').run(testProdId);
-  } else {
-    const res = db.prepare(`
-      INSERT INTO products (name, sku, category, stock, price_unit, price_bulk, price_cost, stock_alarm, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-    `).run('Samsung S26 Ultra 512GB Test', 'TEST-S26', 'ACCESORIOS', 1, 1.00, 0.90, 0.50, 2);
-    testProdId = res.lastInsertRowid;
-  }
+  // 1. Create a fresh test product
+  db.prepare("DELETE FROM products WHERE sku LIKE 'TEST-S26%'").run();
+  const testSku = 'TEST-S26-' + Date.now();
+  const res = db.prepare(`
+    INSERT INTO products (name, sku, category, stock, price_unit, price_bulk, price_cost, stock_alarm, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+  `).run('Samsung S26 Ultra 512GB Test', testSku, 'ACCESORIOS', 1, 1.00, 0.90, 0.50, 2);
+  const testProdId = res.lastInsertRowid;
 
   console.log(`\n--- Test 1: Brand new product with stock = 1 and 0 log entries ---`);
   const res1 = await requestJson(`/api/products/${testProdId}/audit-history`, 'GET', adminToken);

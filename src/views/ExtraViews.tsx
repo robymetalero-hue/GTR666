@@ -13,6 +13,7 @@ import { jsPDF } from 'jspdf';
 import DateRangePicker, { DateRange } from '../components/DateRangePicker';
 import ThreeDHourlySalesChart from '../components/ThreeDHourlySalesChart';
 import { useElasticScroll } from '../utils/touchScroll';
+import { calculateDynamicTicketHeight, drawTicketItem } from '../utils/ticketFormatter';
 import { 
     ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip as RechartsTooltip, 
     PieChart as RechartsPieChart, Pie, Cell, BarChart, Bar, Legend as RechartsLegend
@@ -459,33 +460,26 @@ export function HistorialVentasView() {
             ticketWidth: 80
         };
 
-        const width = 80; // Optimized primarily for 80-millimeter thermal printers
-        const ml = 6;
+        const width = tpl.ticketWidth || 80;
+        const is58mm = width <= 62;
+        const ml = is58mm ? 4 : 6;
         const mr = width - ml;
         const cx = width / 2;
         const font = tpl.fontFamily || 'Helvetica';
         
-        // Calculate dynamic height precisely to avoid wasting paper (make ticket short but readable)
-        let headerLines = 0;
-        if (tpl.showLogo) headerLines += 2;
-        if (tpl.showLogo && tpl.logoImage) headerLines += 3;
-        if (tpl.headerText) headerLines += tpl.headerText.split('\n').length;
-        if (tpl.showDate) headerLines += 1;
-        if (tpl.showCashier) headerLines += 1;
-        if (tpl.showClientInfo && sale.client_name) headerLines += 1;
-
-        let itemLines = items.length * 1.5;
-        items.forEach(item => {
-            if (tpl.showItemSKU && item.product_sku) itemLines += 0.8;
-        });
-
-        let footerLines = 3;
-        if (sale.discount > 0) footerLines += 1.5;
-        if (tpl.showPaymentMethod) footerLines += 1;
-        if (tpl.footerText) footerLines += tpl.footerText.split('\n').length;
-        
-        const totalEstimatedLines = headerLines + itemLines + footerLines + 8;
-        const predictedHeight = Math.max(120, Math.round(totalEstimatedLines * 4.2) + 20);
+        const predictedHeight = calculateDynamicTicketHeight(
+            items.map(it => ({ name: it.product_name || 'Producto' })),
+            {
+                width,
+                ml,
+                headerLines: (tpl.headerText ? tpl.headerText.split('\n').length : 0) + (tpl.showLogo ? 3 : 0),
+                hasClient: !!(tpl.showClientInfo && sale.client_name),
+                hasNotes: !!(sale.notes && sale.notes.trim() !== ""),
+                notesLines: sale.notes ? sale.notes.split('\n').length : 1,
+                hasPaymentMethod: !!tpl.showPaymentMethod,
+                footerLines: tpl.footerText ? tpl.footerText.split('\n').length : 3
+            }
+        );
 
         const doc = new jsPDF({
             unit: 'mm',
@@ -580,10 +574,14 @@ export function HistorialVentasView() {
 
         // Header columns for the items table
         doc.setFont(font, "bold");
-        doc.setFontSize(8.5);
-        doc.text("CANT  PRODUCTO", ml, y);
-        const colPriceX = mr;
-        doc.text(sale.currency === 'USD' ? "SUB ($)" : "SUB (Bs.)", colPriceX, y, { align: 'right' });
+        doc.setFontSize(8);
+        if (is58mm) {
+            doc.text("PRODUCTO / CANTIDAD", ml, y);
+            doc.text(sale.currency === 'USD' ? "TOTAL ($)" : "TOTAL (Bs.)", mr, y, { align: 'right' });
+        } else {
+            doc.text("CANT  PRODUCTO", ml, y);
+            doc.text(sale.currency === 'USD' ? "SUB ($)" : "SUB (Bs.)", mr, y, { align: 'right' });
+        }
         y += 2.5;
 
         // Thin table divider line
@@ -592,45 +590,28 @@ export function HistorialVentasView() {
         doc.line(ml, y, mr, y);
         y += 4;
 
-        // Items mapping - Larger details, bold quantities and prices
+        // Items mapping
         items.forEach(item => {
-            doc.setFontSize(tpl.fontSizeBody ? tpl.fontSizeBody + 1 : 9); // Slightly larger font for details
-            
-            // Draw bold quantity
-            doc.setFont(font, "bold");
-            doc.text(`${item.quantity}x`, ml, y);
-            
-            // Draw normal name with small indent
-            doc.setFont(font, "normal");
-            const detailX = ml + 9;
-            const maxNameWidth = mr - detailX - 22; // leaving space for price
-            const wrappedName = doc.splitTextToSize(item.product_name, maxNameWidth);
-            
-            const firstLine = wrappedName[0] || "";
-            doc.text(firstLine, detailX, y);
-            
-            // Draw bold price subtotal on the right
-            doc.setFont(font, "bold");
-            const itemSub = sale.currency === 'USD'
-                ? `$${(item.price * item.quantity).toFixed(2)}`
-                : `Bs.${(item.price * item.quantity).toFixed(2)}`;
-            doc.text(itemSub, colPriceX, y, { align: 'right' });
-            y += 4.2;
-
-            if (wrappedName.length > 1) {
-                doc.setFont(font, "normal");
-                for (let i = 1; i < wrappedName.length; i++) {
-                    doc.text(wrappedName[i], detailX, y);
-                    y += 4.2;
+            const itemSub = (item.price * item.quantity);
+            y = drawTicketItem(
+                doc,
+                {
+                    name: item.product_name || 'Producto',
+                    quantity: item.quantity,
+                    unitPrice: item.price,
+                    subtotal: itemSub,
+                    currency: sale.currency === 'USD' ? 'USD' : 'BOB',
+                    sku: tpl.showItemSKU ? item.product_sku : undefined
+                },
+                y,
+                {
+                    width,
+                    ml,
+                    mr,
+                    font,
+                    fontSize: tpl.fontSizeBody ? tpl.fontSizeBody : (is58mm ? 8 : 8.5)
                 }
-            }
-
-            if (tpl.showItemSKU && item.product_sku) {
-                doc.setFont(font, "italic");
-                doc.setFontSize(7.5);
-                doc.text(`SKU: ${item.product_sku}`, detailX, y - 0.5);
-                y += 3.5;
-            }
+            );
         });
 
         y += 1;
@@ -649,7 +630,7 @@ export function HistorialVentasView() {
         const subStr = sale.currency === 'USD'
             ? `$ ${subtotalVal.toFixed(2)}`
             : `Bs. ${subtotalVal.toFixed(2)}`;
-        doc.text(subStr, colPriceX, y, { align: 'right' });
+        doc.text(subStr, mr, y, { align: 'right' });
         y += 4;
 
         if (sale.discount > 0) {
@@ -659,7 +640,7 @@ export function HistorialVentasView() {
             const descStr = sale.currency === 'USD'
                 ? `-$ ${sale.discount.toFixed(2)}`
                 : `-Bs. ${sale.discount.toFixed(2)}`;
-            doc.text(descStr, colPriceX, y, { align: 'right' });
+            doc.text(descStr, mr, y, { align: 'right' });
             y += 4;
             doc.setTextColor(15, 23, 42);
         }
@@ -674,7 +655,7 @@ export function HistorialVentasView() {
         const totalStr = sale.currency === 'USD'
             ? `$ ${sale.total.toFixed(2)} USD`
             : `Bs. ${sale.total.toFixed(2)}`;
-        doc.text(totalStr, colPriceX, y, { align: 'right' });
+        doc.text(totalStr, mr, y, { align: 'right' });
         y += 5;
 
         if (tpl.showPaymentMethod) {

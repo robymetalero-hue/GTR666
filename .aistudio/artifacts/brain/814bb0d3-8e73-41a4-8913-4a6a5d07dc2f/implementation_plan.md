@@ -1,114 +1,158 @@
-# Plan de Implementación: Mejoras de Interfaz, Usabilidad y Legibilidad (M01 - M10) — GTR666
+# Plan de Intervención: Remediación de Contaminación y Aislamiento Estricto de Entornos (GTR666)
 
-## 1. Visión General y Alcance
-El objetivo es elevar la legibilidad, agilidad operativa y experiencia de usuario de **GTR666** en dispositivos móviles (vertical y horizontal corto), tablets y computadoras de escritorio, sin alterar la lógica de negocio, contratos de API, permisos, transacciones ni bases de datos.
-
-Se aplican las tres decisiones clave del usuario:
-- **Favoritos**: Pestaña destacada al inicio del carrusel de categorías en el POS.
-- **Tickets térmicos en 58 mm**: Desglose detallado en dos líneas (Línea 1: Nombre envuelto; Línea 2: `cant. × P.Unit = Subtotal`).
-- **Carrito en móvil**: Minimizado con badge flotante y notificación rápida para permitir escaneo ágil y continuo sin interrumpir el catálogo.
+Plan de remediación y blindaje de arquitectura para corregir la contaminación de registros de prueba generados desde la venta #399 en adelante, garantizando la preservación matemática intacta de la venta legítima #398 (Bs 2.150, @maria) y ventas históricas, con aislamiento hermético entre entornos para impedir cualquier recurrencia futura.
 
 ---
 
-## 2. Desglose de Cambios por Módulo (M01 - M10)
+### Decisiones de la Consulta y Confirmaciones de Usuario
 
-### M01. POS Adaptable y Descripciones Legibles (`src/views/POS.tsx`)
-- **Problema**: Tarjetas con `h-7`/`h-8` rígido y `line-clamp-2` que cortan nombres largos (ej. modelos y capacidades); toques en imagen agregan accidentalmente productos al carrito.
-- **Acciones**:
-  1. Reemplazar alturas fijas por `min-h-[2.5rem]` y `break-words` permitiendo 2 a 3 líneas completas de texto.
-  2. Implementar `e.stopPropagation()` al hacer clic en fotos, botones de detalle o estrellas de favoritos para evitar agregados no intencionales.
-  3. Asegurar contenedores con `min-w-0` y scroll vertical fluido sin desbordamiento horizontal en pantallas desde 320 px hasta 412 px y 800×360 px (horizontal corto).
-  4. Mantener la paginación inicial de 48 artículos y los tres modos de vista (`grid`, `compact-grid`, `list`).
-
-### M02. Panel de Cobro Más Claro y Acción Accesible (`src/views/POS.tsx`)
-- **Problema**: El modal de cobro tiene botones y campos pequeños, y en celulares con teclado en pantalla la acción principal queda inaccesible.
-- **Acciones**:
-  1. Reorganizar la ventana en 3 bloques visuales claros:
-     - **Resumen destacado**: Total a Pagar en BOB grande (28–32 px), con indicador de moneda explícito.
-     - **Entrada de pago**: Campo de Efectivo Recibido y Cambio/Vuelto (20–24 px) en color verde/esmeralda distinguible.
-     - **Métodos y datos**: Selector de método (Efectivo, QR, Transferencia, Crédito) con campos contextuales.
-  2. Estructura con `max-h-[90vh]`, encabezado fijo, cuerpo con scroll independiente y pie de acción fijo accesible incluso con teclado virtual abierto.
-  3. Conservar 100% de la lógica de descuentos, puntos, abonos y `clientOperationId`.
-
-### M03. Carrito Más Fácil de Revisar y Editar (`src/views/POS.tsx`)
-- **Problema**: Botones `+` y `-` con áreas táctiles reducidas; la barra móvil del POS choca con la barra de navegación del shell en ciertas resoluciones.
-- **Acciones**:
-  1. Aumentar el tamaño táctil de los controles a un mínimo de 44×44 px (`touch-target`), separando claramente el botón de eliminar del de incrementar cantidad.
-  2. Nombre del producto con espacio amplio y visualización clara de tipo de precio (unitario, mayorista, manual).
-  3. Respetar la decisión del usuario: en pantallas móviles el carrito se mantiene como barra/badge flotante inferior interactivo con contador en tiempo real, permitiendo seguir escaneando sin obstrucciones.
-  4. Ajustar el offset inferior de la barra móvil coordinándose con la visibilidad real del shell (`landscape-hide`).
-
-### M04. Confirmación de Escaneo Sincronizada con el Resultado Real (`src/views/POS.tsx` y `src/components/BarcodeScannerModal.tsx`)
-- **Problema (UI21)**: Cuando se escanea un producto agotado o sin stock, el modal confirmaba éxito con beep a pesar de que el carrito rechazaba la operación.
-- **Acciones**:
-  1. Modificar `addToCart` para devolver un resultado estructurado `{ success: boolean, reason?: string, quantity?: number }`.
-  2. En `BarcodeScannerModal.tsx`: invocar feedback de éxito (sonido/vibración) **únicamente** si `addToCart` devuelve `success: true`.
-  3. En caso de stock agotado o límite alcanzado, emitir sonido/notificación de advertencia sin confirmar falso agregado.
-  4. Mantener intacto el cooldown de cámara (1500 ms) y permitir escaneos secuenciales rápidos desde lectores USB de código de barras.
-
-### M05. Favoritos del Cajero (`src/views/POS.tsx` y `src/utils/posUiPreferences.ts`)
-- **Problema**: No existe forma de fijar los artículos de alta rotación para acceder a ellos sin tipear en el buscador.
-- **Acciones**:
-  1. Crear el utilitario `posUiPreferences.ts` para persistir arrays de `product_id` en `localStorage` bajo claves seguras por usuario (`gtr_favs_<userId>`).
-  2. Agregar pestaña destacada "★ Favoritos" al inicio del carrusel de categorías en el POS.
-  3. Añadir botón de estrella accesible en cada tarjeta de producto (marcar/desmarcar con un solo toque sin alterar el carrito ni emitir llamadas de red).
-  4. Filtrar reactivamente los IDs favoritos contra el catálogo activo en memoria (`products`), descartando productos inexistentes o eliminados.
-
-### M06. Filtros de Inventario Combinables (`src/views/Inventory.tsx`)
-- **Problema**: El selector de categorías se mezcla con el estado de stock impidiendo filtrar simultáneamente, por ejemplo, "Memorias" que estén "Sin stock".
-- **Acciones**:
-  1. Separar el estado en dos controles independientes:
-     - **Categoría**: "Todas", "Memorias", "Cargadores", etc.
-     - **Disponibilidad**: "Todos", "Disponibles (>0)", "Bajo stock (<= alarma)", "Sin stock (<=0)".
-  2. Permitir la combinación simultánea de Categoría + Estado de Stock + Búsqueda de texto (`filterAndRankProducts`).
-  3. Añadir botón "Restablecer filtros" y contador dinámico de artículos filtrados vs total disponible.
-
-### M07. Pedidos y Entregas con Información y Scroll Claros (`src/views/CuentasPorCobrarView.tsx`)
-- **Problema**: La pestaña de pedidos pendientes sufre de scrolls anidados rígidos (`max-h: 62vh`) dificultando la lectura de destinos largos y la finalización en Android.
-- **Acciones**:
-  1. Eliminar cajas de scroll anidadas y permitir flujo natural con scroll principal en la tarjeta.
-  2. Envolver nombres de clientes, destinos y transportadoras largas (`break-words`).
-  3. Agrupar botones de acción: Ver documentos / Orden de almacén, Editar pedido, Registrar abono y Finalizar entrega, destacando la acción principal según el estado.
-
-### M08. Historial y Detalle de Ticket Más Directos (`src/views/ExtraViews.tsx`)
-- **Problema**: En dispositivos móviles, revisar los artículos de una venta pasada y reimprimir requiere maniobras complejas.
-- **Acciones**:
-  1. Optimizar el modal de detalle de venta en `HistorialVentasView`: cabecera con ticket #, fecha, cajero, método y tabla limpia de artículos.
-  2. Botones de acción directos: Reimprimir PDF, Descargar Imagen de Comprobante y Compartir WhatsApp.
-  3. Asegurar que al cerrar el detalle se conserve la posición de scroll y la lista de ventas previamente paginada.
-
-### M09. Ticket Térmico Coherente en 58 mm y 80 mm (`src/views/POS.tsx`, `src/views/ExtraViews.tsx`, `src/views/ConfiguracionesView.tsx`, `src/views/CuentasPorCobrarView.tsx`)
-- **Problema**: Varios generadores fijaban rígidamente `width = 80`, ignorando la configuración guardada de 58 mm; los textos largos se solapaban en comprobantes angostos.
-- **Acciones**:
-  1. Leer y respetar la opción de ancho de ticket (`58` u `80` mm) desde las configuraciones del sistema.
-  2. Implementar para 58 mm el formato en dos líneas por artículo:
-     - Línea 1: Nombre completo envuelto con `doc.splitTextToSize`.
-     - Línea 2: `[cantidad] × Bs [precio_unitario] = Bs [subtotal]`.
-  3. Calcular dinámicamente la altura del PDF (`doc.internal.pageSize`) sumando las líneas reales generadas, garantizando que tickets con 30 o 40 ítems nunca se corten ni solapen.
-  4. Sincronizar la vista previa de `ConfiguracionesView` con el motor de impresión real.
-
-### M10. Consistencia Visual, Modo Oscuro, RGB y Accesibilidad (`src/index.css`)
-- **Problema**: Algunos botones con tema RGB activo pierden visibilidad en estado `disabled` o de error; textos pequeños (<12 px) en pantallas de alta densidad.
-- **Acciones**:
-  1. Estandarizar tamaños de fuente para lectura de operaciones a 13–14 px.
-  2. Asegurar que clases como `disabled:opacity-40`, `cursor-not-allowed` y colores de advertencia prevalezcan incluso ante temas RGB con `!important`.
-  3. Respetar media query `prefers-reduced-motion` para usuarios que requieren menor movimiento en transiciones.
+> [!IMPORTANT]
+> A partir de las aclaraciones del usuario en la Fase 1, se han fijado las siguientes directrices operativas:
+> - **Estrategia de Ejecución**: Ejecutar la limpieza atómica y el aislamiento de entornos directamente con respaldo previo íntegro y verificado (sin frenar la operación en esperas intermedias).
+> - **Blindaje de Pruebas**: Bloquear de forma estricta (`fail-closed`) la ejecución de cualquier runner o script de prueba contra bases o servicios de producción, forzando el uso exclusivo de bases SQLite temporales y entornos aislados.
+> - **Sincronización con Firestore**: Purgar físicamente los documentos remotos de prueba e insertar marcadores duraderos de invalidación (`tombstones`) para impedir que sincronizaciones posteriores resuciten registros eliminados.
 
 ---
 
-## 3. Plan de Verificación y Aceptación
-1. **Verificación Estática y de Tipos**:
-   - Ejecutar `compile_applet` para garantizar cero errores de TypeScript y Vite.
-2. **Pruebas Funcionales No Regresivas**:
-   - Correr toda la suite de pruebas del servidor y seguridad:
-     - `tests/test_audit_c227fa0_fixes.cjs`
-     - `tests/check_kiosk_v2.cjs`
-     - `tests/test_all_six_points.cjs`
-     - `tests/txt_critical_fixes_runner.cjs`
-     - `tests/audit_cycle_runner.cjs`
-3. **Validación de la Matriz de Interfaz (V01-V10, C01-C07, P01-P07, E01-E04, F01-F06, H01-H05, T01-T07, A01-A04)**:
-   - Crear un runner de pruebas automatizado para verificar:
-     - Resolución del caso UI21 (agotado en escáner sin falso positivo).
-     - Persistencia y aislamiento de favoritos por usuario.
-     - Combinación de filtros de inventario (categoría + estado de stock).
-     - Formato de 58 mm en dos líneas y respeto de `ticketWidth`.
+## 1. Visión General y Alcance del Incidente
+
+### 1.1 Causa Raíz Identificada
+1. **Fallback Silencioso a Producción**: `server.ts:2` define `process.env.APP_ENV = process.env.APP_ENV || 'production'`, haciendo que cualquier proceso donde `APP_ENV` no esté explícitamente configurado se ejecute con privilegios y rutas comerciales.
+2. **Preferencia Insegura en Runners de Pruebas**: Scripts como `tests/test_all_six_points.cjs`, `tests/test_product_history_synthesis.cjs` y `tests/test_audit_c227fa0_fixes.cjs` utilizaban `fs.existsSync('./gtr_pos.db') ? './gtr_pos.db' : './gtr_pos_sandbox.db'`, conectándose directamente a la base de datos viva y emitiendo `POST /api/sales` sin cabeceras de sandbox.
+3. **Efectos en Cascada**: Cada venta de prueba ejecutada contra la API viva impactó stock (`products.stock`), caja (`cash_movements` y `cash_accounts`), auditoría y colas de sincronización hacia Firestore.
+
+### 1.2 Límites Estrictos de la Intervención
+- **Frontera de Preservación Inviolable**: La venta **#398** (Bs 2.150, efectivo, 40 ítems, usuario `@maria`), así como todas las ventas legítimas anteriores (#1 a #398), quedan **100% intactas y protegidas**.
+- **Prohibición de Borrados Ciegos**: Queda terminantemente prohibido ejecutar sentencias tipo `DELETE FROM sales WHERE id >= 399` o búsquedas por comodín `LIKE '%399%'`.
+- **Prohibición de Resets Globales**: No se utilizará `/api/admin/reset-database` ni `clearAllFirestoreAndLocalData`. La intervención se ejecuta exclusivamente sobre la lista cerrada de IDs de prueba identificados.
+
+---
+
+## 2. Experiencia de Usuario, Auditoría y Transparencia
+
+Aunque la mayor parte de la intervención es a nivel de base de datos y middleware de servidor, el sistema de información debe reflejar la salud y seguridad de los datos:
+
+1. **Aislamiento Visual de Entornos en Shell y Encabezado**:
+   - En entornos locales o de desarrollo sin credenciales comerciales explícitas, el banner de modo `SANDBOX / AISLADO` se mantendrá activo y visible sin ambigüedades.
+   - En producción comercial (`dspos.app`), el indicador permanece limpio y protegido contra cualquier spoofing de cabeceras (`x-app-environment`).
+2. **Trazabilidad en Kárdex y Módulo de Auditoría**:
+   - Las ventas de prueba retiradas dejarán de figurar como transacciones operativas en el historial de ventas, cortes de caja y balances contables.
+   - Se conservará un registro administrativo formal en `system_audit_logs` que documentará la intervención técnica con ID de incidente, fecha, usuario responsable y delta corregido, garantizando que el Kárdex forense cuadre exactamente con el stock físico.
+
+---
+
+## 3. Decisiones de Producto y Arquitectura
+
+### 3.1 Aislamiento "Fail-Closed" en Servidor y Base de Datos
+- **Enfoque Seleccionado**: Modificar `server.ts` y `database.ts` para que, en ausencia de `APP_ENV`, el servidor **falle de manera cerrada** (`fail-closed`) o asuma `development/sandbox` en entornos locales/preview, requiriendo una asignación deliberada para acceder al almacenamiento de producción.
+- **Justificación**: Elimina de raíz la posibilidad de que un desarrollador o agente de IA arranque un script o proceso sin parámetros y contamine la tienda real.
+
+### 3.2 Barrera de Contención en Scripts de Prueba (`tests/*.cjs`)
+- **Enfoque Seleccionado**: Refactorizar todos los scripts de prueba en `tests/` para que:
+  1. Verifiquen al inicio `process.env.APP_ENV === 'test'`. Si no está configurado, o si apunta a producción, el runner aborta inmediatamente con código de salida 1.
+  2. Prohíban terminantemente abrir `./gtr_pos.db`. Cada suite usará una base de datos temporal efímera (ej. `./gtr_pos_test_runner.db` o memoria SQLite) que se inicializa y destruye en cada ciclo.
+  3. No envíen solicitudes mutantes (`POST`, `PUT`, `DELETE`) hacia puertos o dominios productivos.
+
+### 3.3 Restitución Matemática de Inventario
+- **Fórmula de Corrección**: Por cada producto afectado por una venta de prueba, la restitución neta es:
+  $$\Delta \text{Stock} = \sum (\text{Unidades vendidas en prueba}) - \sum (\text{Unidades ya devueltas en prueba})$$
+- Si una prueba no alteró el stock o si existió un conteo físico posterior que absorbió la discrepancia, se respeta la realidad física sin generar "unidades fantasma".
+
+### 3.4 Conciliación de Caja y Cuentas por Cobrar
+- Revertir únicamente los movimientos reales en `cash_movements` vinculados a las ventas de prueba seleccionadas.
+- Si una venta se insertó directamente sin movimiento de caja, no se deducen saldos a ciegas.
+- Si existió un arqueo o liquidación mixta, se conserva la evidencia física de entrega y se ajusta la trazabilidad del cálculo sin alterar montos físicos entregados.
+
+---
+
+## 4. Arquitectura Técnica y Estrategia de Datos
+
+### 4.1 Diagrama de Aislamiento y Flujo de Intervención
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                        ARQUITECTURA DE AISLAMIENTO                     │
+└────────────────────────────────────────────────────────────────────────┘
+
+    [ Tests Automatizados / Agentes ]          [ Tráfico Comercial / Usuarios ]
+                    │                                         │
+                    ▼                                         ▼
+         APP_ENV === 'test'                        APP_ENV === 'production'
+                    │                                         │
+       ┌────────────┴────────────┐               ┌────────────┴────────────┐
+       │   Guarda Fail-Closed    │               │  Validación Host/Secret │
+       │  Rechaza gtr_pos.db     │               │    Base de Datos Real   │
+       └────────────┬────────────┘               └────────────┬────────────┘
+                    │                                         │
+                    ▼                                         ▼
+       [ gtr_pos_test_tmp.db ]                         [ gtr_pos.db ]
+          (Base Efímera)                           (Producción Blindada)
+                                                              │
+                                                              ▼
+                                                   [ Transacción de Limpieza ]
+                                                   1. Backup SQLite & WAL
+                                                   2. Snapshot de IDs >= 399
+                                                   3. Reversa Inventario & Caja
+                                                   4. Cuarentena & Borrado
+                                                   5. Purga Firestore + Tombstones
+```
+
+### 4.2 Fases del Procedimiento de Remediación
+
+#### Fase 1: Respaldo Coherente y Snapshot Inmutable
+1. Detener escritores y sincronizadores en segundo plano.
+2. Crear copia de seguridad completa y verificable de `gtr_pos.db`, `gtr_pos.db-wal` y `gtr_pos.db-shm` en una ruta privada fuera del alcance web (`backups/incident_399_pre_clean_<timestamp>.db`).
+3. Comprobar integridad de la copia mediante `sqlite3` y verificar que la venta #398 y sus 40 ítems se encuentren íntegros.
+4. Generar el manifiesto con los IDs exactos de ventas de prueba (desde #399 hasta el máximo actual observado) con sus hashes y dependencias.
+
+#### Fase 2: Transacción Atómica de Limpieza en SQLite
+Dentro de un único bloque de transacción SQLite (`BEGIN IMMEDIATE`):
+1. **Verificación de Invariante**: Comprobar que `sales WHERE id = 398` existe, tiene `total = 2150` y usuario `@maria`. Si falla, abortar con `ROLLBACK`.
+2. **Archivo a Cuarentena**: Guardar las filas seleccionadas de `sales`, `sale_items`, `cash_movements`, `accounts_receivable`, etc., en una tabla privada de auditoría (`incident_quarantine_records`).
+3. **Ajuste de Inventario**: Aplicar las restituciones exactas calculadas producto por producto.
+4. **Ajuste de Caja**: Revertir los movimientos de efectivo comprobados de dichas ventas en `cash_accounts`.
+5. **Retiro de Dependencias**: Eliminar ordenadamente de:
+   - `sale_items` (por `sale_id IN (...)`)
+   - `sale_returns` (por `sale_id IN (...)`)
+   - `cash_movements` (por `sale_id IN (...)`)
+   - `accounts_receivable` y `credit_payments`
+   - `processed_operations` (marcando las claves como inválidas para evitar reintentos offline)
+   - `sales` (por los IDs explícitos de la lista)
+6. **Marcadores de Eliminación**: Registrar en `deleted_records` para que la sincronización identifique el retiro.
+7. **Commit**: Consolidar la transacción de forma indivisible.
+
+#### Fase 3: Purga Remota en Firestore y Prevención de Resurrección
+1. Consultar en la colección `sales` de Firestore los documentos correspondientes a los IDs eliminados.
+2. Ejecutar borrado remoto (`deleteDoc`) en batch de:
+   - `sales/{saleId}`
+   - `sale_items` vinculados
+   - `cash_movements` vinculados
+3. Actualizar en Firestore los documentos de `products` con el stock corregido.
+4. Insertar documentos de control de invalidación (`tombstones`) para impedir que clientes offline sincronicen y resuciten estas ventas de prueba.
+
+#### Fase 4: Blindaje Permanente del Código Fuente
+1. **`server.ts`**: Corregir la resolución predeterminada de `APP_ENV` para que nunca asuma silenciosamente producción en entornos de desarrollo o pruebas.
+2. **`database.ts`**: Bloquear el acceso a `prodDbPath` si el contexto detectado es de prueba o runner automatizado.
+3. **`tests/*.cjs`**: Actualizar todos los scripts de prueba para requerir `APP_ENV=test`, usar bases temporales y rechazar conexiones contra bases comerciales.
+
+---
+
+## 5. Matriz de Verificación y Escenarios de Aceptación (01 - 30)
+
+Una vez ejecutada la intervención, se validarán punto por punto los 30 escenarios estipulados en la instrucción oficial:
+
+| Escenario | Criterio de Aceptación | Método de Verificación |
+|---|---|---|
+| **01** | #398 conserva exactamente total, moneda, usuario, fecha y líneas | Consulta SELECT explícita y hash SHA-256 de fila y líneas |
+| **02** | Ventas reales anteriores a #399 intactas | Recuento e integridad referencial de #1 a #398 |
+| **03** | IDs de prueba no aparecen en historial comercial | Búsqueda en API `/api/sales` e historial |
+| **04** | Ventas legítimas posteriores preservadas | Verificación de cualquier venta real posterior al corte |
+| **05 - 09** | Restitución exacta de stock sin duplicidades ni ítems fantasmas | Comparación Kárdex vs `products.stock` antes y después |
+| **10 - 12** | Saldos de caja y tasas históricas cuadradas | Conciliación de `cash_accounts` y `cash_movements` |
+| **13 - 14** | Cero créditos, abonos o puntos huérfanos | Verificación de integridad en `accounts_receivable` |
+| **15** | Kárdex forense coincide con stock físico | Ejecución de `forensicAuditEngine.ts` |
+| **16** | Idempotencia: reejecución no duplica corrección | Prueba de corrida secundaria de la intervención |
+| **17 - 18** | Manejo de fallos y no falsos positivos | Verificación de rollback y visibilidad de estado |
+| **19 - 22** | Sincronización no resucita registros ni en reinicios | Prueba de ciclo pull/push y reinicio de servidor |
+| **23 - 25** | Runners no abren producción ni escriben en Firestore real | Ejecución de suite de pruebas con guardas activas |
+| **26 - 30** | Reportes, permisos y respaldos íntegros y operativos | Validación de reportes POS, login de cajero y test de backup |

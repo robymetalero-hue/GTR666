@@ -1,0 +1,490 @@
+GTR666 / DIGITAL STORE
+INCIDENTE: REGISTROS DE PRUEBA EN PRODUCCIÓN DESDE LA VENTA #399
+Instrucción de intervención para Google AI Studio
+Fecha: 27 de octubre de 2026, hora de Bolivia
+
+ESTADO DE ESTA REVISIÓN
+Se revisó el video 1000363325.mp4 y el código de main en:
+4826179a3eee6d51c571a617ec50ec1637994b38
+Repositorio: https://github.com/robymetalero-hue/GTR666
+
+Este archivo NO acredita una limpieza realizada. En esta revisión no se borraron
+ventas, no se modificaron GitHub ni el despliegue, y no se accedió a la base de
+producción. La aplicación https://dspos.app/ mostró su pantalla de acceso.
+La intervención real necesita acceso administrativo al servidor que mantiene
+SQLite y a su Firestore de producción. Editar o publicar código no demuestra,
+por sí solo, que los datos ya fueron corregidos.
+
+============================================================
+1. INSTRUCCIÓN DEL PROPIETARIO Y LÍMITE DE LA LIMPIEZA
+============================================================
+
+El propietario identifica como real la venta #398 por Bs 2.150 y declara que
+las ventas desde #399 en adelante son registros de prueba generados por IA.
+
+El video permite leer:
+- Venta #398: Bs 2.150, efectivo, @maria, 40 ítems mostrados. CONSERVAR.
+- Venta #397: Bs 8.500, @maria. CONSERVAR.
+- Venta #396: Bs 610, @maria. CONSERVAR.
+- Venta #399: Bs 2, @admin. Primer ID señalado para retirar.
+- Hay ventas posteriores de @admin, @vendedor_test y @maria.
+- Se observa al menos hasta #422; el video no demuestra cuál es el máximo actual.
+
+El usuario visible NO define por sí solo si una venta es real: hay pruebas
+atribuidas a usuarios reales. Tampoco se deben seleccionar únicamente ventas
+por Bs 2, ni todas las ventas de @maria, ni todos los registros de una fecha.
+
+Retirar del historial comercial las ventas de prueba identificadas desde #399
+y corregir sus efectos comprobados en inventario, caja y crédito. Conservar la
+venta #398 y todos los registros comerciales anteriores al límite.
+
+NO dejar un borrado automático o permanente de "id >= 399": las próximas ventas
+legítimas también tendrán IDs mayores. Detener primero a los procesos que están
+generando pruebas y materializar una lista exacta de ventas existentes. Fijar
+un máximo observado en esa instantánea y una huella de cada fila seleccionada.
+Ejecutar únicamente contra esa lista cerrada. No dar por hecho que #422 es el
+último registro existente ni inventar ventas faltantes.
+
+Si aparecieron ventas comerciales nuevas después del momento señalado por el
+propietario, preservarlas y separar ese caso antes de ampliar la lista. Un límite
+numérico sin una instantánea no distingue las pruebas antiguas de ventas nuevas.
+
+============================================================
+2. HALLAZGOS COMPROBADOS EN EL CÓDIGO
+============================================================
+
+Se comprobaron por SHA Git nueve archivos relevantes contra el commit indicado:
+server.ts, database.ts, firebaseSync.ts, firestoreIntegrityMiddleware.ts,
+forensicAuditEngine.ts y cuatro scripts de pruebas citados abajo.
+
+A. Producción es el valor predeterminado
+server.ts:2:
+process.env.APP_ENV = process.env.APP_ENV || 'production';
+
+El middleware de entorno está alrededor de server.ts:206-241. La rama de
+producción tiene prioridad sobre la cabecera x-app-environment del cliente.
+
+Se ejecutó únicamente ese fragmento, con entradas ficticias y sin servidor,
+bases, HTTP, Firebase ni credenciales. Se verificaron siete comportamientos:
+1) APP_ENV ausente + localhost:3000: producción.
+2) APP_ENV ausente + localhost + cabecera sandbox: producción.
+3) APP_ENV ausente + NODE_ENV=development + servicio ais-dev: producción.
+4) APP_ENV=sandbox + localhost: sandbox.
+5) APP_ENV=sandbox + host dspos.app: producción.
+6) APP_ENV=production + dspos.app + cabecera sandbox: producción.
+7) APP_ENV=production + localhost + cabecera sandbox: producción.
+
+Esto prueba un camino de selección de producción durante pruebas si se ejecuta
+con esa configuración. NO demuestra por sí solo qué proceso creó cada venta
+del video; para atribuirlas hay que revisar logs y registros reales.
+
+B. Hay pruebas que escriben sobre la base comercial
+tests/test_all_six_points.cjs:
+- Prefiere ./gtr_pos.db si existe, antes que gtr_pos_sandbox.db.
+- Obtiene productos y usuarios de esa base.
+- Crea el usuario vendedor_test cuando falta.
+- Genera solicitudes POST /api/sales hacia localhost:3000.
+- No es una validación exclusivamente de lectura.
+
+tests/test_product_history_synthesis.cjs:
+- También prefiere gtr_pos.db si existe.
+- Crea o modifica el producto TEST-S26.
+- Inserta directamente ventas y líneas, y modifica stock.
+- Contiene borrados de registros asociados al producto de prueba.
+
+tests/test_audit_c227fa0_fixes.cjs:
+- Lee la base gtr_pos.db y material de autenticación del entorno.
+- Envía solicitudes de ventas y pedidos a localhost:3000.
+- Usa identidades de usuarios existentes en las pruebas.
+
+tests/test_financial_history_and_rates.cjs:
+Debe incluirse en la revisión preventiva de pruebas con acceso a datos.
+No ejecutar estos scripts contra producción para investigar este incidente.
+
+La presencia de @vendedor_test y montos pequeños es compatible con pruebas,
+pero solo la trazabilidad real puede confirmar la ejecución concreta.
+
+C. Las ventas tienen efectos fuera del historial
+POST /api/sales, alrededor de server.ts:5929:
+- Inserta sales y sale_items.
+- Descuenta products.stock.
+- Registra inventory_audit_logs y system_audit_logs.
+- Crea cash_movements y actualiza cash_accounts.
+- Puede modificar puntos del cliente.
+- Puede crear accounts_receivable y credit_payments.
+- Registra processed_operations y solicita sincronización a Firestore.
+
+Otros scripts insertan filas directamente y pueden saltarse parte de esos
+efectos. Por eso no corresponde devolver stock o descontar caja a ciegas
+suponiendo que todas las ventas se crearon por el mismo camino.
+
+D. La sincronización puede hacer reaparecer registros
+firebaseSync.ts:
+- SYNC_TABLES incluye sales, sale_items, products, caja, crédito y auditorías.
+- recordDeletion registra eliminaciones locales en deleted_records.
+- deleteFromFirestore intenta el borrado remoto, pero puede retornar sin
+  ejecutarlo por indisponibilidad/cuota y maneja errores sin propagarlos.
+- Una llamada a esas funciones NO equivale a una confirmación remota.
+- Los marcadores locales no bastan para demostrar protección en todas las
+  instancias, dispositivos y restauraciones.
+
+No basta con quitar filas de SQLite ni con ocultarlas en React.
+
+============================================================
+3. PRIMERA ACCIÓN: DETENER LA CONTAMINACIÓN
+============================================================
+
+Antes de limpiar:
+- Detener los scripts y agentes que estén creando datos de prueba.
+- Mantener las pruebas de ventas fuera del servidor y las credenciales reales.
+- Identificar el proceso/servicio que escucha en localhost:3000 en AI Studio.
+- Identificar el APP_ENV efectivo, la ruta SQLite, el servicio desplegado,
+  el proyecto Firebase, la base Firestore y las colecciones efectivas.
+- No imprimir claves, contraseñas, tokens ni secretos en la conversación.
+- No simular otra venta en producción "para comprobar si funciona".
+- Coordinar una ventana de mantenimiento breve para los escritores afectados.
+  Si hay varias instancias, detener también sus pulls/pushes y conciliadores
+  durante la intervención. Un indicador visual de mantenimiento no bloquea
+  por sí solo escrituras del servidor ni sincronizaciones en segundo plano.
+- Conservar las colas locales; no vaciar toda IndexedDB ni todo localStorage.
+  Separar únicamente operaciones de prueba que estén identificadas.
+
+No usar "reiniciar base", clearAllFirestoreAndLocalData,
+POST /api/admin/reset-database, ni restaurar una copia vieja de toda la tienda.
+Esas acciones podrían destruir ventas reales y otros cambios posteriores.
+
+============================================================
+4. RESPALDO Y DIAGNÓSTICO REAL, ANTES DE BORRAR
+============================================================
+
+Hacer y verificar un respaldo coherente:
+- SQLite mediante su API de backup o una copia coherente con los escritores
+  detenidos; no copiar solo gtr_pos.db ignorando su WAL activo.
+- Exportar los documentos Firestore afectados y sus versiones/metadatos.
+- Guardar las filas seleccionadas y sus relaciones en un archivo privado de
+  cuarentena, junto con el motivo, fecha, operador y hash del respaldo.
+- Comprobar que la copia se abre y que contiene #398 y las filas a retirar.
+- El respaldo y la evidencia no deben quedar en GitHub, public/, assets/,
+  shared_tickets/ ni dentro de una URL pública.
+
+Preparar un modo de diagnóstico que NO escriba ni sincronice datos.
+Evitar importar módulos cuyo arranque ejecute migraciones, conciliaciones,
+autenticación de servidor o sincronización cuando solo se desea inspeccionar.
+
+Consultas orientativas de SOLO LECTURA, adaptadas al esquema real:
+
+SELECT s.id, s.created_at, s.total, s.currency, s.exchange_rate,
+       s.payment_method, s.user_id, u.username, s.client_id,
+       s.client_operation_id, s.cierre_id
+FROM sales s
+LEFT JOIN users u ON u.id = s.user_id
+WHERE s.id >= 399
+ORDER BY s.id;
+
+SELECT * FROM sales WHERE id = 398;
+SELECT * FROM sale_items WHERE sale_id = 398 ORDER BY id;
+
+Estas consultas identifican candidatos; NO son una orden de borrar un rango
+abierto. Tras leer la instantánea, sustituir el rango por IDs explícitos
+parametrizados en cualquier operación de intervención.
+
+El diagnóstico debe entregar:
+- Lista exacta de ventas, fecha, usuario, importe y moneda.
+- Máximo de ID observado, lista final seleccionada y sus hashes.
+- Número de líneas y unidades por producto.
+- Devoluciones existentes y cantidades ya restituidas.
+- Movimientos y saldos de caja realmente afectados.
+- Cuentas por cobrar, pagos, puntos y cierres/liquidaciones relacionados.
+- Documentos y operaciones offline vinculados.
+- Filas de idempotencia y auditoría relacionadas.
+- Diferencias entre SQLite y Firestore antes de intervenir.
+- Huella de sales #398 y de sus sale_items, y de las ventas reales anteriores.
+
+No sumar USD y BOB como si fueran la misma moneda. El informe debe conservar
+la moneda original y usar la tasa histórica cuando corresponda.
+
+============================================================
+5. RELACIONES QUE SE DEBEN REVISAR
+============================================================
+
+Los IDs de estas tablas son independientes. NO borrar "id >= 399" en cada
+tabla. Una línea sale_items con id 399 puede pertenecer a una venta real.
+
+Usar las relaciones reales hacia los IDs de venta seleccionados:
+- sales.id.
+- sale_items.sale_id.
+- sale_returns.sale_id y sale_item_id.
+- cash_movements.sale_id.
+- accounts_receivable.sale_id.
+- credit_payments.account_receivable_id.
+- offline_pending_sales.resolved_sale_id y client_operation_id comprobados.
+- cash_settlements.sale_ids, que es un arreglo JSON.
+- sales.cierre_id y los cierres/resúmenes que realmente utilicen esas ventas.
+- processed_operations por claves comerciales y respuestas verificadas.
+- inventory_audit_logs por relación comprobada: por ejemplo referencias
+  exactas "Venta #399" y "Devolución #399", producto y movimiento coincidentes.
+- system_audit_logs.related_sale_id, related_ticket y demás trazabilidad.
+- Documentos compartidos de tickets, si existen para esas ventas.
+- Productos/clientes/cuentas creados exclusivamente para esas pruebas:
+  inventariarlos aparte, verificando que no tengan uso comercial.
+
+No usar LIKE '%399%' para vincular registros. Puede capturar #1399, #3990 u
+otro número sin relación. No seleccionar registros solo por nombre, usuario,
+SKU con "TEST" o importe.
+
+No ampliar automáticamente esta limpieza a pedidos, usuarios, productos,
+compras o ajustes sin demostrar que pertenecen a este incidente. Documentar
+los casos adicionales y sus vínculos. No eliminar a @maria ni sus ventas reales.
+
+============================================================
+6. CÓMO CORREGIR INVENTARIO SIN CREAR ÍTEMS FANTASMAS
+============================================================
+
+Calcular primero el efecto real de cada operación de prueba por producto.
+En el camino normal, la cantidad a restituir es:
+unidades vendidas de prueba MENOS unidades ya devueltas de esas mismas ventas.
+
+Ejemplo:
+- Una prueba vendió 3 unidades y devolvió 1.
+- Si el sistema aplicó ambos movimientos, la corrección neta es +2.
+- Reponer +3 dejaría una unidad fantasma adicional.
+
+La fórmula requiere verificar que ambos movimientos se aplicaron realmente.
+Los scripts directos pueden insertar ventas sin registrar caja, o manipular
+stock por separado. Conciliar líneas, devoluciones, logs y estado actual.
+No deducir el stock correcto únicamente del total de ventas del video.
+
+Preservar entradas de mercadería, ventas reales, devoluciones reales, ajustes
+autorizados y conteos físicos posteriores. No restaurar el stock completo de
+una copia vieja ni asignar el "stock que había antes" si hubo movimientos reales
+entre medio. No cambiar precios, costos, SKU ni nombres reales para compensar.
+
+En una copia aislada:
+- Simular la limpieza sobre los mismos datos exportados.
+- Verificar stock antes, efecto falso demostrado, corrección y stock final.
+- Comprobar que ningún producto no afectado cambió.
+- Conciliar el Kárdex y el motor forense existente: retirar una venta del
+  historial sin tratar sus logs derivados puede dejar cálculos contradictorios.
+- Si hay un ajuste o conteo posterior que absorbió las pruebas, reconstruir
+  esa secuencia antes de aplicar una suma neta. Evitar una doble corrección.
+
+Si la evidencia no permite reconstruir el efecto de un producto, bloquear
+solo ese caso y declararlo pendiente; no inventar un saldo para cerrar el informe.
+
+============================================================
+7. CAJA, CRÉDITO, PUNTOS Y AUDITORÍA
+============================================================
+
+Caja:
+- Revertir los efectos reales sobre cash_accounts usando cash_movements
+  comprobados, moneda histórica, abonos y devoluciones relacionados.
+- No restar simplemente sales.total a todos los saldos.
+- Una venta insertada directamente puede no haber generado movimiento de caja.
+- Considerar que una liquidación puede incluir ventas reales y de prueba.
+  No borrar una liquidación mixta ni modificar dinero entregado físicamente
+  como si nunca hubiera existido. Emitir una corrección trazable del cálculo
+  y conservar el hecho real de entrega.
+- No usar MAX(0, saldo) para ocultar un descuadre ni poner todas las cajas a cero.
+
+Crédito y puntos:
+- Revisar cuentas por cobrar y abonos únicamente de las ventas seleccionadas.
+- Evitar saldos/pagos huérfanos y una segunda devolución del mismo dinero.
+- Conservar cualquier operación comercial real vinculada; documentar el caso
+  mixto antes de retirarlo.
+- Revertir solo los puntos realmente ganados/canjeados por esas pruebas.
+  Si no se conserva evidencia de un canje, no adivinarlo.
+
+Auditoría:
+- Conservar evidencia de qué existió y de la corrección administrativa.
+- No borrar ni modificar en bloque system_audit_logs o
+  firestore_transaction_ledger ni desactivar sus triggers de inmutabilidad
+  para ocultar el incidente.
+- Las ventas falsas deben dejar de aparecer como ventas operativas reales.
+  Su evidencia técnica puede mantenerse en un respaldo/cuarentena y en
+  auditoría con una referencia explícita a su invalidación.
+- Si un motor de reconstrucción lee esos eventos como movimientos válidos,
+  darle una exclusión precisa y verificable de este incidente, o adaptar
+  puntualmente su lectura. No dejar dos fuentes que cuenten la corrección
+  dos veces. La solución se valida comparando el Kárdex con el stock final.
+
+============================================================
+8. LIMPIEZA CONTROLADA, ATÓMICA E IDEMPOTENTE
+============================================================
+
+Preparar una intervención administrativa de una sola ocasión; no un borrado
+al arrancar el servidor, ni un filtro visual, ni una regla global para IDs altos.
+
+Antes de ejecutar:
+- Comprobar entorno, rutas/proyecto y respaldos.
+- Comprobar que cada fila seleccionada sigue teniendo el hash del diagnóstico.
+- Comprobar que #398 mantiene total 2150 BOB y conserva sus líneas.
+- Confirmar que todos los escritores y sincronizadores afectados siguen
+  detenidos o correctamente excluidos.
+- Si cambió el conjunto o los datos, generar un diagnóstico actualizado.
+- Aplicar únicamente los IDs explícitos del manifiesto.
+
+Dentro de una transacción SQLite:
+- Registrar un ID único del incidente y el estado de la intervención.
+- Verificar si ya fue aplicada. Repetir la solicitud no debe volver a sumar
+  stock, restar caja, quitar puntos ni duplicar la corrección.
+- Aplicar las correcciones probadas de saldos e inventario.
+- Archivar y retirar las filas comerciales falsas y sus dependencias exactas
+  en el orden que exija el esquema real.
+- Registrar marcadores de eliminación y la trazabilidad administrativa.
+- Conservar o retirar a estado bloqueado las claves de operaciones invalidadas.
+  No borrar simplemente processed_operations: una cola offline podría reenviar
+  la operación y generar otra venta con un ID nuevo.
+- No resetear sqlite_sequence ni renumerar tickets reales.
+- Verificar invariantes y hacer rollback ante un fallo.
+
+SQLite y Firestore no comparten una transacción local. Implementar un estado
+de intervención verificable y reanudable para no declarar éxito tras un borrado
+parcial. Si Firestore falla, conservar el estado pendiente y bloquear la
+reintroducción de las operaciones invalidadas.
+
+============================================================
+9. EVITAR QUE LA SINCRONIZACIÓN RESUCITE LAS PRUEBAS
+============================================================
+
+Verificar y corregir conjuntamente:
+- Las filas comerciales de SQLite.
+- Sus documentos exactos en las colecciones de producción de Firestore.
+- Los productos/saldos que se corrigieron.
+- Los marcadores de retiro que consultan las instancias que pueden escribir.
+- Las claves de operaciones de prueba en colas y reintentos.
+- Las operaciones offline ya resueltas hacia esas ventas.
+
+Un deleted_records local no garantiza que otra instancia ignore el mismo
+documento. La invalidación debe ser duradera y visible en los caminos reales
+de pull, push, importación y reintento que puedan revivir el registro.
+
+No incorporar deleted_records a SYNC_TABLES sin revisar cómo maneja esa
+sincronización su clave compuesta: no es una tabla con id simple.
+
+No aceptar éxito solo porque deleteFromFirestore terminó sin lanzar excepción.
+Leer de nuevo los documentos exactos en Firestore y confirmar que no existen,
+y verificar que los productos/saldos corregidos sí tienen el valor esperado.
+Una cuota, un timeout o un permiso denegado deja la intervención incompleta.
+
+Antes de reactivar:
+- Reanudar de forma controlada una instancia y verificar.
+- Probar pull y push con los IDs retirados.
+- Intentar el reenvío de una operación invalidada en la copia aislada.
+  Debe rechazarse de forma explícita sin crear otra venta.
+- Abrir otra sesión/dispositivo autorizado para comprobar el historial.
+- Reiniciar el proceso y confirmar la persistencia de la limpieza.
+- Mantener las ventas reales nuevas y no vaciar indiscriminadamente sus colas.
+
+============================================================
+10. CAMBIOS PUNTUALES PARA IMPEDIR OTRA CONTAMINACIÓN
+============================================================
+
+Separar pruebas y producción antes de continuar las mejoras de interfaz.
+
+server.ts / database.ts:
+- Resolver el entorno en el servidor con una configuración explícita y
+  verificable, antes de abrir conexiones o seleccionar colecciones.
+- Eliminar la elección silenciosa de producción para un proceso de pruebas
+  o desarrollo con APP_ENV ausente. Un proceso mal configurado debe fallar
+  de forma cerrada antes de escribir.
+- Mantener producción con su configuración explícita y comprobar que el
+  despliegue real sigue operativo. No cambiar a sandbox el servicio comercial
+  de manera accidental.
+- No dejar que Host, x-forwarded-host ni x-app-environment conviertan un proceso
+  de sandbox en uno de producción.
+- Cargar y validar la configuración en el punto correcto del arranque.
+  No poner la protección después de imports que ya abrieron la base.
+- No confiar únicamente en una etiqueta SANDBOX del frontend.
+
+Pruebas:
+- Usar bases temporales con datos ficticios y un servidor de pruebas separado.
+- Eliminar el fallback "si existe gtr_pos.db, úsala".
+- Rechazar rutas/archivos de producción antes de abrir una base con permisos
+  de escritura.
+- No usar usuarios reales, claves JWT reales ni credenciales Firebase reales.
+- No obtener el secreto de producción para firmar identidades sintéticas.
+- Permitir únicamente el servidor de pruebas que el propio runner inicializó;
+  comprobar su identidad y entorno antes de cualquier POST/PUT/DELETE.
+- Si esa verificación falta o falla, no mandar ninguna mutación.
+- Ejecutar con Firestore Emulator o dobles locales y sin permisos/red de
+  escritura a Firestore de producción.
+- No copiar silenciosamente producción a sandbox para conseguir fixtures.
+- Aplicar la protección a TODOS los runners que abren SQLite o mutan la API,
+  no solo a los tres ejemplos citados.
+- Conservar el comportamiento comercial y los cálculos reales fuera de estas
+  correcciones. No reestructurar la aplicación para resolver este incidente.
+
+La defensa debe estar antes de toda escritura. No basta con que la IA reciba
+una instrucción de "no tocar producción" si los scripts siguen pudiendo hacerlo.
+
+============================================================
+11. ESCENARIOS DE ACEPTACIÓN DE LA INTERVENCIÓN
+============================================================
+
+Estos escenarios son requisitos PARA EL EJECUTOR, todavía no ejecutados sobre
+producción ni sobre una copia de sus datos en esta revisión:
+
+01. #398 conserva exactamente total, moneda, usuario, fecha y líneas.
+02. Las ventas reales anteriores al #399 conservan sus filas y relaciones.
+03. Los IDs seleccionados no aparecen como ventas reales en el historial.
+04. Las ventas legítimas creadas después de la instantánea siguen presentes.
+05. Un producto vendido solo en pruebas recupera el efecto demostrado.
+06. Una devolución parcial de prueba no produce doble reposición.
+07. Un producto con ventas reales posteriores mantiene sus descuentos reales.
+08. Un conteo/ajuste posterior no origina una segunda corrección de stock.
+09. Un producto no afectado queda idéntico.
+10. Una venta insertada directamente sin movimiento de caja no causa un retiro.
+11. Caja en BOB y USD conserva las tasas y los importes históricos.
+12. Una liquidación mixta conserva las entregas físicas reales y su evidencia.
+13. No quedan créditos, abonos ni líneas huérfanas de las ventas retiradas.
+14. Los puntos se corrigen solo cuando su efecto está demostrado.
+15. El Kárdex, el stock y los cálculos forenses coinciden tras la corrección.
+16. Ejecutar dos veces el mismo incidente produce el mismo resultado final.
+17. Fallar dentro de la transacción SQLite revierte todos sus cambios.
+18. Fallar Firestore deja un estado pendiente visible, sin éxito falso.
+19. Pull/push posteriores no reintroducen ventas ni líneas retiradas.
+20. Otra instancia no vuelve a publicar una copia anterior de las pruebas.
+21. Reintentar una operación invalidada no crea una venta con un ID nuevo.
+22. Reiniciar servidor y abrir otra sesión conserva el resultado.
+23. Un runner con entorno ausente o de producción no abre la base ni envía POST.
+24. Un runner no puede escribir en Firestore comercial.
+25. Las pruebas aisladas no modifican contadores, caja, usuarios ni productos
+    de producción.
+26. Los listados y reportes operativos dejan de sumar estas ventas falsas.
+27. Los IDs comerciales no se reinician ni se reutilizan.
+28. Los permisos de cajero y administrador siguen vigentes.
+29. La auditoría permite reconstruir el incidente sin ocultar su evidencia.
+30. El respaldo se puede abrir y la recuperación se ha comprobado en una copia.
+
+No probar la corrección haciendo nuevas ventas ficticias en la tienda.
+Usar copias aisladas o fixtures para las mutaciones. En producción, verificar
+de forma acotada los datos corregidos y observar el funcionamiento comercial
+real autorizado.
+
+============================================================
+12. ENTREGA EXIGIDA A AI STUDIO
+============================================================
+
+No responder solamente "todo está correcto" ni dar por terminada la tarea tras
+publicar una modificación del código.
+
+Entregar:
+- Causa confirmada y evidencia; separar lo comprobado de las hipótesis.
+- Entorno, servicio y base intervenidos, sin revelar secretos.
+- Identificador del respaldo verificado.
+- Lista exacta de IDs de ventas retiradas y cantidad de filas por tabla.
+- Productos corregidos, stock antes/después y explicación de cada delta.
+- Caja/créditos/puntos corregidos con importes, moneda y tasas.
+- Tratamiento de cierres, devoluciones y operaciones offline.
+- Estado real de SQLite y de cada conjunto afectado en Firestore.
+- Prueba de que #398 y los registros reales quedaron preservados.
+- Prueba de idempotencia y de que las pruebas no reaparecen al sincronizar.
+- Archivos de código modificados y protección aplicada a los tests.
+- Resultado real de los escenarios: PASS / FAIL / NO EJECUTADO.
+- Cualquier caso pendiente que requiera evidencia adicional.
+
+Si no se dispone de acceso al servidor o Firestore, declararlo con precisión.
+No inventar una limpieza ni afirmar que editar GitHub elimina registros de la
+base de producción.
+
+FIN DE LA INSTRUCCIÓN

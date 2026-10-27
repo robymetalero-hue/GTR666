@@ -1,5 +1,13 @@
 process.env.TZ = 'America/La_Paz';
-process.env.APP_ENV = process.env.APP_ENV || 'production';
+
+// Strict Environment Resolution:
+// Fail-closed security architecture: NEVER silently default to 'production'.
+// In development, preview containers (ais-dev), or tests, default strictly to 'sandbox'.
+// Only assume 'production' when explicitly declared or running on verified production domain (dspos.app).
+if (!process.env.APP_ENV) {
+  const isDspos = Boolean(process.env.APP_URL?.includes('dspos.app') || process.env.HOST?.includes('dspos.app'));
+  process.env.APP_ENV = isDspos ? 'production' : 'sandbox';
+}
 
 import "dotenv/config";
 import express from "express";
