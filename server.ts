@@ -650,9 +650,14 @@ async function startServer() {
   server.on("upgrade", (request, socket, head) => {
     const { pathname } = new URL(request.url || "", `http://${request.headers.host || "localhost"}`);
     if (pathname === "/live") {
-      // V01: Voice channel is reserved exclusively to the main owner/admin
+      // V01: Voice channel is reserved exclusively to the main owner/admin declared in the plan
       const authUser = authenticateWebSocketUpgrade(request, socket, true);
       if (!authUser) return;
+      if (!isMainAdmin(authUser)) {
+        socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+        socket.destroy();
+        return;
+      }
       (request as any).verifiedUser = authUser;
       wss.handleUpgrade(request, socket, head, (ws) => {
         wss.emit("connection", ws, request);
@@ -5564,9 +5569,6 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       `).all();
       res.json(returns);
     } catch (e: any) {
-      if (e.message === 'CONFLICT_409' || e.statusCode === 409) {
-        return res.status(409).json({ error: "Conflicto: la clave de operación ya fue utilizada con datos diferentes.", client_operation_id: clientOpId });
-      }
       res.status(500).json({ error: e.message });
     }
   });
@@ -5983,7 +5985,12 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
             return res.status(400).json({ error: `Cantidad de producto inválida. Las cantidades deben ser números enteros positivos.` });
           }
 
-          const safePrice = Math.max(0, Number(item.price || 0));
+          // B08: Strictly validate item price is numeric and finite for all users
+          const rawPrice = Number(item.price);
+          if (!Number.isFinite(rawPrice) || rawPrice < 0) {
+            return res.status(400).json({ error: `Precio de producto inválido. Debe ser un número no negativo.` });
+          }
+          const safePrice = rawPrice;
           expectedSubtotal += safeQty * safePrice;
 
           if (!canModifyPrices) {
@@ -6070,14 +6077,29 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         const itemInsert = db.prepare('INSERT INTO sale_items (sale_id, product_id, quantity, price, cost, product_name_snapshot, product_sku_snapshot, subtotal_minor) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
         const stockUpdate = db.prepare('UPDATE products SET stock = stock - ?, updated_at = ? WHERE id = ?');
 
+        const canonicalSalePayload = {
+          items: items.map((it: any) => ({
+            product_id: Number(it.product_id),
+            quantity: Number(it.quantity),
+            price: Number(it.price)
+          })),
+          total: safeTotal,
+          discount: safeDiscount,
+          client_id: client_id || null,
+          payment_method: payment_method || 'Efectivo',
+          currency: safeCurrency,
+          exchange_rate: currentRate,
+          user_id: effectiveUserId
+        };
+        const canonicalSaleHash = crypto.createHash('sha256').update(JSON.stringify(canonicalSalePayload)).digest('hex');
+
         const auditPayloads: any[] = [];
         const transaction = db.transaction(() => {
-          // C02 & S06 & K07: Atomic transactional check in processed_operations
+          // C02 & S06 & K07 & B04: Atomic transactional check in processed_operations
           if (clientOpId) {
             const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
             if (existingOp) {
-              const incomingHash = crypto.createHash('sha256').update(JSON.stringify({ items, total: safeTotal, discount: safeDiscount, client_id, payment_method })).digest('hex');
-              if (existingOp.payload_hash && existingOp.payload_hash !== incomingHash) {
+              if (existingOp.payload_hash && existingOp.payload_hash !== canonicalSaleHash) {
                 const conflictErr = new Error("CONFLICT_409");
                 (conflictErr as any).statusCode = 409;
                 throw conflictErr;
@@ -6254,11 +6276,10 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           }
 
           if (clientOpId) {
-            const payloadHash = crypto.createHash('sha256').update(JSON.stringify({ items, total: safeTotal, discount: safeDiscount, client_id, payment_method })).digest('hex');
             db.prepare(`
               INSERT INTO processed_operations (client_operation_id, operation_type, payload_hash, response_body, status, created_at)
               VALUES (?, 'sale', ?, ?, 'completed', ?)
-            `).run(clientOpId, payloadHash, JSON.stringify({ success: true, saleId, total: safeTotal }), nowIso);
+            `).run(clientOpId, canonicalSaleHash, JSON.stringify({ success: true, saleId, total: safeTotal }), nowIso);
           }
           return { saleId, itemIds, productIds, arId, cpId, accId, movId, inventoryAuditLogIds, isDuplicate: false };
         });
@@ -6352,6 +6373,9 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         res.json({ success: true, saleId });
     } catch (e: any) {
       console.error("[Sales API Failure]:", e);
+      if (e.message === 'CONFLICT_409' || e.statusCode === 409) {
+        return res.status(409).json({ error: "Conflicto: la clave de operación ya fue utilizada con datos comerciales diferentes.", client_operation_id: clientOpId });
+      }
       res.status(500).json({ error: e.message });
     }
   });
@@ -6381,7 +6405,8 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const uRole = String(verifiedUser?.role || '').toLowerCase();
       const isAdmin = verifiedUser && (['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser));
       const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
-      if (!isAdmin && userPerms.manage_credits === false) {
+      const canManageCredits = isAdmin || userPerms.manage_credits === true;
+      if (!canManageCredits) {
         return res.status(403).json({ error: "No tienes autorización para consultar cuentas por cobrar." });
       }
       const records = db.prepare(`
@@ -6404,7 +6429,8 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const uRole = String(verifiedUser?.role || '').toLowerCase();
       const isAdmin = verifiedUser && (['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser));
       const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
-      if (!isAdmin && userPerms.manage_credits === false) {
+      const canManageCredits = isAdmin || userPerms.manage_credits === true;
+      if (!canManageCredits) {
         return res.status(403).json({ error: "No tienes autorización para consultar el historial de crédito." });
       }
       const history = db.prepare(`
@@ -6429,7 +6455,8 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     const uRole = String(verifiedUser?.role || '').toLowerCase();
     const isAdmin = verifiedUser && (['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser));
     const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
-    if (!isAdmin && userPerms.manage_credits === false) {
+    const canManageCredits = isAdmin || userPerms.manage_credits === true;
+    if (!canManageCredits) {
       return res.status(403).json({ error: "No tienes autorización para registrar abonos a cuentas por cobrar." });
     }
 
@@ -6638,15 +6665,28 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         return res.status(400).json({ error: "El abono inicial no puede exceder el total del pedido." });
       }
 
-      // E05 & E09: Deduplication check with clientOperationId in processed_operations
+      // E05 & E09: Canonical hash & deduplication check with clientOperationId in processed_operations
+      const canonicalPendingPayload = {
+        client_name: String(client_name).trim(),
+        destination: String(destination).trim(),
+        items: items.map((it: any) => ({
+          product_id: Number(it.product_id),
+          quantity: Number(it.quantity),
+          price: Number(it.price)
+        })),
+        total: safeTotal,
+        discount: safeDiscount,
+        currency: safeCurrency
+      };
+      const pendingHash = crypto.createHash('sha256').update(JSON.stringify(canonicalPendingPayload)).digest('hex');
+
       if (clientOpId) {
         const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
         if (existingOp) {
-          const incomingHash = crypto.createHash('sha256').update(JSON.stringify({ client_name, destination, items, total: safeTotal, discount: safeDiscount })).digest('hex');
-          if (existingOp.payload_hash && existingOp.payload_hash !== incomingHash) {
+          if (existingOp.payload_hash && existingOp.payload_hash !== pendingHash) {
             return res.status(409).json({ error: "Conflicto: la clave de operación ya fue utilizada con datos diferentes.", client_operation_id: clientOpId });
           }
-          return res.status(200).json(JSON.parse(existingOp.response_body));
+          return res.status(200).json({ ...JSON.parse(existingOp.response_body), isDuplicate: true });
         }
       }
 
@@ -6722,6 +6762,15 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           const iRes = insertItem.run(pendingSaleId, item.product_id, safeQty, safePrice);
           itemIds.push(iRes.lastInsertRowid);
         }
+
+        if (clientOpId) {
+          const respBody = JSON.stringify({ success: true, pendingSaleId, itemIds });
+          db.prepare(`
+            INSERT INTO processed_operations (client_operation_id, operation_type, payload_hash, response_body, status, created_at)
+            VALUES (?, 'pending_sale', ?, ?, 'completed', ?)
+          `).run(clientOpId, pendingHash, respBody, getBoliviaISOString());
+        }
+
         return { pendingSaleId, itemIds };
       })();
       
@@ -6768,26 +6817,35 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const calculatedGross = items.reduce((sum: number, it: any) => sum + (Math.max(0, Number(it.quantity || 0)) * Math.max(0, Number(it.price || 0))), 0);
       const safeTotal = Math.max(0, Math.round((calculatedGross - safeDiscount) * 100) / 100);
 
+      // N06: Consolidate aggregate demand per product in order updates
+      const aggregatedDemand = new Map<number, number>();
       for (const item of items) {
-        const prodCheck = db.prepare('SELECT id, name, sku, price_unit, price_bulk, stock FROM products WHERE id = ?').get(item.product_id) as any;
-        if (!prodCheck) {
-          return res.status(400).json({ error: `El producto con ID ${item.product_id} no existe en el inventario.` });
-        }
+        const pId = Number(item.product_id);
         const safeQty = Number(item.quantity);
         if (!Number.isFinite(safeQty) || !Number.isInteger(safeQty) || safeQty <= 0) {
           return res.status(400).json({ error: "Cantidad de producto inválida. Las cantidades deben ser enteros positivos." });
         }
+        aggregatedDemand.set(pId, (aggregatedDemand.get(pId) || 0) + safeQty);
+      }
 
-        // T15: Net available stock check (physical stock minus reservations, excluding prior allocation of this order)
-        const currentReserved = getReservedStock(item.product_id);
-        const priorThisOrderQty = (db.prepare('SELECT quantity FROM pending_sale_items WHERE pending_sale_id = ? AND product_id = ?').get(id, item.product_id) as any)?.quantity || 0;
+      for (const [pId, totalDemand] of aggregatedDemand.entries()) {
+        const prodCheck = db.prepare('SELECT id, name, sku, stock FROM products WHERE id = ?').get(pId) as any;
+        if (!prodCheck) {
+          return res.status(400).json({ error: `El producto con ID ${pId} no existe en el inventario.` });
+        }
+        const currentReserved = getReservedStock(pId);
+        const priorRows = db.prepare('SELECT SUM(quantity) as total_qty FROM pending_sale_items WHERE pending_sale_id = ? AND product_id = ?').get(id, pId) as any;
+        const priorThisOrderQty = Number(priorRows?.total_qty || 0);
         const netAvailable = Math.max(0, (Number(prodCheck.stock) || 0) - (currentReserved - priorThisOrderQty));
-        if (safeQty > netAvailable) {
+        if (totalDemand > netAvailable) {
           return res.status(400).json({ 
-            error: `Stock disponible insuficiente para reservar "${prodCheck.name}". Disponible neto: ${netAvailable} (Físico: ${prodCheck.stock}, Reservado externo: ${currentReserved - priorThisOrderQty}), Solicitado: ${safeQty}.` 
+            error: `Stock disponible insuficiente para reservar "${prodCheck.name}". Disponible neto: ${netAvailable} (Físico: ${prodCheck.stock}, Reservado externo: ${currentReserved - priorThisOrderQty}), Demanda total solicitada: ${totalDemand}.` 
           });
         }
+      }
 
+      for (const item of items) {
+        const prodCheck = db.prepare('SELECT id, name, sku, price_unit, price_bulk, stock FROM products WHERE id = ?').get(item.product_id) as any;
         const safePrice = Math.max(0, Number(item.price || 0));
         if (!canModifyPrices) {
           let matchesUnit = false;
@@ -7323,7 +7381,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       `).run(
         safeId,
         safeOpId,
-        user_id || 1,
+        effectiveUserId,
         userName,
         client_id || null,
         client_name || null,
@@ -7441,8 +7499,13 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           };
         });
 
+        const sanitizedRow = { ...row };
+        if (!canViewCosts) {
+          sanitizedRow.items_json = JSON.stringify(evaluatedItems);
+        }
+
         return {
-          ...row,
+          ...sanitizedRow,
           items: evaluatedItems,
           all_items_available: allAvailable,
           has_deficit: !allAvailable,
@@ -9329,7 +9392,8 @@ DIRECTIVAS CRÍTICAS:
       const uRole = String(verifiedUser?.role || '').toLowerCase();
       const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
       const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
-      if (!isAdmin && userPerms.physical_control_checklist === false) {
+      const canPhysicalChecklist = isAdmin || userPerms.physical_control_checklist === true;
+      if (!canPhysicalChecklist) {
         return res.status(403).json({ error: "No tienes autorización para acceder a sesiones de control físico." });
       }
       let counts = db.prepare('SELECT * FROM inventory_counts ORDER BY id DESC').all() as any[];
@@ -9370,6 +9434,10 @@ DIRECTIVAS CRÍTICAS:
       const uRole = String(verifiedUser.role || '').toLowerCase();
       const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
       const userPerms = (typeof verifiedUser.permissions === 'string' ? JSON.parse(verifiedUser.permissions || '{}') : verifiedUser.permissions) || {};
+      const canPhysicalChecklist = isAdmin || userPerms.physical_control_checklist === true;
+      if (!canPhysicalChecklist) {
+        return res.status(403).json({ error: "No tienes autorización para iniciar sesiones de control físico." });
+      }
       const canPreviewQuantities = isAdmin || !!userPerms.preview_quantities_in_count;
 
       // REGLA: Si el usuario no tiene permisos de administrador ni preview_quantities_in_count,
@@ -9498,6 +9566,11 @@ DIRECTIVAS CRÍTICAS:
       const verifiedUser = (req as any).verifiedUser;
       const uRole = String(verifiedUser?.role || '').toLowerCase();
       const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+      const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
+      const canPhysicalChecklist = isAdmin || userPerms.physical_control_checklist === true;
+      if (!canPhysicalChecklist) {
+        return res.status(403).json({ error: "No tienes autorización para acceder a sesiones de control físico." });
+      }
       const isAuditorView = req.query.is_auditor_view === 'true';
 
       const count = db.prepare('SELECT * FROM inventory_counts WHERE id = ?').get(id) as any;
@@ -9584,6 +9657,11 @@ DIRECTIVAS CRÍTICAS:
       const verifiedUser = (req as any).verifiedUser;
       const uRole = String(verifiedUser?.role || '').toLowerCase();
       const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+      const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
+      const canPhysicalChecklist = isAdmin || userPerms.physical_control_checklist === true;
+      if (!canPhysicalChecklist) {
+        return res.status(403).json({ error: "No tienes autorización para modificar ítems del control físico." });
+      }
 
       const count = db.prepare('SELECT id, status, mode, user_id, applied_at FROM inventory_counts WHERE id = ?').get(id) as any;
       if (!count || count.status === 'cerrado' || count.status === 'cancelado' || count.status === 'aprobado' || count.applied_at != null) {
@@ -10401,11 +10479,13 @@ DIRECTIVAS CRÍTICAS:
   // Obtener historial completo de liquidaciones/reseteos
   app.get("/api/cash-settlements", (req, res) => {
     try {
-      const userRole = req.headers['x-user-role'] || req.query.user_role;
-      const userId = Number(req.headers['x-user-id'] || req.query.user_id);
+      const verifiedUser = (req as any).verifiedUser;
+      const uRole = String(verifiedUser?.role || req.headers['x-user-role'] || req.query.user_role || '').toLowerCase();
+      const isAdmin = verifiedUser ? (['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser)) : (['admin', 'administrador', 'propietario'].includes(uRole));
+      const userId = Number(verifiedUser?.id || req.headers['x-user-id'] || req.query.user_id || 0);
 
       let settlements;
-      if (userRole === 'vendedor') {
+      if (!isAdmin) {
         settlements = db.prepare('SELECT * FROM cash_settlements WHERE seller_id = ? ORDER BY created_at DESC').all(userId);
       } else {
         settlements = db.prepare('SELECT * FROM cash_settlements ORDER BY created_at DESC').all();

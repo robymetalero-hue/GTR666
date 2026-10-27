@@ -1,0 +1,337 @@
+VERIFICACIÓN DE LA APLICACIÓN DEL ÚLTIMO TXT — GTR666
+Fecha: 27 de octubre de 2026, Bolivia.
+Repositorio: https://github.com/robymetalero-hue/GTR666
+Commit revisado: c227fa0ac124387c0390c3f69f5f0221f5dd0f8a
+Fecha del commit: 27/10/2026, 06:53:29, America/La_Paz.
+Referencia anterior: 4655afa3dd343d1afff982cbe90f9c70f6ff8eb6.
+Documento contrastado: Revision_GTR666_cambios_20261027.txt, leído completo desde el archivo entregado, versión 0.
+Enlace de código: https://github.com/robymetalero-hue/GTR666/commit/c227fa0ac124387c0390c3f69f5f0221f5dd0f8a
+
+RESULTADO
+
+La aplicación del TXT es parcial. Hay correcciones comprobables de importes, cantidades, cajas y conteos. También se introdujo un bloqueo que impide guardar el segundo pedido desde el mismo POS después de finalizar el primero, incluso si el primer intento fue rechazado.
+
+De los 148 escenarios del informe anterior, 114 cumplen ahora el resultado esperado, frente a 95 en la revisión previa: 19 escenarios mejoraron. Los otros 34 no cumplen el criterio original. Se añadieron ocho comprobaciones de límites y regresión y las ocho reprodujeron problemas. Total de esta revisión: 156 escenarios, 114 cumplidos y 42 sin el resultado esperado; cero errores finales de los ejecutores. Los casos se solapan y algunos dependen de políticas o configuraciones, por lo que esos números no equivalen a vulnerabilidades independientes ni a incidentes en producción.
+
+En el subconjunto original de kiosco, el resultado pasó de 29/52 a 44/52. El caso K12 anterior esperaba un rechazo HTTP 403: devolver HTTP 200 con solo datos propios puede ser correcto, y no debe juzgarse inseguro solo por ese código. Aun así, una comprobación adicional confirmó que los costos propios siguen expuestos dentro de items_json. Se detalla abajo.
+
+El commit cambia dos fuentes de la aplicación: server.ts y src/views/POS.tsx. También cambia el plan de implementación y añade una copia del TXT. database.ts, firebaseSync.ts y AppContext.tsx permanecen iguales frente a 4655afa. El plan describe más correcciones que las efectivamente presentes en el código.
+
+1. CORRECCIONES COMPROBADAS
+
+• Precios del pedido: ahora las líneas usan getCartItemPriceBs y el payload declara currency: 'BOB'. El caso de USD 1 a tipo de cambio 10 guardó Bs 10 tanto con cajero como con administrador. Se corrigieron V04 y V05.
+
+• Doble invocación inmediata del formulario: la nueva referencia síncrona evita que dos invocaciones simultáneas envíen dos solicitudes. V06 pasa. Sin embargo, la referencia nunca se libera; por eso la segunda operación legítima queda bloqueada. Esta corrección necesita completarse, no retirarse.
+
+• Creación de pedidos con líneas repetidas: se suman las cantidades por producto. Dos líneas de 6 unidades con stock 10 ahora son rechazadas al CREAR el pedido. E06 y N05 pasan. La EDICIÓN continúa permitiendo esa sobre-reserva: N06 sigue fallando.
+
+• Permisos explícitamente revocados: create_pending_sales:false impide crear pedidos; apply_discounts:false impide aplicar descuentos en esa creación; manage_credits:false impide consultar/abonar créditos en las rutas modificadas. K08, K20, K21 y E23 pasan. Falta el caso de permiso ausente y el control de otras rutas.
+
+• Cajas: /api/cajas/status y el listado de cierres filtran al usuario autenticado si no es administrador. El detalle del cierre propio dejó de entregar el costo por la columna protegida. K10 y E07 pasan.
+
+• Conciliación global: /api/inventory/reconcile-catalog exige administrador. K11 pasa.
+
+• Conteos: se rechaza editar ítems de otro usuario, editar un conteo aprobado/aplicado y cambiar el estado de un conteo ajeno. También se rechazan cantidades físicas fraccionarias. K14, K15, K16 y E21 pasan. Aún falta aplicar el permiso de control físico al detalle y a la escritura propia.
+
+• Importes de ventas: total y descuento no numéricos son rechazados antes de descontar inventario. E20 pasa. Los precios individuales todavía requieren la misma validación para administradores.
+
+• Devoluciones: se rechazan cantidades fraccionarias o no positivas en la ruta modificada. E22 pasa.
+
+• Evidencia transaccional de venta: la escritura en processed_operations ya no ignora sus errores. La inyección de fallo revirtió venta y stock. E11 pasa.
+
+Los dos recorridos de 500 operaciones conservaron sus balances esperados en pruebas aisladas. También permanecen las correcciones anteriores de autenticación inicial WebSocket, colisión de SKU con otra identidad y bloqueo de sincronización lenta.
+
+2. NUEVO BLOQUEO DEL FORMULARIO DE PEDIDOS — CORREGIR PRIMERO
+
+Ubicación: src/views/POS.tsx:884, 888 y 893; bloque finally de handleSavePendingSale.
+
+isSavingPendingRef.current se pone en true antes de enviar. En finally solo se ejecuta setIsSavingPending(false); nunca se devuelve la referencia a false. El botón puede volver a verse habilitado, pero el handler sale inmediatamente y no envía nada.
+
+Reproducciones:
+B01: dos operaciones consecutivas debían producir dos pedidos y dos solicitudes. Solo se guardó el primero; quedó una solicitud y locked:true.
+B02: un primer intento devolvió HTTP 400 por falta de stock. Después de corregir el stock en la base aislada, el segundo intento no se envió: cero pedidos, una solicitud y locked:true.
+
+Corrección puntual: liberar isSavingPendingRef.current en finally cuando termine la solicitud, conservando el bloqueo durante toda la promesa. Mantener además una clave estable para los reintentos de la misma intención. No generar una venta/pedido nuevo para resolver una respuesta ambigua. Probar éxito→nuevo pedido, error→corrección→reintento y pérdida de respuesta→reintento.
+
+3. DEDUPLICACIÓN DE PEDIDOS TODAVÍA INCOMPLETA
+
+Ubicación: server.ts:6601, especialmente el SELECT a processed_operations y la transacción que crea pending_sales alrededor de 6708.
+
+Se añadió una consulta de la clave, pero al crear el pedido no se inserta el resultado en processed_operations. El segundo envío no encuentra la clave y vuelve a crear el pedido. La comprobación también está fuera de la transacción.
+
+E05: repetir la misma clave produjo dos pedidos y dos unidades reservadas.
+E09: dos procesadores que enviaron la misma acción también produjeron dos pedidos.
+
+Corrección puntual: comprobar y registrar clave, tipo, autor, huella de contenido y respuesta en la misma transacción que inserta cabecera y líneas. Devolver el pedido anterior al repetir un contenido idéntico y 409 si difiere. La clave debe permanecer estable en el cliente hasta conocer el resultado definitivo. La referencia de React por sí sola no cubre reintentos, recargas ni procesadores de cola.
+
+4. CONFLICTO DE VENTA: SE DETECTA, PERO DEVUELVE 500
+
+Ubicaciones: server.ts:6075, 6257 y catch de POST /api/sales alrededor de 6353.
+
+K07: al reutilizar una clave con contenido diferente se conserva una sola venta y stock 14, pero la respuesta es HTTP 500 con error CONFLICT_409, en vez de HTTP 409.
+
+La captura que convierte CONFLICT_409 a 409 fue añadida en GET /api/sale-returns, server.ts:5567, y no en POST /api/sales. Además, esa captura referencia clientOpId, variable que no está declarada en el alcance de ese GET. La sintaxis se puede parsear, pero esto debe corregirse y comprobarse con TypeScript; no se ejecutó el typecheck completo en esta revisión.
+
+La huella de venta también omite campos que cambian la operación. B04: cambiar currency de BOB a USD con la misma clave y los mismos importes devolvió 200/isDuplicate, porque currency no participa en el hash. También deben considerarse actor, tipo de operación, abono, puntos y demás datos comerciales relevantes. Un registro antiguo sin huella no debería aceptarse ciegamente como equivalente.
+
+Corrección puntual: mover la captura a la ruta correcta, usar una huella canónica del contenido comercial completo y validar tipo/actor. Mantener el rollback actual. No permitir que una clave de otra clase de operación reproduzca una respuesta incompatible.
+
+5. COSTOS TODAVÍA EXPUESTOS EN LA COLA OFFLINE
+
+Ubicación: server.ts:7394, construcción de enrichedSales.
+
+El endpoint filtra correctamente las filas de otros cajeros y pone items.cost e items.price_cost en null para quien no tiene permiso. Sin embargo, retorna ...row, incluyendo items_json sin sanitizar.
+
+B03: la respuesta del propio cajero contenía items[0].cost:null y, simultáneamente, items_json con cost:0.5. El dato sigue disponible aunque la interfaz no lo dibuje.
+
+Corrección puntual: omitir items_json de la respuesta no autorizada o regenerarlo con los mismos campos seguros de items. Revisar todas las representaciones y exportaciones de una misma entidad. Mantener la visibilidad de costos para usuarios autorizados.
+
+6. AUTORÍA OFFLINE Y PERMISOS PARCIALES
+
+6.1 Identidad offline inconsistente
+Ubicación: server.ts:7246, 7295 y 7326.
+Se calcula effectiveUserId para obtener el nombre, pero el INSERT conserva user_id || 1 del cuerpo. K13 sigue guardando el ID enviado por el cliente. B07 reprodujo user_id:3 con user_name:'vendedor', aunque ese nombre pertenece al usuario autenticado 2 y el usuario 3 se llama otro_cajero.
+
+Corrección puntual: aplicar la misma identidad validada al ID, nombre, auditoría y caja. Si se permite transmitir una cola de otro cajero, registrar por separado creador original y transmisor y comprobar el origen en servidor. No mezclar el ID de uno con el nombre de otro ni borrar colas antiguas.
+
+6.2 Permiso de créditos ausente
+Ubicación: server.ts:6384, 6407 y 6432.
+Las nuevas condiciones solo bloquean cuando manage_credits === false. B05 quitó ese campo de los permisos de un cajero: pudo listar deudas y registrar un abono ajeno; la deuda bajó de 100 a 90. El plan indica que se necesita permiso explícito.
+
+Corrección puntual: para ese alcance, admitir solamente al administrador o a quien tenga manage_credits === true; comprobar también las rutas relacionadas. Aplicar el mismo criterio al permiso de pedidos donde corresponda y verificar compatibilidad de perfiles antiguos mediante migración explícita.
+
+6.3 Conteos con permiso revocado
+Ubicaciones: server.ts:9495 y 9580.
+Se protegió el listado, pero GET /api/inventory-counts/:id todavía admite una sesión con physical_control_checklist:false. E13 sigue devolviendo 200. B06 también pudo escribir la cantidad 7 en un conteo propio activo con ese permiso revocado.
+
+Corrección puntual: comprobar el permiso en listado, detalle, creación, edición y cambios de estado, además de la propiedad y el estado del conteo. Conservar las protecciones de conteos ajenos/aplicados ya añadidas.
+
+6.4 Liquidaciones
+E10 sigue mostrando alcance global cuando el usuario utiliza el rol literal cajero. Revisar server.ts:10402; el alcance propio debe depender de autorización, sin asumir un único nombre para el rol restringido.
+
+7. INVENTARIO Y PEDIDOS: PUNTOS DEL TXT ANTERIOR QUE SIGUEN ABIERTOS
+
+• N06: editar un pedido todavía permite reservar 12 unidades con stock 10. La agregación nueva solo se añadió al POST, no al PUT /api/pending-sales/:id, server.ts:6740. Aplicar la demanda agregada también en la edición, excluyendo las reservas propias y validando dentro de la transacción.
+
+• T20: guardar un formulario antiguo volvió a subir el stock de 8 a 15. server.ts:3133. Separar metadatos y ajustes explícitos de inventario, con control de versión cuando se ajusten existencias.
+
+• S01: las líneas eliminadas al editar un pedido reaparecieron desde Firestore, dejando dos filas y cantidad total 3 cuando debía quedar una fila de cantidad 1. Replicar eliminaciones/tombstones junto con las líneas nuevas.
+
+• T21: repetir un ingreso de compra pasó de stock 10 a 15 y después a 20. server.ts:4196. Registrar una clave estable y su resultado en la misma transacción del ingreso.
+
+• T12: una conciliación individual con historia incompleta cambió stock 55 a 5. No reconstruir un saldo a partir de un ingreso aislado sin ancla inicial validada.
+
+• Q01: el catálogo antiguo con stock 8 todavía pudo quedar etiquetado con la versión posterior de stock 7. AppContext.tsx no cambió. Mantener juntas la respuesta de catálogo y sus versiones, sin sustituirlas por una consulta posterior que puede corresponder a otra transacción.
+
+• S07: el escenario con dos SQLite escritoras independientes perdió una de dos ventas remotas. Sigue condicionado a una topología real no verificada; comprobar instancias y persistencia antes de afirmar que cubre concurrencia multi-caja.
+
+8. CÁLCULOS, MIGRACIONES Y RESPALDOS AÚN PENDIENTES
+
+B08: una venta de administrador con total numérico pero price:'invalid' en una línea respondió 200, descontó stock 15 a 14 y guardó price:null. La validación nueva protege total y descuento, pero también debe validar precios y demás números usados por cada operación antes de ejecutar SQL.
+
+Siguen reproduciéndose los puntos anteriores:
+• P06: cabecera de abonos 100 frente a detalle 130.
+• R03: diagnóstico de USD 10 a tasa 10 entrega Bs 10/USD 1 en vez de Bs 100/USD 10.
+• T05/T06: devoluciones y abonos sin clave estable se duplican al reintentar.
+• T07: una deuda cancelada por devolución reaparece desde la réplica.
+• T09: el ledger de intentos no acredita que el documento remoto haya llegado.
+• T11: auditoría individual y global discrepan después de un conteo aprobado.
+• T18: el reintento de una venta histórica sin su operación registrada responde 500 por la restricción única.
+• N01: la migración de processed_operations elimina la fila antigua del experimento.
+• N02: el alta de producto conserva consultas al esquema antiguo id/type/result y el reintento responde 400.
+• N08: se acepta un abono con tasa negativa y la deuda USD pasa de 10 a 10,5.
+• N09: el abono anunciado como Bs puede interpretarse como USD al faltar currency.
+• N10: faltan metadatos estructurados consistentes en el detalle de conversiones.
+• N11: una devolución fragmentada completa devuelve 4,98 de un cobro de 5.
+• N03: el respaldo alternativo por copia directa, al fallar el backup nativo con WAL activo, aceptó una copia incompleta.
+• N04: un respaldo creado en contexto sandbox pudo reemplazar el respaldo usado para recuperar producción. Es un escenario de recuperación simulado, no un incidente observado en tu sistema.
+
+database.ts y firebaseSync.ts no cambiaron en este commit. Mantener conservación de datos comerciales y snapshots históricos; no borrar registros ni colas para evitar errores de reintento.
+
+9. VOZ, ENTORNO E INTERFAZ
+
+Voz: el cambio añade un comentario de exclusividad, pero authenticateWebSocketUpgrade sigue aceptando cualquier rol admin/administrador/propietario. V01 vuelve a admitir a un administrador secundario. La política del plan exige administrador principal: comprobar isMainAdmin de forma obligatoria para /live y revalidar antes de ejecutar herramientas. No se invocó Gemini ni SQL por voz.
+
+Entorno: V02 sigue mostrando que Host/X-Forwarded-Host con dspos.app puede prevalecer sobre APP_ENV=sandbox. La configuración confiable del servidor debe tener prioridad.
+
+Aclaración del informe anterior sobre V03: ese caso aislaba el middleware con APP_ENV ausente, mientras el arranque normal de server.ts asigna APP_ENV='production' por defecto. Por tanto, no prueba que una cabecera pueda cambiar de base en el arranque normal. Debe tratarse como una comprobación condicional de configuración, no como vulnerabilidad productiva confirmada. La selección correcta en AI Studio/producción requiere verificar el despliegue real.
+
+Interfaz: este commit cambia la lógica del formulario de pedidos, sin aplicar el paquete de mejoras visuales propuesto. Continúan iguales App.tsx, Inventory.tsx, OfflineStatusHUD.tsx y estilos. La confirmación de recibo sigue con cierre a los ocho segundos.
+
+10. SIGUIENTE CORRECCIÓN PUNTUAL Y VERIFICACIÓN
+
+Orden recomendado:
+1) Liberar el bloqueo del pedido en finally y conservar la misma clave mientras se resuelve una intención de guardado.
+2) Completar la escritura transaccional de deduplicación de pedidos y agregación al editar.
+3) Corregir captura 409 y huella completa de venta; eliminar la referencia fuera de alcance en GET /api/sale-returns.
+4) Quitar costos de items_json y unificar identidad offline validada.
+5) Completar permisos ausentes/revocados en créditos, conteos y liquidaciones.
+6) Resolver las causas anteriores de inventario, migración, cálculos y respaldo todavía abiertas.
+
+Antes de publicar, comprobar dos pedidos consecutivos, corrección tras un 400, pérdida de respuesta y reintento con la misma clave, edición con líneas repetidas, cambio de moneda bajo una clave existente, costos en todas las representaciones y permisos desde cada ruta. Hacer build/typecheck e integración en una copia aislada con respaldo verificado. No hacer ventas de prueba ni restauraciones sobre la base comercial.
+
+Se verificaron por SHA Git 55 archivos relevantes. Se ejecutaron handlers, SQL, migraciones y funciones reales extraídos del código en SQLite aislada con node:sqlite. Los casos de kiosco usan la puerta de autenticación/permisos con identidades sintéticas; los casos generales de ciclo no son una prueba HTTP de autorización. Se simulan Firestore, red y auxiliares según el caso. Las adaptaciones del ejecutor solo añadieron el import real de crypto a la VM, el nuevo ref/funciones de precio y la propiedad correcta del conteo ciego de prueba; no se relajaron aserciones para ocultar fallos.
+
+Se parsearon completas cuatro fuentes sin JSX, pero no se realizó build ni typecheck de la aplicación. No se montó React ni se probaron Android/PC, impresión, IndexedDB real, proxy WebSocket o PWA instalada. No se modificó GitHub, Firestore ni producción. Tampoco se confirmó que el commit revisado sea exactamente el servido en cada dispositivo de dspos.app.
+
+Conclusión de revisión: se aplicaron mejoras reales del TXT, pero el trabajo sigue incompleto y el bloqueo persistente del formulario debe corregirse antes de considerar listo el flujo de pedidos.
+
+
+ANEXO A — RESULTADOS POR FAMILIA
+kiosk/baseline-security-results.json: 20/23 cumplen.
+kiosk/baseline-extended-results.json: 18/23 cumplen.
+kiosk/baseline-socket-results.json: 6/6 cumplen.
+cycle/cycle-results.json: 48/53 cumplen.
+cycle/integration-results.json: 16/25 cumplen.
+cycle/new-change-results.json: 3/12 cumplen.
+additional-results.json: 3/6 cumplen.
+regression-results.json: 0/8 cumplen.
+
+ANEXO B — CASOS QUE MEJORARON RESPECTO DEL TXT ANTERIOR
+K08 | Un permiso revocado impide crear pedidos mediante API | FAIL -> PASS
+K10 | Estado de cajas no revela saldos de otros vendedores | FAIL -> PASS
+K11 | El cajero no ejecuta una conciliación global de stock | FAIL -> PASS
+K14 | No se modifica el conteo asignado a otro usuario | FAIL -> PASS
+K15 | Un conteo ya aprobado no admite modificar sus observaciones | FAIL -> PASS
+K16 | No se reabre el conteo de otro usuario | FAIL -> PASS
+K20 | Permiso de créditos revocado impide consultar deudas globales | FAIL -> PASS
+K21 | Un abono sin permiso no modifica la deuda de otro cliente | FAIL -> PASS
+E06 | Filas repetidas no sobre-reservan inventario | FAIL -> PASS
+E07 | Cierre propio no filtra costos por otro endpoint | FAIL -> PASS
+E11 | Operación de venta falla completa si no puede guardar su evidencia | FAIL -> PASS
+E20 | Importes no numéricos no descuentan stock ni crean una venta | FAIL -> PASS
+E21 | Un conteo físico no acepta fracciones de una unidad | FAIL -> PASS
+E22 | Una devolución no incorpora fracciones al inventario | FAIL -> PASS
+E23 | Un pedido no elude el permiso de descuentos | FAIL -> PASS
+N05 | Pedido con dos filas del mismo producto no sobre-reserva | FAIL_INVARIANT -> PASS
+V04 | Formulario de pedido de cajero conserva los Bs 10 mostrados para un producto de USD 1 a tasa 10 | FAIL -> PASS
+V05 | Formulario de pedido de administrador tampoco cambia Bs 10 mostrados por Bs 1 | FAIL -> PASS
+V06 | Dos envíos inmediatos del mismo formulario no crean dos pedidos | FAIL -> PASS
+
+ANEXO C — CRITERIOS NO CUMPLIDOS Y VALORES OBTENIDOS
+K07 | Reutilizar una clave con contenido distinto produce conflicto | FAIL
+  Esperado: {"http": 409, "sales": 1, "stock": 14}
+  Obtenido: {"http": 500, "sales": 1, "stock": 14}
+K12 | Cola offline no expone costos y ventas de otros cajeros | FAIL
+  Esperado: {"blocked": true, "costLeaked": false}
+  Obtenido: {"blocked": false, "costLeaked": false}
+K13 | La venta offline conserva la identidad autenticada | FAIL
+  Esperado: 2
+  Obtenido: 3
+E05 | Pedido autorizado repetido registra una sola reserva | FAIL
+  Esperado: {"orders": 1, "reserved": 1}
+  Obtenido: {"orders": 2, "reserved": 2}
+E09 | Dos procesadores de cola usan la misma clave durable | FAIL
+  Esperado: {"orders": 1}
+  Obtenido: {"orders": 2}
+E10 | Rol cajero no hereda acceso global a liquidaciones | FAIL
+  Esperado: true
+  Obtenido: false
+E13 | Revocar control físico impide consultar incluso un conteo propio | FAIL
+  Esperado: 403
+  Obtenido: 200
+E15 | Cambiar de cajero no envía ni borra ventas offline de otro usuario | FAIL
+  Esperado: {"posts": 0, "retained": 1}
+  Obtenido: {"posts": 1, "retained": 0}
+P06 | Exceso de abonos se rechaza sin modificar el pedido o se limita coherentemente | FAIL_INVARIANT
+  Esperado: {"paid_amount": 100, "payments": 100}
+  Obtenido: {"paid_amount": 100, "payments": 130}
+R03 | Diagnóstico matemático usa moneda de entrada USD correctamente | FAIL_INVARIANT
+  Esperado: {"BOB": 100, "USD": 10}
+  Obtenido: {"BOB": 10, "USD": 1}
+S01 | Reeditar pedido no recupera líneas borradas desde Firestore | FAIL_INVARIANT
+  Esperado: {"qty": 1, "rows": 1}
+  Obtenido: {"qty": 3, "rows": 2}
+S07 | Dos SQLite escritoras independientes no pierden ventas al compartir Firestore | FAIL_INVARIANT
+  Esperado: {"cloudStock": 1, "sales": 2}
+  Obtenido: {"cloudStock": 8, "sales": 1}
+Q01 | Caché no etiqueta un catálogo viejo con una versión posterior a otra venta | FAIL_INVARIANT
+  Esperado: 7
+  Obtenido: 8
+T05 | Reintentar devolución desde un cliente sin clave no duplica unidades | FAIL_INVARIANT
+  Esperado: 13
+  Obtenido: 14
+T06 | Reintentar abono desde un cliente sin clave no duplica pagos | FAIL_INVARIANT
+  Esperado: 10
+  Obtenido: 20
+T07 | La deuda cancelada por devolución no reaparece desde la réplica | FAIL_INVARIANT
+  Esperado: 0
+  Obtenido: 80
+T09 | Un intento asentado en ledger no demuestra que su documento llegó a la nube | FAIL_INVARIANT
+  Esperado: ["1", "2"]
+  Obtenido: ["2"]
+T11 | Auditoría individual y de catálogo incluyen el mismo conteo aprobado | FAIL_INVARIANT
+  Esperado: {"catalogDiscrepancies": 0, "individual": 7}
+  Obtenido: {"catalogDiscrepancies": 1, "individual": 7}
+T12 | Una compra aislada no constituye un saldo inicial histórico validado | FAIL_INVARIANT
+  Esperado: 55
+  Obtenido: 5
+T18 | Reintento de una venta anterior al despliegue devuelve su resultado | FAIL_INVARIANT
+  Esperado: 200
+  Obtenido: 500
+T20 | Formulario de producto anterior a una venta no repone unidades vendidas | FAIL_INVARIANT
+  Esperado: 8
+  Obtenido: 15
+T21 | Reintento del mismo ingreso de compra no duplica unidades | FAIL_INVARIANT
+  Esperado: 15
+  Obtenido: 20
+N01 | La migración conserva respuestas de deduplicación antiguas | FAIL_INVARIANT
+  Esperado: 1
+  Obtenido: 0
+N02 | Creación de producto usa contrato nuevo y reproduce el resultado al reintentar | FAIL_INVARIANT
+  Esperado: {"first": 200, "operations": 1, "retry": 200}
+  Obtenido: {"first": 200, "operations": 0, "retry": 400}
+N03 | Fallo del backup nativo con WAL activo no acepta una copia incompleta | FAIL_INVARIANT
+  Esperado: true
+  Obtenido: false
+N04 | Un snapshot de sandbox no sustituye el respaldo usado para recuperar producción | FAIL_INVARIANT
+  Esperado: 8
+  Obtenido: 999
+N06 | Editar un pedido también agrega la demanda repetida por producto | FAIL_INVARIANT
+  Esperado: {"accepted": false, "reserved": 1}
+  Obtenido: {"accepted": true, "reserved": 12}
+N08 | Abono rechaza tasa negativa sin aumentar la deuda | FAIL_INVARIANT
+  Esperado: {"debt": 10, "rejected": true}
+  Obtenido: {"debt": 10.5, "rejected": false}
+N09 | Solicitud que la interfaz anuncia como Bs conserva esa unidad en deuda USD | FAIL_INVARIANT
+  Esperado: {"cashBOB": 5, "debtUSD": 9.5}
+  Obtenido: {"cashBOB": 50, "debtUSD": 5}
+N10 | Detalle de abonos conserva unidad de deuda o metadatos estructurados de conversión | FAIL_INVARIANT
+  Esperado: true
+  Obtenido: false
+N11 | Devolución fragmentada agota también los residuos redondeados hacia abajo | FAIL_INVARIANT
+  Esperado: 5
+  Obtenido: 4.98
+V01 | La voz administrativa queda reservada al administrador principal declarado en el plan | FAIL
+  Esperado: false
+  Obtenido: true
+V02 | APP_ENV sandbox conserva prioridad aunque la cabecera Host sea dspos.app | FAIL
+  Esperado: true
+  Obtenido: false
+V03 | Un entorno ais-dev sin APP_ENV no cambia a producción mediante X-App-Environment | FAIL
+  Esperado: true
+  Obtenido: false
+B01 | Después de guardar un pedido se puede guardar el siguiente sin recargar el POS | FAIL
+  Esperado: {"locked": false, "orders": 2, "requests": 2}
+  Obtenido: {"locked": true, "orders": 1, "requests": 1}
+B02 | Un pedido rechazado por falta de stock se puede corregir y volver a enviar | FAIL
+  Esperado: {"locked": false, "orders": 1, "requests": 2}
+  Obtenido: {"locked": true, "orders": 0, "requests": 1}
+B03 | La venta offline propia no expone costos en items_json aunque items.cost esté censurado | FAIL
+  Esperado: {"itemCost": null, "rawCost": null}
+  Obtenido: {"itemCost": null, "rawCost": 0.5}
+B04 | Cambiar BOB a USD con la misma clave de venta se rechaza como contenido diferente | FAIL
+  Esperado: 409
+  Obtenido: 200
+B05 | Sin manage_credits explícito tampoco se pueden consultar deudas ni registrar abonos | FAIL
+  Esperado: {"debt": 100, "pay": 403, "read": 403}
+  Obtenido: {"debt": 90, "pay": 200, "read": 200}
+B06 | Revocar control físico impide escribir en un conteo propio activo | FAIL
+  Esperado: 403
+  Obtenido: 200
+B07 | La identidad y el nombre guardados en una venta offline corresponden al mismo usuario | FAIL
+  Esperado: true
+  Obtenido: false
+B08 | Una venta de administrador también rechaza el precio no numérico de un artículo | FAIL
+  Esperado: {"http": 400, "sales": 0, "stock": 15}
+  Obtenido: {"http": 200, "sales": 1, "stock": 14}

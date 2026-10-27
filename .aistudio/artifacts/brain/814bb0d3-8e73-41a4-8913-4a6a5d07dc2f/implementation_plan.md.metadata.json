@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan integral para la incorporación de los parches y blindajes de seguridad auditados en Revision_GTR666_cambios_20261027_26de191c.txt. Cubre el aislamiento estricto de permisos en Kiosco (cajas, créditos, pedidos, conteos y conciliación), normalización obligatoria a moneda nacional BOB en pedidos, deduplicación atómica con clave estable y rechazo 409, consolidación de demanda agregada por producto, control de concurrencia optimista en inventario, blindaje de respaldos WAL y restricción exclusiva de voz administrativa al Administrador Principal.",
-  "updatedAt":  "2026-10-27T10:33:41.040024760Z",
+  "summary":  "Plan de implementación para la resolución integral de las 42 observaciones detectadas en la auditoría c227fa0:\n1. Desbloqueo y ciclo de vida de pedidos en POS (B01, B02).\n2. Deduplicación transaccional y agregación de demanda al editar pedidos (E05, E09, N06).\n3. Manejo canónico de 409 Conflict y hash completo en ventas (K07, B04, B08).\n4. Sanitización completa de costos en ventas offline e identidad consistente (B03, B07, K13).\n5. Enforzamiento estricto de permisos (default-deny) en créditos, conteos físicos y liquidaciones (B05, B06, E10, E13).\n6. Blindaje de voz WebSocket a administrador principal (V01) y verificación con suite de pruebas.",
+  "updatedAt":  "2026-10-27T11:08:44.147019109Z",
   "requestFeedback":  true,
   "userFacing":  true
 }
