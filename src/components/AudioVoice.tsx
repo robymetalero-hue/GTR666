@@ -1471,7 +1471,8 @@ export default function AudioVoice() {
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/live`;
         console.log("Connecting to Live WS proxy at:", wsUrl);
-        const ws = new WebSocket(wsUrl);
+        const token = localStorage.getItem('auth_token');
+        const ws = token ? new WebSocket(wsUrl, ['access_token', token]) : new WebSocket(wsUrl);
         
         ws.onopen = () => {
             setConnected(true);

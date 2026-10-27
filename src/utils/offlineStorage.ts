@@ -14,6 +14,7 @@ export interface OfflineSale {
     salePayload: any;
     clientName?: string;
     clientPhone?: string;
+    ownerUserId?: number | string;
     createdAt: string;
 }
 
@@ -24,6 +25,7 @@ export interface OfflineAction {
     method: 'POST' | 'PUT' | 'DELETE' | 'PATCH';
     payload: any;
     metadata?: any;
+    ownerUserId?: number | string;
     createdAt: string;
 }
 
@@ -103,11 +105,23 @@ export async function saveOfflineSale(salePayload: any, clientName?: string, cli
         clientOperationId: salePayload.clientOperationId || salePayload.client_operation_id || `offline_op_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
     };
 
+    let currentUserId: number | string | undefined = salePayload?.user_id;
+    if (!currentUserId && typeof window !== 'undefined') {
+        try {
+            const rawUser = localStorage.getItem('user');
+            if (rawUser) {
+                const parsed = JSON.parse(rawUser);
+                currentUserId = parsed.id;
+            }
+        } catch (_) {}
+    }
+
     const offlineSale: OfflineSale = {
         id: `offline_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
         salePayload: safePayload,
         clientName,
         clientPhone,
+        ownerUserId: currentUserId,
         createdAt: new Date().toISOString()
     };
 
@@ -239,6 +253,17 @@ export async function saveOfflineAction(
     payload: any, 
     metadata?: any
 ): Promise<OfflineAction> {
+    let currentUserId: number | string | undefined = metadata?.ownerUserId || payload?.user_id;
+    if (!currentUserId && typeof window !== 'undefined') {
+        try {
+            const rawUser = localStorage.getItem('user');
+            if (rawUser) {
+                const parsed = JSON.parse(rawUser);
+                currentUserId = parsed.id;
+            }
+        } catch (_) {}
+    }
+
     const offlineAction: OfflineAction = {
         id: `action_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
         type,
@@ -246,6 +271,7 @@ export async function saveOfflineAction(
         method,
         payload,
         metadata,
+        ownerUserId: currentUserId,
         createdAt: new Date().toISOString()
     };
 

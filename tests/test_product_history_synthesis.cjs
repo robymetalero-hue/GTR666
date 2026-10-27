@@ -77,7 +77,7 @@ async function run() {
   console.log(' RUNNING PRODUCT HISTORY MULTI-SOURCE SYNTHESIS TESTS');
   console.log('='.repeat(70));
 
-  const dbPath = path.resolve(process.cwd(), 'gtr_pos_sandbox.db');
+  const dbPath = path.resolve(process.cwd(), fs.existsSync(path.resolve(process.cwd(), 'gtr_pos.db')) ? 'gtr_pos.db' : 'gtr_pos_sandbox.db');
   const db = new Database(dbPath);
 
   // Set up test users from database: admin (id: 4) & cashier (id: 3)

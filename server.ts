@@ -190,6 +190,16 @@ async function startServer() {
     validate: false,
   });
 
+  const supervisorLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    skipSuccessfulRequests: true,
+    message: { error: 'Demasiados intentos fallidos de supervisión. Intente de nuevo en 15 minutos.' },
+    standardHeaders: true,
+    legacyHeaders: false,
+    validate: false,
+  });
+
   app.use(express.json({ limit: "100mb" }));
   app.use(express.urlencoded({ limit: "100mb", extended: true }));
 
@@ -203,14 +213,17 @@ async function startServer() {
     const isLocalContainer = rawHost.includes('localhost') || rawHost.includes('127.0.0.1');
 
     let isSandbox = false;
-    if (explicitEnv === 'sandbox') {
+    // Server-level environment takes precedence over client-supplied headers
+    if (process.env.APP_ENV === 'production' || isDsposDomain) {
+      isSandbox = false;
+    } else if (process.env.APP_ENV === 'sandbox') {
+      isSandbox = true;
+    } else if (explicitEnv === 'sandbox') {
       isSandbox = true;
     } else if (explicitEnv === 'production') {
       isSandbox = false;
-    } else if (process.env.APP_ENV === 'sandbox' || (!isDsposDomain && (isDevDomain || (isLocalContainer && (process.env.K_SERVICE?.startsWith('ais-dev') || process.env.APP_URL?.includes('ais-dev')))))) {
+    } else if (!isDsposDomain && (isDevDomain || (isLocalContainer && (process.env.K_SERVICE?.startsWith('ais-dev') || process.env.APP_URL?.includes('ais-dev'))))) {
       isSandbox = true;
-    } else if (process.env.APP_ENV === 'production' || isDsposDomain) {
-      isSandbox = false;
     } else {
       isSandbox = process.env.NODE_ENV === 'development' && !isDsposDomain;
     }
@@ -283,21 +296,24 @@ async function startServer() {
       '/api/offline-sales/count'
     ];
 
+    const reqPathLower = String(req.path || '').toLowerCase();
+    const reqUrlLower = String(req.originalUrl || req.url || '').toLowerCase();
+
     const isPublicRoute = 
-      publicPaths.includes(req.path) ||
+      publicPaths.some(p => p.toLowerCase() === reqPathLower) ||
       (req.method === 'GET' && (
-        req.path === '/api/products' ||
-        req.path === '/api/departments' ||
-        req.path === '/api/categories' ||
-        req.path === '/api/settings/exchange-rate' ||
-        req.path === '/api/settings/kiosk' ||
-        req.path === '/api/settings/receipt' ||
-        req.path === '/api/settings/app-version' ||
-        req.path === '/api/inventory-counts/lock-status' ||
-        req.path === '/api/offline-sales/count'
+        reqPathLower === '/api/products' ||
+        reqPathLower === '/api/departments' ||
+        reqPathLower === '/api/categories' ||
+        reqPathLower === '/api/settings/exchange-rate' ||
+        reqPathLower === '/api/settings/kiosk' ||
+        reqPathLower === '/api/settings/receipt' ||
+        reqPathLower === '/api/settings/app-version' ||
+        reqPathLower === '/api/inventory-counts/lock-status' ||
+        reqPathLower === '/api/offline-sales/count'
       ));
     
-    if (req.url.startsWith('/api') && !isPublicRoute) {
+    if (reqUrlLower.startsWith('/api') && !isPublicRoute) {
       if (!verifiedUser) {
         return res.status(401).json({ 
           error: 'No autorizado. Se requiere iniciar sesión con credenciales válidas.',
@@ -552,18 +568,98 @@ async function startServer() {
   const PORT = parseInt(process.env.PORT || '3000', 10);
   
   const server = http.createServer(app);
-  const wss = new WebSocketServer({ noServer: true });
 
-  const alertsWss = new WebSocketServer({ noServer: true });
+  const protocolHandler = (protocols: Set<string>) => {
+    if (protocols.has('access_token')) return 'access_token';
+    const first = protocols.values().next().value;
+    return first || false;
+  };
+
+  const wss = new WebSocketServer({ noServer: true, handleProtocols: protocolHandler });
+  const alertsWss = new WebSocketServer({ noServer: true, handleProtocols: protocolHandler });
   const connectedAlertClients = new Set<any>();
+
+  const authenticateWebSocketUpgrade = (request: any, socket: any, requireAdmin: boolean) => {
+    let token: string | null = null;
+    const rawProtocol = request.headers['sec-websocket-protocol'];
+    if (rawProtocol && typeof rawProtocol === 'string') {
+      const parts = rawProtocol.split(',').map((p: string) => p.trim());
+      const accessIdx = parts.indexOf('access_token');
+      if (accessIdx !== -1 && parts[accessIdx + 1]) {
+        token = parts[accessIdx + 1];
+      } else if (parts.length === 1 && parts[0].split('.').length === 3) {
+        token = parts[0];
+      }
+    }
+
+    if (!token) {
+      try {
+        const parsedUrl = new URL(request.url || '', `http://${request.headers.host || 'localhost'}`);
+        const queryToken = parsedUrl.searchParams.get('token');
+        if (queryToken && queryToken.trim()) token = queryToken.trim();
+      } catch (_) {}
+    }
+
+    if (!token && request.headers['authorization']) {
+      const authH = String(request.headers['authorization']);
+      if (authH.startsWith('Bearer ')) token = authH.slice(7).trim();
+    }
+
+    if (!token) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return null;
+    }
+
+    try {
+      const decoded = jwt.verify(token, JWT_SECRET) as any;
+      if (!decoded || !decoded.id) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+        socket.destroy();
+        return null;
+      }
+
+      const userRow = db.prepare('SELECT id, username, role, permissions FROM users WHERE id = ?').get(decoded.id) as any;
+      if (!userRow) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+        socket.destroy();
+        return null;
+      }
+
+      const role = String(userRow.role || '').toLowerCase();
+      const isAdmin = role === 'admin' || role === 'administrador' || role === 'propietario' || isMainAdmin(userRow);
+
+      if (requireAdmin && !isAdmin) {
+        socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+        socket.destroy();
+        return null;
+      }
+
+      return {
+        ...userRow,
+        isAdmin,
+        permissions: typeof userRow.permissions === 'string' ? JSON.parse(userRow.permissions || '{}') : (userRow.permissions || {})
+      };
+    } catch (_) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return null;
+    }
+  };
 
   server.on("upgrade", (request, socket, head) => {
     const { pathname } = new URL(request.url || "", `http://${request.headers.host || "localhost"}`);
     if (pathname === "/live") {
+      const authUser = authenticateWebSocketUpgrade(request, socket, true);
+      if (!authUser) return;
+      (request as any).verifiedUser = authUser;
       wss.handleUpgrade(request, socket, head, (ws) => {
         wss.emit("connection", ws, request);
       });
     } else if (pathname === "/alerts") {
+      const authUser = authenticateWebSocketUpgrade(request, socket, false);
+      if (!authUser) return;
+      (request as any).verifiedUser = authUser;
       alertsWss.handleUpgrade(request, socket, head, (ws) => {
         alertsWss.emit("connection", ws, request);
       });
@@ -799,7 +895,7 @@ async function startServer() {
   });
 
   // REST API: Quick Supervisor Authorization / Kiosk Unlock
-  app.post("/api/auth/verify-supervisor", (req, res) => {
+  app.post("/api/auth/verify-supervisor", supervisorLimiter, (req, res) => {
     try {
       const { username, password, pin } = req.body;
       const targetPassword = String(password || pin || '').trim();
@@ -3086,7 +3182,11 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
         const isChangingPrice = (oldProd.price_unit !== safePriceUnit) || (oldProd.price_bulk !== safePriceBulk) || (oldProd.price_cost !== safePriceCost);
         const isChangingStock = (oldProd.stock !== safeStock);
-        const isChangingMeta = (oldProd.name !== name.trim()) || (oldProd.sku !== sku.trim()) || (oldProd.category !== category.trim()) || (oldProd.stock_alarm !== safeStockAlarm);
+        const isChangingMeta = (oldProd.name !== name.trim()) || 
+          (oldProd.sku !== sku.trim()) || 
+          (oldProd.category !== category.trim()) || 
+          (oldProd.stock_alarm !== safeStockAlarm) ||
+          (image !== undefined && image !== oldProd.image);
 
         if (isChangingPrice && !perms.edit_prices && !perms.modify_prices) {
           return res.status(403).json({ error: "No tienes privilegios para modificar precios o costos (edit_prices)." });
@@ -3111,6 +3211,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       if (oldProd.price_bulk !== safePriceBulk) changedFields.price_bulk = { before: oldProd.price_bulk, after: safePriceBulk };
       if (oldProd.price_cost !== safePriceCost) changedFields.price_cost = { before: oldProd.price_cost, after: safePriceCost };
       if (oldProd.stock_alarm !== safeStockAlarm) changedFields.stock_alarm = { before: oldProd.stock_alarm, after: safeStockAlarm };
+      if (image !== undefined && image !== oldProd.image) changedFields.image = { before: oldProd.image ? '[imagen]' : null, after: image ? '[imagen]' : null };
 
       let logCategory = 'productos';
       let logEventType = 'modificacion_producto';
@@ -5353,6 +5454,10 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
   app.get("/api/sales/:id", (req, res) => {
     const { id } = req.params;
+    const verifiedUser = (req as any).verifiedUser;
+    const verifiedRole = String(verifiedUser?.role || '').toLowerCase();
+    const isAdmin = verifiedUser && (['admin', 'administrador', 'propietario'].includes(verifiedRole) || isMainAdmin(verifiedUser));
+
     try {
       const sale = db.prepare(`
         SELECT s.*, 
@@ -5363,11 +5468,16 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         LEFT JOIN clients c ON s.client_id = c.id
         LEFT JOIN users u ON s.user_id = u.id
         WHERE s.id = ?
-      `).get(id);
+      `).get(id) as any;
       
       if (!sale) {
         return res.status(404).json({ error: "Venta no encontrada." });
       }
+
+      if (!isAdmin && verifiedUser && sale.user_id && Number(sale.user_id) !== Number(verifiedUser.id)) {
+        return res.status(403).json({ error: "No tienes autorización para consultar comprobantes de venta pertenecientes a otros vendedores." });
+      }
+
       res.json(sale);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -5378,12 +5488,22 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     const { id } = req.params;
     const verifiedUser = (req as any).verifiedUser;
     const verifiedRole = String(verifiedUser?.role || '').toLowerCase();
-    const isAuthorizedCostViewer = !!(verifiedUser && (
-      isMainAdmin(verifiedUser) ||
-      ['admin', 'administrador', 'propietario'].includes(verifiedRole) ||
-      (verifiedUser.permissions && (verifiedUser.permissions.view_costs || verifiedUser.permissions.view_purchase_prices))
-    ));
+    const isAdmin = verifiedUser && (['admin', 'administrador', 'propietario'].includes(verifiedRole) || isMainAdmin(verifiedUser));
+
     try {
+      const parentSale = db.prepare('SELECT user_id FROM sales WHERE id = ?').get(id) as any;
+      if (!parentSale) {
+        return res.status(404).json({ error: "Venta no encontrada." });
+      }
+      if (!isAdmin && verifiedUser && parentSale.user_id && Number(parentSale.user_id) !== Number(verifiedUser.id)) {
+        return res.status(403).json({ error: "No tienes autorización para consultar los artículos de ventas de otros vendedores." });
+      }
+
+      const isAuthorizedCostViewer = !!(verifiedUser && (
+        isMainAdmin(verifiedUser) ||
+        ['admin', 'administrador', 'propietario'].includes(verifiedRole) ||
+        (verifiedUser.permissions && (verifiedUser.permissions.view_costs || verifiedUser.permissions.view_purchase_prices))
+      ));
       const costSelect = isAuthorizedCostViewer ? 'si.cost' : 'NULL as cost';
       const items = db.prepare(`
         SELECT si.id, si.sale_id, si.product_id, si.quantity, si.price, ${costSelect},
@@ -5405,7 +5525,19 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   // FASE 4: Devoluciones dedicadas por venta
   app.get("/api/sales/:id/returns", (req, res) => {
     const { id } = req.params;
+    const verifiedUser = (req as any).verifiedUser;
+    const verifiedRole = String(verifiedUser?.role || '').toLowerCase();
+    const isAdmin = verifiedUser && (['admin', 'administrador', 'propietario'].includes(verifiedRole) || isMainAdmin(verifiedUser));
+
     try {
+      const parentSale = db.prepare('SELECT user_id FROM sales WHERE id = ?').get(id) as any;
+      if (!parentSale) {
+        return res.status(404).json({ error: "Venta no encontrada." });
+      }
+      if (!isAdmin && verifiedUser && parentSale.user_id && Number(parentSale.user_id) !== Number(verifiedUser.id)) {
+        return res.status(403).json({ error: "No tienes autorización para consultar devoluciones de ventas de otros vendedores." });
+      }
+
       const returns = db.prepare(`
         SELECT sr.*, u.username as registered_by_username
         FROM sale_returns sr
@@ -5813,6 +5945,9 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           ? (typeof userRow.permissions === 'string' ? JSON.parse(userRow.permissions) : userRow.permissions)
           : (verifiedUser?.permissions || {});
         const canModifyPrices = isAdmin || !!userPerms.modify_prices || !!userPerms.edit_prices;
+        const effectiveUserId = (verifiedUser && (!isAdmin || !user_id))
+          ? Number(verifiedUser.id)
+          : Number(user_id || verifiedUser?.id || 1);
 
         // Security check: validate discount permissions
         if (safeDiscount > 0 && !isAdmin && userPerms.apply_discounts === false) {
@@ -5931,7 +6066,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           }
 
           const nowIso = getBoliviaISOString();
-          const result = saleInsert.run(safeTotal, safeDiscount, payment_method || 'Efectivo', user_id || 1, client_id || null, currentRate, safeCurrency, notes || null, clientOpId, nowIso);
+          const result = saleInsert.run(safeTotal, safeDiscount, payment_method || 'Efectivo', effectiveUserId, client_id || null, currentRate, safeCurrency, notes || null, clientOpId, nowIso);
           const saleId = result.lastInsertRowid;
           const itemIds: any[] = [];
           const productIds: any[] = [];
@@ -5974,7 +6109,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
             // Log to inventory_audit_logs
             const auditUser = (req as any).auditUser || {};
-            const normUserId = auditUser.userId || user_id || 1;
+            const normUserId = auditUser.userId || effectiveUserId;
             const normUsername = auditUser.userName || uName || 'Cajero';
 
             const invRes = db.prepare(`

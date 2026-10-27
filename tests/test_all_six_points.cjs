@@ -4,7 +4,7 @@ const jwt = require('jsonwebtoken');
 const Database = require('better-sqlite3');
 
 const PORT = 3000;
-const DB_PATH = fs.existsSync('./gtr_pos_sandbox.db') ? './gtr_pos_sandbox.db' : './gtr_pos.db';
+const DB_PATH = fs.existsSync('./gtr_pos.db') ? './gtr_pos.db' : './gtr_pos_sandbox.db';
 const db = new Database(DB_PATH);
 
 // Helper to make HTTP requests
@@ -277,7 +277,7 @@ async function runTests() {
   assert(sellerProdsRes.status === 200 && !exposedCost, "GET /api/products para vendedor oculta estrictamente price_cost (null)");
 
   // 4.2 GET /api/sales/:id/items para vendedor oculta cost
-  const salesRow = db.prepare("SELECT id FROM sales LIMIT 1").get();
+  const salesRow = db.prepare("SELECT id FROM sales WHERE user_id = ? ORDER BY id DESC LIMIT 1").get(sellerUser.id) || db.prepare("SELECT id FROM sales LIMIT 1").get();
   if (salesRow) {
     const saleItemsRes = await request({
       path: `/api/sales/${salesRow.id}/items`,

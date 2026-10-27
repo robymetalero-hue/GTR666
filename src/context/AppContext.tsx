@@ -1758,6 +1758,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                     });
                     const processedPayload = JSON.parse(payloadStr);
 
+                    // Ensure action has stable client_operation_id for backend deduplication
+                    if (!processedPayload.clientOperationId && !processedPayload.client_operation_id) {
+                        processedPayload.client_operation_id = action.id;
+                    }
+                    if (action.ownerUserId && !processedPayload.ownerUserId && !processedPayload.user_id) {
+                        processedPayload.ownerUserId = action.ownerUserId;
+                    }
+
                     // Execute fetch call with authorization and user context
                     const authToken = localStorage.getItem('auth_token');
                     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -1794,9 +1802,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                         if (res.status === 401 || res.status === 403) {
                             console.warn(`[Offline Sync] Preserving action ${action.id} in queue until session is revalidated.`);
                             break; // Stop loop until user re-authenticates
+                        } else if (res.status === 409) {
+                            // Idempotency conflict: action already accounted for on server
+                            console.warn(`[Offline Sync] Action ${action.id} reported 409 Conflict. Retaining for audit.`);
                         } else if (res.status === 400 || res.status === 404 || res.status === 422) {
-                            // Definitive client-side validation errors can be pruned to prevent queue poison
-                            await deleteOfflineAction(action.id);
+                            // Retain problematic actions for operator review rather than silently dropping them
+                            console.warn(`[Offline Sync] Action ${action.id} failed validation (${res.status}). Preserving for review.`);
                         }
                     }
                 } catch (actionErr) {
@@ -1922,11 +1933,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         syncRunningRef.current = true;
         setIsSyncing(true);
 
-        const safetyTimer = setTimeout(() => {
-            setIsSyncing(false);
-            syncRunningRef.current = false;
-        }, 3500);
-
         try {
             const tempIdMapping: { [key: string]: any } = {};
             // First synchronize general actions, then sales with shared mapping
@@ -1965,11 +1971,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             console.warn("[PWA Sync] Error triggering backend online synchronization:", error);
             setSyncError(error?.message || String(error));
         } finally {
-            clearTimeout(safetyTimer);
-            setTimeout(() => {
-                setIsSyncing(false);
-                syncRunningRef.current = false;
-            }, 600);
+            setIsSyncing(false);
+            syncRunningRef.current = false;
         }
     };
 
@@ -1985,7 +1988,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         let reconnectTimeout: any = null;
 
         const connect = () => {
-            socket = new WebSocket(wsUrl);
+            const token = localStorage.getItem('auth_token');
+            socket = token ? new WebSocket(wsUrl, ['access_token', token]) : new WebSocket(wsUrl);
 
             socket.onmessage = (event: any) => {
                 try {

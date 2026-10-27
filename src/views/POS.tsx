@@ -896,7 +896,7 @@ export default function POS() {
                 price: item.selectedPrice || item.price_unit
             }));
             
-            if (!navigator.onLine) {
+                const opId = "pending_" + Date.now() + "_" + Math.random().toString(36).substring(2, 9);
                 const payload = {
                     client_name: pendingClientName.trim(),
                     destination: pendingDestination.trim(),
@@ -904,35 +904,33 @@ export default function POS() {
                     transport_company: pendingTransportCompany.trim() || null,
                     total: subtotal,
                     discount: 0,
-                    items
+                    items,
+                    clientOperationId: opId
                 };
-                await saveOfflineAction('create_pending_sale', '/api/pending-sales', 'POST', payload);
-                clearCart(true);
-                setLocalPriceInputs({});
-                setSelectedCartItemId(null);
-                setIsMobileCartOpen(false);
-                setPendingClientName("");
-                setPendingDestination("");
-                setPendingClientPhone("");
-                setPendingTransportCompany("");
-                setIsPendingSaleModalOpen(false);
-                showNotification("📦 Pedido registrado offline. Se sincronizará automáticamente al recuperar internet.", "success");
-                return;
-            }
+                if (!navigator.onLine) {
+                    await saveOfflineAction('create_pending_sale', '/api/pending-sales', 'POST', payload);
+                    clearCart(true);
+                    setLocalPriceInputs({});
+                    setSelectedCartItemId(null);
+                    setIsMobileCartOpen(false);
+                    setPendingClientName("");
+                    setPendingDestination("");
+                    setPendingClientPhone("");
+                    setPendingTransportCompany("");
+                    setIsPendingSaleModalOpen(false);
+                    showNotification("📦 Pedido registrado offline. Se sincronizará automáticamente al recuperar internet.", "success");
+                    return;
+                }
 
-            const res = await fetch('/api/pending-sales', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    client_name: pendingClientName.trim(),
-                    destination: pendingDestination.trim(),
-                    client_phone: pendingClientPhone.trim() || null,
-                    transport_company: pendingTransportCompany.trim() || null,
-                    total: subtotal,
-                    discount: 0,
-                    items
-                })
-            });
+                const token = localStorage.getItem('auth_token');
+                const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+                if (token) headers['Authorization'] = `Bearer ${token}`;
+
+                const res = await fetch('/api/pending-sales', {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify(payload)
+                });
             
             if (res.ok) {
                 clearCart(true);

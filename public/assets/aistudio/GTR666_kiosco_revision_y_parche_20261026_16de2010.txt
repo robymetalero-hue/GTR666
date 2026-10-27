@@ -1,0 +1,315 @@
+GTR666 — SEGURIDAD Y PRECISIÓN DEL KIOSCO PARA EL CAJERO
+Revisión y parche candidato · 26 de octubre de 2026 · Bolivia
+
+DICTAMEN
+La versión revisada contiene vías de acceso y fallos de registro que deben corregirse antes de entregar el terminal al cajero. El bloqueo de menús no constituye por sí solo una autorización en el servidor.
+
+Se preparó un parche localizado en una copia aislada, con cambios en seis archivos. No se aplicó al repositorio remoto ni a la aplicación publicada. El parche supera los casos seleccionados de esta revisión; su publicación requiere las verificaciones y decisiones de compatibilidad del apartado 9. No constituye una certificación de ausencia total de vulnerabilidades.
+
+1. VERSIÓN Y MÉTODO
+
+Repositorio:
+https://github.com/robymetalero-hue/GTR666
+
+Commit revisado:
+68aa567492a06076b9ba8cc7be7370efc6d12c3d
+https://github.com/robymetalero-hue/GTR666/commit/68aa567492a06076b9ba8cc7be7370efc6d12c3d
+
+Fecha del commit: 26/10/2026, 17:43:10 de La Paz. Se comprobó nuevamente main durante la preparación y seguía apuntando a ese commit.
+
+Se verificaron por SHA Git 43 archivos de referencia. Se revisaron navegación, autenticación, permisos, ventas, pedidos, cajas, conteos, almacenamiento offline, sincronización y conexiones de voz/alertas.
+
+Las pruebas usan funciones y handlers reales extraídos del código, SQLite en memoria, colas y temporizadores controlados y una réplica Firestore simulada. La puerta de autenticación consulta usuarios/permisos reales de las bases ficticias, pero la verificación criptográfica de JWT se sustituye por tokens válidos de prueba. Las conexiones WebSocket se verifican en su callback real de upgrade con objetos de conexión simulados.
+
+No se realizaron ataques a la URL publicada, conexiones a Gemini, peticiones de fuerza bruta ni escrituras en Firestore o bases comerciales. No se inspeccionaron credenciales reales ni se modificaron cantidades comerciales.
+
+Faltan HTTP/JWT y WebSocket reales, build/typecheck completos, ejecución en navegador/PWA y equipos Windows/Android, y verificación de la infraestructura desplegada. Las dependencias del proyecto no están instaladas en este entorno.
+
+2. RESULTADOS
+
+                                   Referencia        Parche aislado
+Seguridad y permisos, 23 casos      8 cumplen         23 cumplen
+                                   15 incumplen      0 incumplen
+
+Integración y límites, 23 casos     5 cumplen         23 cumplen
+                                   18 incumplen      0 incumplen
+
+WebSocket, 6 casos                  2 cumplen         6 cumplen
+                                   4 incumplen       0 incumplen
+
+Total: 52 casos seleccionados. Referencia: 15 cumplen y 37 incumplen. Parche: 52 cumplen, cero errores del ejecutor.
+
+Los casos se solapan; 37 incumplimientos no equivalen a 37 vulnerabilidades independientes ni a una tasa de fallos de las ventas reales. Una comprobación de rate limit es estática. La variante de mayúsculas comprueba el middleware y utiliza el comportamiento documentado de Express; no es una solicitud HTTP real.
+
+La secuencia de 500 operaciones válidas —ingresos de stock, ventas BOB/USD y devoluciones— mantiene:
+- Stock: 220.
+- Libro de inventario: 220.
+- Caja: BOB 3.000.
+Los tres coinciden con el modelo independiente en referencia y parche.
+
+También se comprobó el rechazo atómico de importes inválidos y cantidades fraccionarias en los escenarios incluidos.
+
+3. HALLAZGO CRÍTICO: VOZ Y ALERTAS FUERA DE LA AUTENTICACIÓN HTTP
+
+El upgrade de /live y /alerts se acepta sin comprobar sesión. El middleware de /api no protege estas conexiones.
+
+El canal /live ofrece al modelo herramientas de SQL, administración de usuarios y archivos. Si Gemini está habilitado en el servidor, esas capacidades necesitan un límite de autorización propio. No se ejecutó ninguna herramienta de ese tipo durante la revisión.
+
+Pruebas W01/W02/W04/W06:
+La referencia acepta upgrades de voz sin token, con identidad de cajero y con un usuario inexistente; también acepta alertas sin sesión.
+
+Ubicación:
+- server.ts:560, server.on("upgrade").
+- server.ts:10225, conexión de voz.
+- server.ts:11239, executeDatabaseQuery.
+
+Fuentes:
+https://github.com/robymetalero-hue/GTR666/blob/68aa567492a06076b9ba8cc7be7370efc6d12c3d/server.ts#L560
+https://github.com/robymetalero-hue/GTR666/blob/68aa567492a06076b9ba8cc7be7370efc6d12c3d/server.ts#L10225
+https://github.com/robymetalero-hue/GTR666/blob/68aa567492a06076b9ba8cc7be7370efc6d12c3d/server.ts#L11239
+
+Corrección candidata:
+- Verificar JWT y existencia del usuario antes de aceptar cualquiera de los dos canales.
+- Restringir /live al administrador principal con rol administrativo, porque las herramientas actuales tienen capacidades de propietario.
+- Revalidar la identidad antes de ejecutar herramientas del modelo.
+- Mantener /alerts para usuarios autenticados, incluido el cajero.
+- Actualizar los dos clientes WebSocket para enviar el token mediante subprotocolo; no incorporarlo a la URL ni imprimirlo en consola.
+
+El asistente administrativo de voz queda reservado al propietario en este candidato. Para habilitar voz al cajero conservando SQL/archivos/usuarios protegidos, se necesita una selección y autorización explícita de herramientas de POS. No debe reabrirse /live a todos para recuperar ese botón.
+
+La prueba comprueba la autorización del upgrade y la presencia de la verificación en el código. No prueba una sesión Gemini ni el handshake real a través del proxy de producción.
+
+4. HALLAZGOS EN PERMISOS, IDENTIDAD Y CONFIDENCIALIDAD
+
+4.1. La autoría comercial se toma del formulario
+Una sesión de cajero 2 puede enviar user_id=3 al registrar una venta. La referencia guarda la venta para el usuario 3 aunque el actor autenticado sea 2. La recepción offline también conserva ese ID suministrado.
+
+Efecto: ventas, caja y auditoría pueden atribuirse a personas distintas.
+
+Corrección: vincular al operador autenticado las operaciones de personal ordinario. Conservar la asignación explícita a otro vendedor para administradores autorizados. El actor de auditoría procede de la sesión.
+
+Pruebas K05/K13. Ruta de venta:
+https://github.com/robymetalero-hue/GTR666/blob/68aa567492a06076b9ba8cc7be7370efc6d12c3d/server.ts#L5785
+
+4.2. Permisos revocados no se aplican a varias rutas
+Con create_pending_sales=false se crea un pedido. Con manage_credits=false se consultan deudas y se aplica un pago que baja una deuda de 100 a 90.
+
+Corrección: guardas de permisos en altas, edición/finalización y pagos de pedidos y crédito, además de una superficie de API limitada para sesiones de kiosco.
+
+Pruebas K08/K20/K21. En el candidato, funciones financieras y administrativas ajenas al kiosco se rechazan desde el servidor. El alta de pedido desde POS requiere permiso explícito create_pending_sales=true.
+
+4.3. Acceso a información ajena por ID
+La lista de ventas puede filtrar al usuario y, aun así, GET /api/sales/:id devuelve tickets de otros vendedores. El estado global de cajas devuelve saldos de todos. El rol "cajero" también cae en una rama que muestra todas las liquidaciones.
+
+Corrección:
+- Guardas de propiedad en cabecera/detalle/devoluciones.
+- Cajas y cierres propios para personal sin acceso autorizado a otras cajas.
+- Aplicar el criterio a todos los roles no administrativos, sin limitarlo al nombre "vendedor".
+
+Pruebas K09/K10/E10 y controles positivos E02/E03.
+
+Fuente:
+https://github.com/robymetalero-hue/GTR666/blob/68aa567492a06076b9ba8cc7be7370efc6d12c3d/server.ts#L5354
+
+4.4. Exposición de costos por rutas alternativas
+GET /api/products ya oculta el costo en el caso probado. Sin embargo:
+- La bandeja offline devuelve items_json con cost y filas de otros usuarios.
+- El detalle de un cierre propio incorpora si.cost aunque la vista ordinaria lo oculte.
+
+Corrección: bandeja de aprobación administrativa y eliminación del costo en cierres sin permiso financiero.
+
+Pruebas K12/E07. Se conserva la protección existente del catálogo K19.
+
+Fuente:
+https://github.com/robymetalero-hue/GTR666/blob/68aa567492a06076b9ba8cc7be7370efc6d12c3d/server.ts#L7178
+
+4.5. Ejecución de conciliación global por un cajero
+POST /api/inventory/reconcile-catalog invoca el reconciliador sin comprobar un rol administrativo. La prueba usa un reconciliador simulado que cuenta la invocación; no altera stock comercial.
+
+Corrección: restringir esa ruta y excluirla del alcance de kiosco.
+
+Prueba K11:
+https://github.com/robymetalero-hue/GTR666/blob/68aa567492a06076b9ba8cc7be7370efc6d12c3d/server.ts#L7020
+
+4.6. Conteos ajenos o ya aprobados editables
+Un cajero modifica el físico de un conteo cuyo user_id pertenece a otro usuario. También puede reabrir un conteo ajeno y editar observaciones de uno aprobado. La guardia de aplicar stock como administrador sí existe y se conserva.
+
+Corrección:
+- Exigir permiso de control físico y pertenencia por user_id.
+- Bloquear escrituras sobre conteos resueltos/aplicados.
+- Vincular la creación ordinaria a la sesión verificada.
+- Validar cantidad física entera, finita y no negativa.
+
+Pruebas K14/K15/K16/E13/E21; controles positivos K17/E04.
+
+Fuente:
+https://github.com/robymetalero-hue/GTR666/blob/68aa567492a06076b9ba8cc7be7370efc6d12c3d/server.ts#L9314
+
+4.7. Controles auxiliares
+- La imagen del producto puede cambiar sin permiso de edición; se incluye en el control de metadatos.
+- verify-supervisor carece de limitador de intentos en su registro; se añade uno específico, configurado para cinco fallos por 15 minutos y para excluir respuestas correctas.
+- La comprobación inicial de /api distingue mayúsculas; Express permite rutas sin esa distinción por defecto. Se alinea la comprobación de autenticación.
+- Una cabecera x-app-environment puede anular APP_ENV; se da precedencia a la configuración del servidor y se conserva la detección de entorno mediante variables del servidor.
+
+Pruebas K03/K23/E01/E16. El funcionamiento real del rate limiter, el proxy y los entornos necesita pruebas desplegadas en un entorno aislado.
+
+Documentación primaria utilizada para estas comprobaciones:
+https://expressjs.com/en/4x/api/application/
+https://expressjs.com/en/4x/api/express/
+https://express-rate-limit.mintlify.app/reference/configuration
+https://github.com/websockets/ws/blob/8.18.1/lib/websocket-server.js
+
+5. DUPLICACIÓN, CÁLCULOS Y CONSISTENCIA
+
+5.1. El bloqueo de sincronización se libera antes de terminar
+AppContext.tsx desactiva syncRunningRef a los 3,5 segundos aunque continúe la solicitud. Otra ejecución vuelve a leer la misma cola.
+
+Prueba E08:
+Se retiene la primera respuesta más de 3,5 segundos y se dispara otra sincronización.
+Referencia: dos solicitudes, dos pedidos.
+Parche: una solicitud, un pedido.
+
+Corrección: conservar exclusión hasta que termine la promesa completa; liberar en finally.
+
+5.2. La acción offline no lleva una clave durable al backend
+Dos procesadores pueden leer la misma acción antes de que se borre localmente. La referencia crea dos pedidos. Se transmite el ID estable de la acción como clave de operación.
+
+El backend guarda tipo, actor/huella del contenido y respuesta en la misma transacción que reserva el pedido. El reintento devuelve el resultado original.
+
+Pruebas E05/E09. La protección busca una sola aplicación contable, aunque la red retransmita solicitudes.
+
+5.3. Una clave reutilizada acepta otro contenido
+Después de registrar una unidad, otra solicitud con la misma clave pero dos unidades responde 200 con el ticket anterior. No comunica el conflicto.
+
+Corrección: verificar tipo, usuario y huella; responder 409 al reutilizar la clave con otro contenido. La inserción de la evidencia esencial de la venta deja de absorber errores.
+
+K07/E11:
+Si falla el registro de la operación, el candidato revierte venta y stock. La referencia responde 200 y conserva los efectos sin su evidencia de deduplicación.
+
+5.4. Reservas comprobadas por fila
+Con físico 10 se aceptan dos líneas del mismo producto de 6 cada una.
+
+Corrección: agregar demanda por producto y validarla dentro de la transacción del alta de pedido.
+
+Prueba E06: el candidato responde 400 sin crear pedido.
+
+5.5. Importes y cantidades malformados
+Se reprodujeron:
+- Una venta con importes no numéricos que consume inventario.
+- Un conteo con físico fraccionario.
+- Una devolución de media unidad.
+- Un descuento de pedido que elude el permiso aplicado a la venta normal.
+
+Corrección candidata: importes finitos, monedas BOB/USD, controles de abono/puntos y cantidades discretas en los casos modificados, además del permiso de descuento en pedidos.
+
+Pruebas E20–E23. La secuencia de 500 operaciones válidas sigue cuadrando después de añadir los rechazos.
+
+5.6. Cambio de cajero y pérdida de acciones
+La cola general no conserva el propietario; las ventas de otro operador pueden enviarse con la sesión actual. También se borran acciones que reciben 400/404/422.
+
+Corrección:
+- Guardar ownerUserId en acciones nuevas.
+- Conservar y omitir las operaciones de otra cuenta hasta revisión del operador original.
+- Mantener acciones rechazadas para revisión en vez de eliminarlas silenciosamente.
+
+Pruebas E14/E15/E19. No se elimina ninguna cola para hacer pasar las pruebas.
+
+5.7. Colisión de SKU que restaura stock antiguo
+Local: ID 1, stock 8, fecha 10:00.
+Remoto: ID 999, mismo SKU, stock 30, fecha 08:00.
+La referencia remapea el ID después de validar stock y termina imponiendo 30.
+
+Corrección: conservar el producto local y omitir la fila remota incompatible con aviso de conflicto. No sustituir identidades silenciosamente.
+
+E17 pasa con el candidato; E18 confirma que una actualización legítima de la misma identidad sigue entrando.
+
+Fuente:
+https://github.com/robymetalero-hue/GTR666/blob/68aa567492a06076b9ba8cc7be7370efc6d12c3d/firebaseSync.ts#L895
+
+6. CONTROLES EXISTENTES QUE SE CONSERVARON
+
+En los casos incluidos siguen funcionando:
+- Rechazo sin sesión.
+- Permisos y rol recuperados de la base verificada; cabeceras falsas de administrador no autorizan.
+- Rechazo de venta cuando se revoca create_sales.
+- Rechazo de descuento con permiso explícitamente desactivado.
+- Rechazo de aprobación/aplicación de inventario por un cajero.
+- Rechazo de desactivar kiosco desde una sesión de cajero.
+- Costo oculto en catálogo de cajero.
+- Acceso a ticket propio y acceso administrativo autorizado.
+- Captura de un conteo propio con sus campos ciegos sanitizados.
+- Una venta online ya registrada seguida de su envío a la bandeja offline conserva un solo movimiento en el caso probado.
+- Balance del ciclo normal BOB/USD.
+
+7. CONTENIDO Y ALCANCE DEL PARCHE
+
+GTR666_kiosco_68aa567.diff modifica:
+1) server.ts: límites de acceso, propiedad, actor comercial, operaciones atómicas, validación y WebSocket.
+2) firebaseSync.ts: rechazo de identidad remota incompatible por SKU.
+3) src/context/AppContext.tsx: exclusión de sincronización, claves de cola, propietario, conservación de errores y autenticación de alertas.
+4) src/utils/offlineStorage.ts: propietario de acciones nuevas.
+5) src/views/POS.tsx: claves estables de pedidos, precios BOB consistentes y bloqueos síncronos de envío.
+6) src/components/AudioVoice.tsx: credencial del canal de voz sin incluirla en URL.
+
+Mantiene módulos y esquema SQL. No añade servicios ni sustituye el servidor completo. Los registros comerciales de producción no se alteraron.
+
+La aplicación del diff se comprobó con git apply --check contra la referencia. También pasó git diff --check.
+Se analizó sintaxis completa de las tres fuentes modificadas sin JSX y se compilaron/definieron los fragmentos cambiados de checkout/pedidos. Los fragmentos de sincronización y almacenamiento se ejecutaron en las pruebas.
+Esto no equivale a compilar la aplicación React ni a ejecutar TypeScript/lint completos.
+
+8. CAMBIOS DE FUNCIONAMIENTO QUE DEBEN REVISARSE
+
+A. Voz administrativa:
+El candidato reserva /live al administrador principal. El cajero conserva las funciones operativas permitidas y las alertas autenticadas. No ampliar de nuevo voz a todos sin autorización por herramienta.
+
+B. Permisos explícitos:
+El kiosco puede crear pedidos desde POS si create_pending_sales=true. Crédito, configuración, diagnóstico y otras funciones ajenas a su alcance no se habilitan solo porque un botón pueda mostrarse.
+
+C. Conteos delegados:
+La propiedad se vincula a user_id. auditor_name es un texto de presentación. Un conteo creado por administrador para otra persona debe tener una asignación de identidad comprobada; no conceder acceso por coincidencia libre de nombres.
+Revisar los conteos abiertos existentes antes de activar esta restricción.
+
+D. Operaciones antiguas:
+Los registros existentes sin payload_hash no permiten demostrar igualdad de contenido. El candidato devuelve 409 y exige verificar el ticket antes de reintentar. No borrar la evidencia ni generar otra clave automáticamente.
+La migración histórica de processed_operations debe revisarse por separado: este parche no modifica database.ts.
+
+E. Colas antiguas:
+Una acción anterior sin propietario se conserva y no se envía automáticamente. Determinar su operador y resolverla con evidencia. No atribuir toda la cola al usuario que inicia sesión ni vaciar IndexedDB/localStorage.
+
+F. Entorno:
+Configurar APP_ENV de forma explícita y comprobar los proyectos/bases de destino. El cliente ya no puede cambiar el entorno forzado. La selección inicial respeta las variables de servidor usadas para identificar el entorno de desarrollo.
+
+G. Actualización conjunta:
+Servidor y clientes de voz/alertas deben desplegarse juntos. El JavaScript antiguo no envía la credencial WebSocket. Probar la actualización PWA cuando no existan cobros ambiguos o colas pendientes sin revisar.
+
+9. CONDICIONES PARA ENTREGAR EL EQUIPO AL CAJERO
+
+El candidato no debe presentarse como publicación ya terminada. Falta cerrar lo siguiente:
+
+- Usar un checkout completo del commit de referencia, aplicar el diff en una rama y ejecutar instalación según el lockfile, npm run build y npm run lint.
+- Probar JWT firmados reales, revocación/cambio de permisos, HTTP con variantes de ruta, WebSocket por el proxy, 401/403/409 y rate limit 429.
+- Probar voz de propietario y alertas de cajero con las nuevas credenciales.
+- Probar PC/Android/PWA: doble clic, varias pestañas, pérdida de respuesta, cierre del navegador, reconexión y actualización durante cobro.
+- Revisar la continuidad de la clave de checkout después de una recarga completa. La clave de venta normal todavía nace en estado React; los bloqueos y claves del candidato no acreditan por sí solos recuperación durable de todos los cobros ambiguos después de una recarga.
+- Verificar las colas y operaciones antiguas descritas en el apartado 8.
+- Comprobar la copia de pruebas del esquema realmente utilizado y una réplica Firestore aislada. Los mocks no acreditan acuse remoto, restauración o coordinación entre varias instancias.
+- Validar abonos, cambio de moneda, puntos, devoluciones y reportes en los recorridos que use el negocio. El ciclo seleccionado no cubre toda combinación monetaria histórica.
+- Confirmar la topología de escritura y la separación producción/sandbox. El candidato no resuelve por sí solo dos SQLite independientes escribiendo el mismo inventario ni todos los fallos históricos de réplica/respaldo.
+- Verificar que el modo BLIND oculte información por todas las vías necesarias para la política del negocio. Ocultar campos del conteo no impide consultar cantidades por otros recursos de catálogo que el POS utiliza.
+- Entregar una cuenta individual de cajero, sin credenciales de propietario, con permisos mínimos explícitos y kiosco activado.
+- Comprobar la versión realmente servida. Pantalla completa del navegador y bloqueo del sistema operativo son controles distintos; este parche aborda autorizaciones de la aplicación.
+
+Los límites anteriores son relevantes para la solicitud de evitar omisiones y conflictos. Pasar 52 escenarios controlados no autoriza a afirmar que el sistema completo ya carece de riesgos.
+
+10. INSTRUCCIÓN PARA GOOGLE AI STUDIO / DESARROLLADOR
+
+Verifica primero el commit actual y compara con 68aa567. No sobrescribas correcciones posteriores.
+Reproduce los casos con los ejecutores del ZIP y aplica el diff candidato en una rama aislada.
+Conserva el esquema y los módulos; corrige causas puntuales y mantiene las guardas de permisos.
+Revisa los cambios de funcionamiento del apartado 8 y cierra las condiciones del apartado 9.
+Entrega diff final, resultados de pruebas completas, procedimiento de actualización conjunta, versión servida y recuperación.
+No pruebes con la base comercial ni ajustes stock verdadero usando los números ficticios de este informe.
+No publiques ni certifiques el kiosco como libre de conflictos solo por los resultados del ejecutor.
+
+La meta comprobable es que cada intención produzca una sola venta/reserva/movimiento autorizado, con el operador correcto, saldos explicables y evidencia durable.
+

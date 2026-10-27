@@ -4,7 +4,7 @@ const jwt = require('jsonwebtoken');
 const Database = require('better-sqlite3');
 
 const PORT = 3000;
-const DB_PATH = fs.existsSync('./gtr_pos_sandbox.db') ? './gtr_pos_sandbox.db' : './gtr_pos.db';
+const DB_PATH = fs.existsSync('./gtr_pos.db') ? './gtr_pos.db' : './gtr_pos_sandbox.db';
 const db = new Database(DB_PATH);
 
 function request(options, body = null) {

@@ -94,116 +94,62 @@ function setupDbPragmas(databaseInstance: Database.Database) {
   }
 }
 
+
 let prodDbInstance: Database.Database | null = null;
 let sandboxDbInstance: Database.Database | null = null;
 
-export function getProdDb(): Database.Database {
-  if (!prodDbInstance) {
-    ensureProdDbExists();
-    prodDbInstance = new Database(prodDbPath, { timeout: 10000 });
-    setupDbPragmas(prodDbInstance);
-  }
-  return prodDbInstance;
-}
-
-export function getSandboxDb(): Database.Database {
-  if (!sandboxDbInstance) {
-    ensureProdDbExists();
-    // If sandbox db does not exist or is smaller than healthy threshold, clone production db initially
-    const minValidBytes = 200 * 1024;
-    let needsClone = !fs.existsSync(sandboxDbPath);
-    if (!needsClone) {
-      try {
-        if (fs.statSync(sandboxDbPath).size < minValidBytes && fs.existsSync(prodDbPath) && fs.statSync(prodDbPath).size >= minValidBytes) {
-          needsClone = true;
-        }
-      } catch {}
-    }
-    if (needsClone && fs.existsSync(prodDbPath)) {
-      try {
-        fs.copyFileSync(prodDbPath, sandboxDbPath);
-        console.log('[Sandbox Isolation] Cloned initial gtr_pos.db snapshot to gtr_pos_sandbox.db');
-      } catch (err: any) {
-        console.warn('[Sandbox Isolation] Failed to clone initial database:', err.message);
-      }
-    }
-    sandboxDbInstance = new Database(sandboxDbPath, { timeout: 10000 });
-    setupDbPragmas(sandboxDbInstance);
-  }
-  return sandboxDbInstance;
-}
-
-export function getActiveDb(): Database.Database {
-  return isCurrentContextSandbox() ? getSandboxDb() : getProdDb();
-}
-
-// Transparent Proxy that automatically routes to the isolated sandbox DB or production DB
-export const db = new Proxy({} as Database.Database, {
-  get(target, prop, receiver) {
-    const activeDb = getActiveDb();
-    const val = (activeDb as any)[prop];
-    if (typeof val === 'function') {
-      return val.bind(activeDb);
-    }
-    return val;
-  }
-});
-
-// Scheduled passive WAL maintenance every 10 minutes to prevent unbound .db-wal file growth
-const walMaintenanceInterval = setInterval(() => {
+export function runDatabaseMigrations(targetDb: Database.Database) {
   try {
-    if (prodDbInstance) prodDbInstance.pragma('wal_checkpoint(PASSIVE)');
-    if (sandboxDbInstance) sandboxDbInstance.pragma('wal_checkpoint(PASSIVE)');
-  } catch (err: any) {
-    console.warn('[SQLite Maintenance] Periodic wal_checkpoint error:', err.message);
+    const tableInfo = targetDb.prepare("PRAGMA table_info(processed_operations)").all() as any[];
+    const hasClientOpId = tableInfo.some(c => c.name === 'client_operation_id');
+    if (tableInfo.length > 0 && !hasClientOpId) {
+      targetDb.exec(`
+        ALTER TABLE processed_operations RENAME TO _legacy_processed_operations_mig;
+        CREATE TABLE IF NOT EXISTS processed_operations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          client_operation_id TEXT UNIQUE NOT NULL,
+          operation_type TEXT NOT NULL,
+          payload_hash TEXT,
+          response_body TEXT,
+          status TEXT DEFAULT 'completed',
+          created_at DATETIME DEFAULT (strftime('%Y-%m-%dT%H:%M:%S-04:00', 'now', '-4 hours'))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_processed_operations_op_id ON processed_operations (client_operation_id);
+        CREATE INDEX IF NOT EXISTS idx_processed_operations_type ON processed_operations (operation_type);
+        DROP TABLE IF EXISTS _legacy_processed_operations_mig;
+      `);
+      console.log("[Database Migration] Migrated processed_operations to canonical schema with client_operation_id.");
+    } else {
+      targetDb.exec(`
+        CREATE TABLE IF NOT EXISTS processed_operations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          client_operation_id TEXT UNIQUE NOT NULL,
+          operation_type TEXT NOT NULL,
+          payload_hash TEXT,
+          response_body TEXT,
+          status TEXT DEFAULT 'completed',
+          created_at DATETIME DEFAULT (strftime('%Y-%m-%dT%H:%M:%S-04:00', 'now', '-4 hours'))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_processed_operations_op_id ON processed_operations (client_operation_id);
+        CREATE INDEX IF NOT EXISTS idx_processed_operations_type ON processed_operations (operation_type);
+      `);
+    }
+  } catch (e: any) {
+    console.warn("Migration warning (processed_operations):", e.message);
   }
-}, 10 * 60 * 1000);
 
-if (typeof walMaintenanceInterval.unref === 'function') {
-  walMaintenanceInterval.unref();
+  try {
+    const offlineCols = targetDb.prepare("PRAGMA table_info(offline_pending_sales)").all() as any[];
+    if (offlineCols.length > 0 && !offlineCols.some(c => c.name === 'initial_abono')) {
+      targetDb.exec("ALTER TABLE offline_pending_sales ADD COLUMN initial_abono REAL DEFAULT 0.0;");
+      console.log("[Database Migration] Added initial_abono column to offline_pending_sales.");
+    }
+  } catch (e: any) {}
 }
 
-export function cloneProductionToSandbox() {
-  if (!fs.existsSync(prodDbPath)) {
-    throw new Error('La base de datos de producción gtr_pos.db no existe.');
-  }
 
-  // Flush WAL on prod
-  try {
-    getProdDb().pragma('wal_checkpoint(PASSIVE)');
-  } catch (_) {}
-
-  // Close sandbox if open
-  if (sandboxDbInstance) {
-    try {
-      sandboxDbInstance.close();
-    } catch (_) {}
-    sandboxDbInstance = null;
-  }
-
-  // Remove sandbox DB files
-  try {
-    if (fs.existsSync(sandboxDbPath)) fs.unlinkSync(sandboxDbPath);
-    if (fs.existsSync(`${sandboxDbPath}-wal`)) fs.unlinkSync(`${sandboxDbPath}-wal`);
-    if (fs.existsSync(`${sandboxDbPath}-shm`)) fs.unlinkSync(`${sandboxDbPath}-shm`);
-  } catch (_) {}
-
-  // Copy fresh prodDb to sandboxDb
-  fs.copyFileSync(prodDbPath, sandboxDbPath);
-
-  // Re-open sandboxDb
-  const sDb = getSandboxDb();
-  const count = (sDb.prepare('SELECT count(*) as count FROM products').get() as any)?.count || 0;
-  console.log(`[Sandbox Isolation] Cloned fresh production database to sandbox with ${count} products.`);
-  return {
-    success: true,
-    message: `Base de datos de pruebas (Sandbox) sincronizada con éxito (${count} productos reales).`,
-    productsCount: count
-  };
-}
-
-// Initialization
-db.exec(`
+export function ensureAllTablesAndMigrations(targetDb: Database.Database) {
+targetDb.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT UNIQUE,
@@ -486,18 +432,18 @@ db.exec(`
 
 // Seed default departments if they haven't been seeded yet
 try {
-  const seededRow = db.prepare("SELECT value FROM settings WHERE key = 'departments_seeded'").get() as any;
+  const seededRow = targetDb.prepare("SELECT value FROM settings WHERE key = 'departments_seeded'").get() as any;
   if (!seededRow) {
-    const count = db.prepare('SELECT COUNT(*) as count FROM departments').get() as any;
+    const count = targetDb.prepare('SELECT COUNT(*) as count FROM departments').get() as any;
     if (!count || count.count === 0) {
       const defaults = ['Storage', 'Micro SDs', 'USBs', 'Electronics'];
-      const stmt = db.prepare('INSERT OR IGNORE INTO departments (name) VALUES (?)');
+      const stmt = targetDb.prepare('INSERT OR IGNORE INTO departments (name) VALUES (?)');
       for (const name of defaults) {
         stmt.run(name);
       }
       console.log("[Database] Successfully seeded default departments:", defaults);
     }
-    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('departments_seeded', 'true')").run();
+    targetDb.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('departments_seeded', 'true')").run();
   }
 } catch (e: any) {
   console.error("Failed to seed default departments:", e.message);
@@ -505,17 +451,17 @@ try {
 
 // Clean up ghost default departments if no products are using them (one-time migration)
 try {
-  const cleanedRow = db.prepare("SELECT value FROM settings WHERE key = 'migration_clean_ghost_departments'").get() as any;
+  const cleanedRow = targetDb.prepare("SELECT value FROM settings WHERE key = 'migration_clean_ghost_departments'").get() as any;
   if (!cleanedRow) {
     const defaultsToDelete = ['Storage', 'Micro SDs', 'USBs', 'Electronics', 'Micro SD'];
     for (const name of defaultsToDelete) {
-      const productUsing = db.prepare("SELECT COUNT(*) as count FROM products WHERE category = ?").get(name) as any;
+      const productUsing = targetDb.prepare("SELECT COUNT(*) as count FROM products WHERE category = ?").get(name) as any;
       if (!productUsing || productUsing.count === 0) {
-        db.prepare("DELETE FROM departments WHERE name = ?").run(name);
+        targetDb.prepare("DELETE FROM departments WHERE name = ?").run(name);
         console.log(`[Database Migration] Cleaned up unused default department: ${name}`);
       }
     }
-    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('migration_clean_ghost_departments', 'true')").run();
+    targetDb.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('migration_clean_ghost_departments', 'true')").run();
   }
 } catch (e: any) {
   console.error("Failed to run clean ghost departments migration:", e.message);
@@ -523,83 +469,83 @@ try {
 
 // Gracefully migrate existing databases
 try {
-  db.exec("ALTER TABLE products ADD COLUMN price_cost REAL DEFAULT 0.0");
+  targetDb.exec("ALTER TABLE products ADD COLUMN price_cost REAL DEFAULT 0.0");
 } catch (e: any) {}
 
 try {
-  db.exec("ALTER TABLE sales ADD COLUMN exchange_rate REAL DEFAULT 6.96");
+  targetDb.exec("ALTER TABLE sales ADD COLUMN exchange_rate REAL DEFAULT 6.96");
 } catch (e: any) {}
 
 try {
-  db.exec("ALTER TABLE sales ADD COLUMN currency TEXT DEFAULT 'BOB'");
+  targetDb.exec("ALTER TABLE sales ADD COLUMN currency TEXT DEFAULT 'BOB'");
 } catch (e: any) {}
 
 try {
-  db.exec("ALTER TABLE sales ADD COLUMN cierre_id INTEGER DEFAULT NULL");
+  targetDb.exec("ALTER TABLE sales ADD COLUMN cierre_id INTEGER DEFAULT NULL");
 } catch (e: any) {}
 
 try {
-  db.exec("ALTER TABLE settings ADD COLUMN updated_at TEXT;");
+  targetDb.exec("ALTER TABLE settings ADD COLUMN updated_at TEXT;");
 } catch (e: any) {}
 
 try {
-  db.exec("ALTER TABLE products ADD COLUMN image TEXT DEFAULT NULL");
+  targetDb.exec("ALTER TABLE products ADD COLUMN image TEXT DEFAULT NULL");
 } catch (e: any) {}
 
 try {
-  db.exec("ALTER TABLE products ADD COLUMN updated_at DATETIME DEFAULT NULL");
+  targetDb.exec("ALTER TABLE products ADD COLUMN updated_at DATETIME DEFAULT NULL");
 } catch (e: any) {}
 
 try {
-  db.exec("ALTER TABLE clients ADD COLUMN points INTEGER DEFAULT 0");
+  targetDb.exec("ALTER TABLE clients ADD COLUMN points INTEGER DEFAULT 0");
 } catch (e: any) {}
 
 try {
-  db.exec("ALTER TABLE users ADD COLUMN email TEXT DEFAULT NULL");
+  targetDb.exec("ALTER TABLE users ADD COLUMN email TEXT DEFAULT NULL");
 } catch (e: any) {}
 
 try {
-  db.exec("ALTER TABLE sale_items ADD COLUMN cost REAL DEFAULT NULL");
+  targetDb.exec("ALTER TABLE sale_items ADD COLUMN cost REAL DEFAULT NULL");
 } catch (e: any) {}
 
 try {
-  db.exec("ALTER TABLE sale_items ADD COLUMN product_name_snapshot TEXT DEFAULT NULL");
+  targetDb.exec("ALTER TABLE sale_items ADD COLUMN product_name_snapshot TEXT DEFAULT NULL");
 } catch (e: any) {}
 
 try {
-  db.exec("ALTER TABLE sale_items ADD COLUMN product_sku_snapshot TEXT DEFAULT NULL");
+  targetDb.exec("ALTER TABLE sale_items ADD COLUMN product_sku_snapshot TEXT DEFAULT NULL");
 } catch (e: any) {}
 
 try {
-  db.exec("ALTER TABLE sale_items ADD COLUMN price_type TEXT DEFAULT NULL");
+  targetDb.exec("ALTER TABLE sale_items ADD COLUMN price_type TEXT DEFAULT NULL");
 } catch (e: any) {}
 
 try {
-  db.exec("ALTER TABLE sale_items ADD COLUMN discount_minor REAL DEFAULT NULL");
+  targetDb.exec("ALTER TABLE sale_items ADD COLUMN discount_minor REAL DEFAULT NULL");
 } catch (e: any) {}
 
 try {
-  db.exec("ALTER TABLE sale_items ADD COLUMN subtotal_minor REAL DEFAULT NULL");
+  targetDb.exec("ALTER TABLE sale_items ADD COLUMN subtotal_minor REAL DEFAULT NULL");
 } catch (e: any) {}
 
 try {
-  db.exec("ALTER TABLE sales ADD COLUMN notes TEXT DEFAULT NULL");
+  targetDb.exec("ALTER TABLE sales ADD COLUMN notes TEXT DEFAULT NULL");
 } catch (e: any) {}
 
 try {
-  db.exec("ALTER TABLE sales ADD COLUMN client_operation_id TEXT DEFAULT NULL");
+  targetDb.exec("ALTER TABLE sales ADD COLUMN client_operation_id TEXT DEFAULT NULL");
 } catch (e: any) {}
 
 try {
-  db.exec("ALTER TABLE pending_sales ADD COLUMN paid_amount REAL DEFAULT 0.0");
+  targetDb.exec("ALTER TABLE pending_sales ADD COLUMN paid_amount REAL DEFAULT 0.0");
 } catch (e: any) {}
 
 try {
-  db.exec("ALTER TABLE pending_sales ADD COLUMN transport_company TEXT DEFAULT NULL");
+  targetDb.exec("ALTER TABLE pending_sales ADD COLUMN transport_company TEXT DEFAULT NULL");
 } catch (e: any) {}
 
 try {
-  db.exec(`
+  targetDb.exec(`
     CREATE TABLE IF NOT EXISTS inventory_counts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER,
@@ -629,14 +575,14 @@ try {
 }
 
 try {
-  db.exec("ALTER TABLE inventory_counts ADD COLUMN created_at DATETIME DEFAULT NULL");
+  targetDb.exec("ALTER TABLE inventory_counts ADD COLUMN created_at DATETIME DEFAULT NULL");
 } catch (e: any) {}
 try {
-  db.exec("UPDATE inventory_counts SET created_at = started_at WHERE created_at IS NULL AND started_at IS NOT NULL");
+  targetDb.exec("UPDATE inventory_counts SET created_at = started_at WHERE created_at IS NULL AND started_at IS NOT NULL");
 } catch (e: any) {}
 
 try {
-  db.exec(`
+  targetDb.exec(`
     CREATE TABLE IF NOT EXISTS inventory_count_items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       inventory_count_id INTEGER,
@@ -661,48 +607,48 @@ try {
 
 // Ensure columns exist on legacy tables
 try {
-  db.exec("ALTER TABLE inventory_counts ADD COLUMN category_filter TEXT DEFAULT NULL");
+  targetDb.exec("ALTER TABLE inventory_counts ADD COLUMN category_filter TEXT DEFAULT NULL");
 } catch (e: any) {}
 try {
-  db.exec("ALTER TABLE inventory_counts ADD COLUMN mode TEXT DEFAULT 'BLIND'");
+  targetDb.exec("ALTER TABLE inventory_counts ADD COLUMN mode TEXT DEFAULT 'BLIND'");
 } catch (e: any) {}
 try {
-  db.exec("ALTER TABLE inventory_counts ADD COLUMN auditor_name TEXT DEFAULT NULL");
+  targetDb.exec("ALTER TABLE inventory_counts ADD COLUMN auditor_name TEXT DEFAULT NULL");
 } catch (e: any) {}
 try {
-  db.exec("ALTER TABLE inventory_counts ADD COLUMN store_name TEXT DEFAULT 'Almacén Principal'");
+  targetDb.exec("ALTER TABLE inventory_counts ADD COLUMN store_name TEXT DEFAULT 'Almacén Principal'");
 } catch (e: any) {}
 try {
-  db.exec("ALTER TABLE inventory_counts ADD COLUMN override_segregation INTEGER DEFAULT 0");
+  targetDb.exec("ALTER TABLE inventory_counts ADD COLUMN override_segregation INTEGER DEFAULT 0");
 } catch (e: any) {}
 try {
-  db.exec("ALTER TABLE inventory_counts ADD COLUMN override_reason TEXT DEFAULT NULL");
+  targetDb.exec("ALTER TABLE inventory_counts ADD COLUMN override_reason TEXT DEFAULT NULL");
 } catch (e: any) {}
 try {
-  db.exec("ALTER TABLE inventory_counts ADD COLUMN exclude_zero_stock INTEGER DEFAULT 1");
+  targetDb.exec("ALTER TABLE inventory_counts ADD COLUMN exclude_zero_stock INTEGER DEFAULT 1");
 } catch (e: any) {}
 try {
-  db.exec("ALTER TABLE inventory_counts ADD COLUMN sort_order TEXT DEFAULT 'category_name'");
+  targetDb.exec("ALTER TABLE inventory_counts ADD COLUMN sort_order TEXT DEFAULT 'category_name'");
 } catch (e: any) {}
 try {
-  db.exec("ALTER TABLE inventory_counts ADD COLUMN approved_at DATETIME DEFAULT NULL");
+  targetDb.exec("ALTER TABLE inventory_counts ADD COLUMN approved_at DATETIME DEFAULT NULL");
 } catch (e: any) {}
 try {
-  db.exec("ALTER TABLE inventory_counts ADD COLUMN approved_by_username TEXT DEFAULT NULL");
+  targetDb.exec("ALTER TABLE inventory_counts ADD COLUMN approved_by_username TEXT DEFAULT NULL");
 } catch (e: any) {}
 try {
-  db.exec("ALTER TABLE inventory_count_items ADD COLUMN expected_quantity_snapshot INTEGER DEFAULT 0");
+  targetDb.exec("ALTER TABLE inventory_count_items ADD COLUMN expected_quantity_snapshot INTEGER DEFAULT 0");
 } catch (e: any) {}
 try {
-  db.exec("ALTER TABLE inventory_count_items ADD COLUMN movements_during_count INTEGER DEFAULT 0");
+  targetDb.exec("ALTER TABLE inventory_count_items ADD COLUMN movements_during_count INTEGER DEFAULT 0");
 } catch (e: any) {}
 try {
-  db.exec("ALTER TABLE inventory_count_items ADD COLUMN recount_requested INTEGER DEFAULT 0");
+  targetDb.exec("ALTER TABLE inventory_count_items ADD COLUMN recount_requested INTEGER DEFAULT 0");
 } catch (e: any) {}
 
 // FASE 4: Dedicated table for sale returns (auditoría sin alterar el comprobante original)
 try {
-  db.exec(`
+  targetDb.exec(`
     CREATE TABLE IF NOT EXISTS sale_returns (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       sale_id INTEGER NOT NULL,
@@ -727,7 +673,7 @@ try {
 
 // Create System Audit Logs table for advanced immutable auditing
 try {
-  db.exec(`
+  targetDb.exec(`
     CREATE TABLE IF NOT EXISTS system_audit_logs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       event_type TEXT,
@@ -787,15 +733,15 @@ try {
 
 // Ensure additional columns are present on the database
 try {
-  db.exec(`ALTER TABLE system_audit_logs ADD COLUMN correlation_id TEXT;`);
+  targetDb.exec(`ALTER TABLE system_audit_logs ADD COLUMN correlation_id TEXT;`);
 } catch (e) {}
 try {
-  db.exec(`ALTER TABLE system_audit_logs ADD COLUMN transaction_id TEXT;`);
+  targetDb.exec(`ALTER TABLE system_audit_logs ADD COLUMN transaction_id TEXT;`);
 } catch (e) {}
 
 // Database triggers to enforce database-level immutability
 try {
-  db.exec(`
+  targetDb.exec(`
     CREATE TRIGGER IF NOT EXISTS prevent_system_audit_logs_update
     BEFORE UPDATE ON system_audit_logs
     BEGIN
@@ -804,7 +750,7 @@ try {
   `);
 } catch (e) {}
 try {
-  db.exec(`
+  targetDb.exec(`
     CREATE TRIGGER IF NOT EXISTS prevent_system_audit_logs_delete
     BEFORE DELETE ON system_audit_logs
     BEGIN
@@ -815,7 +761,7 @@ try {
 
 // Create firestore_transaction_ledger table for strict transaction hash validation and audit
 try {
-  db.exec(`
+  targetDb.exec(`
     CREATE TABLE IF NOT EXISTS firestore_transaction_ledger (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       tx_hash TEXT UNIQUE NOT NULL,
@@ -840,7 +786,7 @@ try {
 }
 
 try {
-  db.exec(`
+  targetDb.exec(`
     CREATE TRIGGER IF NOT EXISTS prevent_firestore_ledger_update
     BEFORE UPDATE ON firestore_transaction_ledger
     BEGIN
@@ -849,7 +795,7 @@ try {
   `);
 } catch (e) {}
 try {
-  db.exec(`
+  targetDb.exec(`
     CREATE TRIGGER IF NOT EXISTS prevent_firestore_ledger_delete
     BEFORE DELETE ON firestore_transaction_ledger
     BEGIN
@@ -858,70 +804,10 @@ try {
   `);
 } catch (e) {}
 
-// Canonical migration for processed_operations and offline_pending_sales (T01, T17, T18)
-export function runDatabaseMigrations(targetDb: Database.Database) {
-  try {
-    const tableInfo = targetDb.prepare("PRAGMA table_info(processed_operations)").all() as any[];
-    const hasClientOpId = tableInfo.some(c => c.name === 'client_operation_id');
-    if (tableInfo.length > 0 && !hasClientOpId) {
-      targetDb.exec(`
-        ALTER TABLE processed_operations RENAME TO _legacy_processed_operations_mig;
-        CREATE TABLE IF NOT EXISTS processed_operations (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          client_operation_id TEXT UNIQUE NOT NULL,
-          operation_type TEXT NOT NULL,
-          payload_hash TEXT,
-          response_body TEXT,
-          status TEXT DEFAULT 'completed',
-          created_at DATETIME DEFAULT (strftime('%Y-%m-%dT%H:%M:%S-04:00', 'now', '-4 hours'))
-        );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_processed_operations_op_id ON processed_operations (client_operation_id);
-        CREATE INDEX IF NOT EXISTS idx_processed_operations_type ON processed_operations (operation_type);
-        DROP TABLE IF EXISTS _legacy_processed_operations_mig;
-      `);
-      console.log("[Database Migration] Migrated processed_operations to canonical schema with client_operation_id.");
-    } else {
-      targetDb.exec(`
-        CREATE TABLE IF NOT EXISTS processed_operations (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          client_operation_id TEXT UNIQUE NOT NULL,
-          operation_type TEXT NOT NULL,
-          payload_hash TEXT,
-          response_body TEXT,
-          status TEXT DEFAULT 'completed',
-          created_at DATETIME DEFAULT (strftime('%Y-%m-%dT%H:%M:%S-04:00', 'now', '-4 hours'))
-        );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_processed_operations_op_id ON processed_operations (client_operation_id);
-        CREATE INDEX IF NOT EXISTS idx_processed_operations_type ON processed_operations (operation_type);
-      `);
-    }
-  } catch (e: any) {
-    console.warn("Migration warning (processed_operations):", e.message);
-  }
-
-  try {
-    const offlineCols = targetDb.prepare("PRAGMA table_info(offline_pending_sales)").all() as any[];
-    if (offlineCols.length > 0 && !offlineCols.some(c => c.name === 'initial_abono')) {
-      targetDb.exec("ALTER TABLE offline_pending_sales ADD COLUMN initial_abono REAL DEFAULT 0.0;");
-      console.log("[Database Migration] Added initial_abono column to offline_pending_sales.");
-    }
-  } catch (e: any) {}
-}
-
-try {
-  runDatabaseMigrations(getProdDb());
-} catch (e: any) {
-  console.warn("Error running prod migrations:", e.message);
-}
-try {
-  runDatabaseMigrations(getSandboxDb());
-} catch (e: any) {
-  console.warn("Error running sandbox migrations:", e.message);
-}
-
+  runDatabaseMigrations(targetDb);
 // Additive and safe unique indexes with pre-deduplication check
 try {
-  const dupSales = db.prepare(`
+  const dupSales = targetDb.prepare(`
     SELECT client_operation_id, COUNT(*) as c 
     FROM sales 
     WHERE client_operation_id IS NOT NULL AND client_operation_id != '' 
@@ -929,47 +815,47 @@ try {
     HAVING c > 1
   `).all() as any[];
   for (const d of dupSales) {
-    const rows = db.prepare('SELECT id FROM sales WHERE client_operation_id = ? ORDER BY id ASC').all(d.client_operation_id) as any[];
+    const rows = targetDb.prepare('SELECT id FROM sales WHERE client_operation_id = ? ORDER BY id ASC').all(d.client_operation_id) as any[];
     for (let i = 1; i < rows.length; i++) {
-      db.prepare('UPDATE sales SET client_operation_id = client_operation_id || "-dup-" || id WHERE id = ?').run(rows[i].id);
+      targetDb.prepare('UPDATE sales SET client_operation_id = client_operation_id || "-dup-" || id WHERE id = ?').run(rows[i].id);
     }
   }
-  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_unique_client_op_id ON sales (client_operation_id) WHERE client_operation_id IS NOT NULL AND client_operation_id != '';");
+  targetDb.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_unique_client_op_id ON sales (client_operation_id) WHERE client_operation_id IS NOT NULL AND client_operation_id != '';");
 } catch (e: any) {}
 
 try {
-  db.exec("ALTER TABLE sale_returns ADD COLUMN client_operation_id TEXT DEFAULT NULL;");
+  targetDb.exec("ALTER TABLE sale_returns ADD COLUMN client_operation_id TEXT DEFAULT NULL;");
 } catch (e: any) {}
 try {
-  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_sale_returns_client_op_id ON sale_returns (client_operation_id) WHERE client_operation_id IS NOT NULL AND client_operation_id != '';");
-} catch (e: any) {}
-
-try {
-  db.exec("ALTER TABLE credit_payments ADD COLUMN client_operation_id TEXT DEFAULT NULL;");
-} catch (e: any) {}
-try {
-  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_payments_op_id ON credit_payments (client_operation_id) WHERE client_operation_id IS NOT NULL AND client_operation_id != '';");
+  targetDb.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_sale_returns_client_op_id ON sale_returns (client_operation_id) WHERE client_operation_id IS NOT NULL AND client_operation_id != '';");
 } catch (e: any) {}
 
 try {
-  db.exec("ALTER TABLE inventory_counts ADD COLUMN applied_at DATETIME DEFAULT NULL;");
+  targetDb.exec("ALTER TABLE credit_payments ADD COLUMN client_operation_id TEXT DEFAULT NULL;");
+} catch (e: any) {}
+try {
+  targetDb.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_payments_op_id ON credit_payments (client_operation_id) WHERE client_operation_id IS NOT NULL AND client_operation_id != '';");
+} catch (e: any) {}
+
+try {
+  targetDb.exec("ALTER TABLE inventory_counts ADD COLUMN applied_at DATETIME DEFAULT NULL;");
 } catch (e: any) {}
 
 // Seed exchange rate default
 try {
-  const hasRate = db.prepare('SELECT value FROM settings WHERE key = ?').get('exchange_rate') as any;
+  const hasRate = targetDb.prepare('SELECT value FROM settings WHERE key = ?').get('exchange_rate') as any;
   if (!hasRate || !hasRate.value) {
-    const latestAudit = db.prepare('SELECT new_rate FROM exchange_rate_audit ORDER BY id DESC LIMIT 1').get() as any;
+    const latestAudit = targetDb.prepare('SELECT new_rate FROM exchange_rate_audit ORDER BY id DESC LIMIT 1').get() as any;
     const initialRate = (latestAudit && latestAudit.new_rate && !isNaN(parseFloat(latestAudit.new_rate)))
       ? String(latestAudit.new_rate)
       : '6.96';
-    db.prepare('INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)').run('exchange_rate', initialRate, getBoliviaISOString());
+    targetDb.prepare('INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES (?, ?, ?)').run('exchange_rate', initialRate, getBoliviaISOString());
   }
 } catch (e) {}
 
 // Seed Admin Users
 const seedUser = (username: string, email: string, pass: string) => {
-  const exists = db.prepare('SELECT id, password FROM users WHERE username = ?').get(username) as any;
+  const exists = targetDb.prepare('SELECT id, password FROM users WHERE username = ?').get(username) as any;
   const permissions = JSON.stringify({
     create_sales: true,
     add_to_cart: true,
@@ -1038,9 +924,9 @@ const seedUser = (username: string, email: string, pass: string) => {
   });
   const securePass = isPasswordHashed(pass) ? pass : hashPassword(pass);
   if (!exists) {
-    const totalUserCount = (db.prepare('SELECT count(*) as count FROM users').get() as any)?.count || 0;
+    const totalUserCount = (targetDb.prepare('SELECT count(*) as count FROM users').get() as any)?.count || 0;
     if (totalUserCount === 0) {
-      db.prepare('INSERT INTO users (username, password, role, permissions, email) VALUES (?, ?, ?, ?, ?)')
+      targetDb.prepare('INSERT INTO users (username, password, role, permissions, email) VALUES (?, ?, ?, ?, ?)')
         .run(username, securePass, 'admin', permissions, email);
     }
   } else {
@@ -1049,7 +935,7 @@ const seedUser = (username: string, email: string, pass: string) => {
     const currentPass = exists.password;
     if (currentPass && !isPasswordHashed(currentPass)) {
       const finalPass = hashPassword(currentPass);
-      db.prepare('UPDATE users SET password = ? WHERE username = ?').run(finalPass, username);
+      targetDb.prepare('UPDATE users SET password = ? WHERE username = ?').run(finalPass, username);
     }
   }
 };
@@ -1059,11 +945,11 @@ try {
   seedUser('roby', 'robymetalero@gmail.com', '1234');
 
   // Automatic Migration: Upgrade all existing user records with plaintext passwords to scrypt hashes
-  const allUsers = db.prepare('SELECT id, username, password FROM users').all() as any[];
+  const allUsers = targetDb.prepare('SELECT id, username, password FROM users').all() as any[];
   for (const u of allUsers) {
     if (u.password && !isPasswordHashed(u.password)) {
       const hashed = hashPassword(u.password);
-      db.prepare('UPDATE users SET password = ? WHERE id = ?').run(hashed, u.id);
+      targetDb.prepare('UPDATE users SET password = ? WHERE id = ?').run(hashed, u.id);
       console.log(`[Database Migration] Migrated password for user '${u.username}' to secure scrypt hash.`);
     }
   }
@@ -1073,9 +959,115 @@ try {
 
 // Seed Demo Products
 try {
-  db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('seeded_products', 'true');
+  targetDb.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('seeded_products', 'true');
 } catch (e) {}
 
+}
+
+export function getProdDb(): Database.Database {
+  if (!prodDbInstance) {
+    ensureProdDbExists();
+    prodDbInstance = new Database(prodDbPath, { timeout: 10000 });
+    setupDbPragmas(prodDbInstance);
+    ensureAllTablesAndMigrations(prodDbInstance);
+  }
+  return prodDbInstance;
+}
+
+export function getSandboxDb(): Database.Database {
+  if (!sandboxDbInstance) {
+    ensureProdDbExists();
+    const minValidBytes = 200 * 1024;
+    let needsClone = !fs.existsSync(sandboxDbPath);
+    if (!needsClone) {
+      try {
+        if (fs.statSync(sandboxDbPath).size < minValidBytes && fs.existsSync(prodDbPath) && fs.statSync(prodDbPath).size >= minValidBytes) {
+          needsClone = true;
+        }
+      } catch {}
+    }
+    if (needsClone && fs.existsSync(prodDbPath)) {
+      try {
+        fs.copyFileSync(prodDbPath, sandboxDbPath);
+        console.log("[Sandbox Isolation] Cloned initial gtr_pos.db snapshot to gtr_pos_sandbox.db");
+      } catch (err: any) {
+        console.warn("[Sandbox Isolation] Failed to clone initial database:", err.message);
+      }
+    }
+    sandboxDbInstance = new Database(sandboxDbPath, { timeout: 10000 });
+    setupDbPragmas(sandboxDbInstance);
+    ensureAllTablesAndMigrations(sandboxDbInstance);
+  }
+  return sandboxDbInstance;
+}
+
+export function getActiveDb(): Database.Database {
+  return isCurrentContextSandbox() ? getSandboxDb() : getProdDb();
+}
+
+export const db = new Proxy({} as Database.Database, {
+  get(target, prop, receiver) {
+    const activeDb = getActiveDb();
+    const val = (activeDb as any)[prop];
+    if (typeof val === "function") {
+      return val.bind(activeDb);
+    }
+    return val;
+  }
+});
+
+const walMaintenanceInterval = setInterval(() => {
+  try {
+    if (prodDbInstance) prodDbInstance.pragma("wal_checkpoint(PASSIVE)");
+    if (sandboxDbInstance) sandboxDbInstance.pragma("wal_checkpoint(PASSIVE)");
+  } catch (err: any) {
+    console.warn("[SQLite Maintenance] Periodic wal_checkpoint error:", err.message);
+  }
+}, 10 * 60 * 1000);
+
+if (typeof walMaintenanceInterval.unref === "function") {
+  walMaintenanceInterval.unref();
+}
+
+export function cloneProductionToSandbox() {
+  if (!fs.existsSync(prodDbPath)) {
+    throw new Error("La base de datos de producción gtr_pos.db no existe.");
+  }
+  try {
+    getProdDb().pragma("wal_checkpoint(PASSIVE)");
+  } catch (_) {}
+  if (sandboxDbInstance) {
+    try {
+      sandboxDbInstance.close();
+    } catch (_) {}
+    sandboxDbInstance = null;
+  }
+  try {
+    if (fs.existsSync(sandboxDbPath)) fs.unlinkSync(sandboxDbPath);
+    if (fs.existsSync(sandboxDbPath + "-wal")) fs.unlinkSync(sandboxDbPath + "-wal");
+    if (fs.existsSync(sandboxDbPath + "-shm")) fs.unlinkSync(sandboxDbPath + "-shm");
+  } catch (_) {}
+  fs.copyFileSync(prodDbPath, sandboxDbPath);
+  const sDb = getSandboxDb();
+  const count = (sDb.prepare("SELECT count(*) as count FROM products").get() as any)?.count || 0;
+  console.log("[Sandbox Isolation] Cloned fresh production database to sandbox with " + count + " products.");
+  return {
+    success: true,
+    message: "Base de datos de pruebas (Sandbox) sincronizada con éxito (" + count + " productos reales).",
+    productsCount: count
+  };
+}
+
+try {
+  ensureAllTablesAndMigrations(getProdDb());
+} catch (e: any) {
+  console.warn("Error running prod table setup:", e.message);
+}
+try {
+  ensureAllTablesAndMigrations(getSandboxDb());
+} catch (e: any) {
+  console.warn("Error running sandbox table setup:", e.message);
+}
 
 const SENSITIVE_FIELDS = [
   "password",

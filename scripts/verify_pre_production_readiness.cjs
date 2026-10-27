@@ -128,7 +128,8 @@ async function runCertification() {
     if (fs.existsSync(secretFile)) {
       jwtSecret = fs.readFileSync(secretFile, 'utf-8').trim();
     }
-    const dbForJwt = new Database(path.resolve(process.cwd(), 'gtr_pos_sandbox.db'), { readonly: true });
+    const targetDbPathForJwt = fs.existsSync(path.resolve(process.cwd(), 'gtr_pos.db')) ? path.resolve(process.cwd(), 'gtr_pos.db') : path.resolve(process.cwd(), 'gtr_pos_sandbox.db');
+    const dbForJwt = new Database(targetDbPathForJwt, { readonly: true });
     const adminUser = dbForJwt.prepare("SELECT id, username, role, permissions, email FROM users WHERE role = 'admin' LIMIT 1").get() || { id: 1, username: 'admin', role: 'admin' };
     dbForJwt.close();
 

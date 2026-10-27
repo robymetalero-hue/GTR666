@@ -895,8 +895,8 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
               try {
                 const existingProduct = db.prepare("SELECT id FROM products WHERE sku = ?").get(data.sku) as any;
                 if (existingProduct && data.id !== undefined && Number(existingProduct.id) !== Number(data.id)) {
-                  console.warn(`[Sync SKU Shield] Product SKU collision detected for '${data.sku}': preserving local primary key #${existingProduct.id} over incoming #${data.id}.`);
-                  data.id = existingProduct.id;
+                  console.warn(`[Sync SKU Shield] Product SKU collision detected for '${data.sku}': preserving local primary key #${existingProduct.id} over incoming #${data.id}. Skipping remote row to protect local inventory.`);
+                  continue;
                 }
               } catch (_) {}
             }
