@@ -1,75 +1,114 @@
-# Plan de Implementación: Resolución de Defectos y Cierre de Auditoría c227fa0 (GTR666)
+# Plan de Implementación: Mejoras de Interfaz, Usabilidad y Legibilidad (M01 - M10) — GTR666
 
-## 1. Contexto y Objetivos
-Tras la verificación exhaustiva sobre el commit `c227fa0`, 114 de 156 escenarios resultaron aprobados (+19 con respecto a la revisión anterior). Sin embargo, se identificaron 42 casos no cumplidos y regresiones críticas de usabilidad (especialmente el bloqueo del formulario de pedidos en POS) y seguridad en rutas de servidor.
+## 1. Visión General y Alcance
+El objetivo es elevar la legibilidad, agilidad operativa y experiencia de usuario de **GTR666** en dispositivos móviles (vertical y horizontal corto), tablets y computadoras de escritorio, sin alterar la lógica de negocio, contratos de API, permisos, transacciones ni bases de datos.
 
-Este plan establece la solución quirúrgica y definitiva respetando las respuestas del usuario:
-- **Permisos por defecto**: Denegación estricta (`userPerms.xxx === true` o rol administrador principal).
-- **Autoría de ventas offline**: Identidad atribuida con consistencia total al cajero transmisor (`effectiveUserId`, `effectiveUserName`).
-- **Formulario de pedidos**: Liberación garantizada de `isSavingPendingRef.current = false` en bloque `finally` para permitir envíos consecutivos y reintentos tras errores.
-
----
-
-## 2. Puntos Críticos y Estrategia de Solución
-
-### A. Desbloqueo Inmediato del Formulario de Pedidos en POS (`src/views/POS.tsx`)
-- **Problema (B01, B02)**: `isSavingPendingRef.current = true` nunca se restablecía a `false` en el bloque `finally` de `handleSavePendingSale`, bloqueando permanentemente nuevos pedidos o correcciones tras error HTTP 400.
-- **Acción**:
-  1. En `finally`: agregar explícitamente `isSavingPendingRef.current = false;`.
-  2. Al cerrar el modal o reiniciar el carrito: asegurar que `isSavingPendingRef.current = false;`.
-  3. Mantener `clientOpId` estable mientras persista la misma intención de guardado, pero renovarlo al limpiar o crear un nuevo pedido.
-
-### B. Deduplicación Transaccional y Agregación de Demanda en Pedidos (`server.ts`)
-- **Problema (E05, E09, N06)**:
-  - En `POST /api/pending-sales`, el `clientOpId` no se insertaba en `processed_operations` dentro de la transacción, permitiendo duplicación en reintentos.
-  - En `PUT /api/pending-sales/:id`, no se agregaba la demanda por producto con líneas repetidas, permitiendo sobre-reserva.
-- **Acción**:
-  1. En `POST /api/pending-sales`: insertar en `processed_operations` (`operation_type: 'pending_sale'`) dentro de la misma transacción de SQLite. Si ya existe idéntico payload, retornar el pedido anterior con `{ isDuplicate: true }`; si difiere el payload comercial, responder HTTP 409.
-  2. En `PUT /api/pending-sales/:id`: agregar la demanda por `product_id` de las nuevas líneas, descontar las reservas existentes de ese mismo pedido (`currentOrderLines`), y validar `netAvailable >= totalDemand`.
-
-### C. Conflicto Canónico (HTTP 409) y Validación de Precios en Ventas (`server.ts`)
-- **Problema (K07, B04, B08)**:
-  - Al reutilizar `client_operation_id` con payload modificado, el servidor arrojaba `CONFLICT_409` capturado erróneamente en `/api/sale-returns` con referencia rota a `clientOpId`, devolviendo HTTP 500.
-  - El hash SHA-256 no incluía `currency`, `exchange_rate` ni actor, permitiendo cambiar de BOB a USD con el mismo hash.
-  - Ventas de administrador no validaban si `item.price` era numérico finito $\ge 0$.
-- **Acción**:
-  1. Trasladar el bloque `catch` para `CONFLICT_409` a `POST /api/sales` retornando limpiamente `res.status(409).json({ error: 'Operación en conflicto: la clave de operación ya fue utilizada con datos comerciales diferentes.' })`.
-  2. Incluir en el hash comercial: `items` (id, qty, price, discount), `total`, `discount`, `client_id`, `payment_method`, `currency`, `exchange_rate`, y `user_id`.
-  3. Validar `Number.isFinite(item.price) && item.price >= 0` en todas las líneas antes de entrar a la transacción.
-
-### D. Sanitización de Costos y Atribución en Ventas Offline (`server.ts`)
-- **Problema (B03, B07, K13)**:
-  - En `GET /api/offline-sales/pending`, aunque `items[].cost` se enmascaraba, se retornaba `...row` que contenía `items_json` en texto crudo con el costo de compra.
-  - En `POST /api/offline-sales/submit`, se usaba `effectiveUserId` para consultar el nombre de usuario, pero la sentencia SQL `INSERT` usaba `user_id || 1` proveniente del cuerpo del cliente, desincronizando ID y nombre.
-- **Acción**:
-  1. En `GET /api/offline-sales/pending`: eliminar `items_json` de la respuesta o reconstruirlo a partir del array sanitizado cuando el usuario no sea administrador.
-  2. En `POST /api/offline-sales/submit`: enlazar `effectiveUserId` en la columna `user_id` de la inserción, garantizando que el autor sea estrictamente el cajero transmisor autenticado.
-
-### E. Enforzamiento Estricto de Permisos por Defecto (`server.ts`)
-- **Problema (B05, B06, E10, E13)**:
-  - Si `manage_credits` o `physical_control_checklist` no estaban explícitamente en `false` (ej. valor `undefined`), el cajero tenía acceso a cuentas por cobrar y edición de conteos.
-  - El rol literal `cajero` (distinto de `vendedor`) obtenía liquidaciones globales.
-- **Acción**:
-  1. En `/api/accounts-receivable` (GET y POST abonos): `const canManageCredits = isAdmin || userPerms.manage_credits === true; if (!canManageCredits) return res.status(403)...`.
-  2. En `/api/inventory-counts/:id` (GET y PUT): exigir `isAdmin || userPerms.physical_control_checklist === true` y validar que el conteo pertenezca al usuario y no esté cerrado/aplicado.
-  3. En `/api/cash-register/closures` y `/api/liquidations`: condicionar el alcance global a `isAdmin`. Si el usuario no es admin (sea `vendedor`, `cajero` o similar), filtrar exclusivamente por su propio `user_id`.
-
-### F. Control de Voz WebSocket Exclusivo para Administrador Principal (`server.ts`)
-- **Problema (V01)**:
-  - `authenticateWebSocketUpgrade` en la ruta `/live` aceptaba cualquier rol `admin`/`administrador`/`propietario`.
-- **Acción**:
-  - Requerir estrictamente `isMainAdmin(userRow)` para la conexión al socket `/live`.
+Se aplican las tres decisiones clave del usuario:
+- **Favoritos**: Pestaña destacada al inicio del carrusel de categorías en el POS.
+- **Tickets térmicos en 58 mm**: Desglose detallado en dos líneas (Línea 1: Nombre envuelto; Línea 2: `cant. × P.Unit = Subtotal`).
+- **Carrito en móvil**: Minimizado con badge flotante y notificación rápida para permitir escaneo ágil y continuo sin interrumpir el catálogo.
 
 ---
 
-## 3. Plan de Verificación y Certificación
-1. **Verificación Estática y Sintaxis**:
-   - `compile_applet` para garantizar que TypeScript y Vite compilan con cero errores.
-2. **Ejecución de Pruebas de Regresión y Nuevas Pruebas**:
-   - `tests/check_kiosk_v2.cjs` (verificar los 11 escenarios de kiosco).
-   - `tests/txt_critical_fixes_runner.cjs` (verificar los 24 casos de seguridad y balances).
-   - `tests/test_all_six_points.cjs` (verificar precios BOB, roundCashBs, JWT, y roles).
-   - `tests/test_product_history_synthesis.cjs` (verificar kárdex y running balance intactos).
-   - Crear y correr un runner específico para los casos B01-B08, E05, E09, E10, E13, K07, K13, N06.
-3. **Resguardo de Datos**:
-   - Confirmar que `gtr_pos.db` mantiene la integridad total de sus 169+ productos y catálogo comercial.
+## 2. Desglose de Cambios por Módulo (M01 - M10)
+
+### M01. POS Adaptable y Descripciones Legibles (`src/views/POS.tsx`)
+- **Problema**: Tarjetas con `h-7`/`h-8` rígido y `line-clamp-2` que cortan nombres largos (ej. modelos y capacidades); toques en imagen agregan accidentalmente productos al carrito.
+- **Acciones**:
+  1. Reemplazar alturas fijas por `min-h-[2.5rem]` y `break-words` permitiendo 2 a 3 líneas completas de texto.
+  2. Implementar `e.stopPropagation()` al hacer clic en fotos, botones de detalle o estrellas de favoritos para evitar agregados no intencionales.
+  3. Asegurar contenedores con `min-w-0` y scroll vertical fluido sin desbordamiento horizontal en pantallas desde 320 px hasta 412 px y 800×360 px (horizontal corto).
+  4. Mantener la paginación inicial de 48 artículos y los tres modos de vista (`grid`, `compact-grid`, `list`).
+
+### M02. Panel de Cobro Más Claro y Acción Accesible (`src/views/POS.tsx`)
+- **Problema**: El modal de cobro tiene botones y campos pequeños, y en celulares con teclado en pantalla la acción principal queda inaccesible.
+- **Acciones**:
+  1. Reorganizar la ventana en 3 bloques visuales claros:
+     - **Resumen destacado**: Total a Pagar en BOB grande (28–32 px), con indicador de moneda explícito.
+     - **Entrada de pago**: Campo de Efectivo Recibido y Cambio/Vuelto (20–24 px) en color verde/esmeralda distinguible.
+     - **Métodos y datos**: Selector de método (Efectivo, QR, Transferencia, Crédito) con campos contextuales.
+  2. Estructura con `max-h-[90vh]`, encabezado fijo, cuerpo con scroll independiente y pie de acción fijo accesible incluso con teclado virtual abierto.
+  3. Conservar 100% de la lógica de descuentos, puntos, abonos y `clientOperationId`.
+
+### M03. Carrito Más Fácil de Revisar y Editar (`src/views/POS.tsx`)
+- **Problema**: Botones `+` y `-` con áreas táctiles reducidas; la barra móvil del POS choca con la barra de navegación del shell en ciertas resoluciones.
+- **Acciones**:
+  1. Aumentar el tamaño táctil de los controles a un mínimo de 44×44 px (`touch-target`), separando claramente el botón de eliminar del de incrementar cantidad.
+  2. Nombre del producto con espacio amplio y visualización clara de tipo de precio (unitario, mayorista, manual).
+  3. Respetar la decisión del usuario: en pantallas móviles el carrito se mantiene como barra/badge flotante inferior interactivo con contador en tiempo real, permitiendo seguir escaneando sin obstrucciones.
+  4. Ajustar el offset inferior de la barra móvil coordinándose con la visibilidad real del shell (`landscape-hide`).
+
+### M04. Confirmación de Escaneo Sincronizada con el Resultado Real (`src/views/POS.tsx` y `src/components/BarcodeScannerModal.tsx`)
+- **Problema (UI21)**: Cuando se escanea un producto agotado o sin stock, el modal confirmaba éxito con beep a pesar de que el carrito rechazaba la operación.
+- **Acciones**:
+  1. Modificar `addToCart` para devolver un resultado estructurado `{ success: boolean, reason?: string, quantity?: number }`.
+  2. En `BarcodeScannerModal.tsx`: invocar feedback de éxito (sonido/vibración) **únicamente** si `addToCart` devuelve `success: true`.
+  3. En caso de stock agotado o límite alcanzado, emitir sonido/notificación de advertencia sin confirmar falso agregado.
+  4. Mantener intacto el cooldown de cámara (1500 ms) y permitir escaneos secuenciales rápidos desde lectores USB de código de barras.
+
+### M05. Favoritos del Cajero (`src/views/POS.tsx` y `src/utils/posUiPreferences.ts`)
+- **Problema**: No existe forma de fijar los artículos de alta rotación para acceder a ellos sin tipear en el buscador.
+- **Acciones**:
+  1. Crear el utilitario `posUiPreferences.ts` para persistir arrays de `product_id` en `localStorage` bajo claves seguras por usuario (`gtr_favs_<userId>`).
+  2. Agregar pestaña destacada "★ Favoritos" al inicio del carrusel de categorías en el POS.
+  3. Añadir botón de estrella accesible en cada tarjeta de producto (marcar/desmarcar con un solo toque sin alterar el carrito ni emitir llamadas de red).
+  4. Filtrar reactivamente los IDs favoritos contra el catálogo activo en memoria (`products`), descartando productos inexistentes o eliminados.
+
+### M06. Filtros de Inventario Combinables (`src/views/Inventory.tsx`)
+- **Problema**: El selector de categorías se mezcla con el estado de stock impidiendo filtrar simultáneamente, por ejemplo, "Memorias" que estén "Sin stock".
+- **Acciones**:
+  1. Separar el estado en dos controles independientes:
+     - **Categoría**: "Todas", "Memorias", "Cargadores", etc.
+     - **Disponibilidad**: "Todos", "Disponibles (>0)", "Bajo stock (<= alarma)", "Sin stock (<=0)".
+  2. Permitir la combinación simultánea de Categoría + Estado de Stock + Búsqueda de texto (`filterAndRankProducts`).
+  3. Añadir botón "Restablecer filtros" y contador dinámico de artículos filtrados vs total disponible.
+
+### M07. Pedidos y Entregas con Información y Scroll Claros (`src/views/CuentasPorCobrarView.tsx`)
+- **Problema**: La pestaña de pedidos pendientes sufre de scrolls anidados rígidos (`max-h: 62vh`) dificultando la lectura de destinos largos y la finalización en Android.
+- **Acciones**:
+  1. Eliminar cajas de scroll anidadas y permitir flujo natural con scroll principal en la tarjeta.
+  2. Envolver nombres de clientes, destinos y transportadoras largas (`break-words`).
+  3. Agrupar botones de acción: Ver documentos / Orden de almacén, Editar pedido, Registrar abono y Finalizar entrega, destacando la acción principal según el estado.
+
+### M08. Historial y Detalle de Ticket Más Directos (`src/views/ExtraViews.tsx`)
+- **Problema**: En dispositivos móviles, revisar los artículos de una venta pasada y reimprimir requiere maniobras complejas.
+- **Acciones**:
+  1. Optimizar el modal de detalle de venta en `HistorialVentasView`: cabecera con ticket #, fecha, cajero, método y tabla limpia de artículos.
+  2. Botones de acción directos: Reimprimir PDF, Descargar Imagen de Comprobante y Compartir WhatsApp.
+  3. Asegurar que al cerrar el detalle se conserve la posición de scroll y la lista de ventas previamente paginada.
+
+### M09. Ticket Térmico Coherente en 58 mm y 80 mm (`src/views/POS.tsx`, `src/views/ExtraViews.tsx`, `src/views/ConfiguracionesView.tsx`, `src/views/CuentasPorCobrarView.tsx`)
+- **Problema**: Varios generadores fijaban rígidamente `width = 80`, ignorando la configuración guardada de 58 mm; los textos largos se solapaban en comprobantes angostos.
+- **Acciones**:
+  1. Leer y respetar la opción de ancho de ticket (`58` u `80` mm) desde las configuraciones del sistema.
+  2. Implementar para 58 mm el formato en dos líneas por artículo:
+     - Línea 1: Nombre completo envuelto con `doc.splitTextToSize`.
+     - Línea 2: `[cantidad] × Bs [precio_unitario] = Bs [subtotal]`.
+  3. Calcular dinámicamente la altura del PDF (`doc.internal.pageSize`) sumando las líneas reales generadas, garantizando que tickets con 30 o 40 ítems nunca se corten ni solapen.
+  4. Sincronizar la vista previa de `ConfiguracionesView` con el motor de impresión real.
+
+### M10. Consistencia Visual, Modo Oscuro, RGB y Accesibilidad (`src/index.css`)
+- **Problema**: Algunos botones con tema RGB activo pierden visibilidad en estado `disabled` o de error; textos pequeños (<12 px) en pantallas de alta densidad.
+- **Acciones**:
+  1. Estandarizar tamaños de fuente para lectura de operaciones a 13–14 px.
+  2. Asegurar que clases como `disabled:opacity-40`, `cursor-not-allowed` y colores de advertencia prevalezcan incluso ante temas RGB con `!important`.
+  3. Respetar media query `prefers-reduced-motion` para usuarios que requieren menor movimiento en transiciones.
+
+---
+
+## 3. Plan de Verificación y Aceptación
+1. **Verificación Estática y de Tipos**:
+   - Ejecutar `compile_applet` para garantizar cero errores de TypeScript y Vite.
+2. **Pruebas Funcionales No Regresivas**:
+   - Correr toda la suite de pruebas del servidor y seguridad:
+     - `tests/test_audit_c227fa0_fixes.cjs`
+     - `tests/check_kiosk_v2.cjs`
+     - `tests/test_all_six_points.cjs`
+     - `tests/txt_critical_fixes_runner.cjs`
+     - `tests/audit_cycle_runner.cjs`
+3. **Validación de la Matriz de Interfaz (V01-V10, C01-C07, P01-P07, E01-E04, F01-F06, H01-H05, T01-T07, A01-A04)**:
+   - Crear un runner de pruebas automatizado para verificar:
+     - Resolución del caso UI21 (agotado en escáner sin falso positivo).
+     - Persistencia y aislamiento de favoritos por usuario.
+     - Combinación de filtros de inventario (categoría + estado de stock).
+     - Formato de 58 mm en dos líneas y respeto de `ticketWidth`.

@@ -7,7 +7,7 @@ interface BarcodeScannerModalProps {
     isOpen: boolean;
     onClose: () => void;
     products: Product[];
-    addToCart: (product: Product, quantity: number) => void;
+    addToCart: (product: Product, quantity: number) => boolean | void;
     onSuccessScan?: (product: Product) => void;
 }
 
@@ -113,17 +113,22 @@ export default function BarcodeScannerModal({ isOpen, onClose, products, addToCa
         setScanHistory(prev => [historyItem, ...prev].slice(0, 5));
 
         if (match) {
-            addToCart(match, 1);
-            setScannedProduct(match);
-            playScanBeep(true);
-            
-            // Clear scanned product highlight after 1.5s
-            setTimeout(() => {
-                setScannedProduct(null);
-            }, 1500);
+            const added = addToCart(match, 1);
+            if (added !== false) {
+                setScannedProduct(match);
+                playScanBeep(true);
+                
+                // Clear scanned product highlight after 1.5s
+                setTimeout(() => {
+                    setScannedProduct(null);
+                }, 1500);
 
-            if (onSuccessScan) {
-                onSuccessScan(match);
+                if (onSuccessScan) {
+                    onSuccessScan(match);
+                }
+            } else {
+                setScannedProduct(null);
+                playScanBeep(false);
             }
         } else {
             setScannedProduct(null);

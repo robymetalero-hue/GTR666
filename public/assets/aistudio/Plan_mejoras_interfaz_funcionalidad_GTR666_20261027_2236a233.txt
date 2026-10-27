@@ -1,0 +1,318 @@
+PLAN DE IMPLEMENTACIÓN PARA GOOGLE AI STUDIO
+MEJORAS VISUALES Y DE USO DE GTR666
+Fecha: 27 de octubre de 2026, Bolivia.
+Repositorio: https://github.com/robymetalero-hue/GTR666
+Base de código revisada: 20631010e4050e82d977fc2b6a8d1943918a6c72.
+Enlace: https://github.com/robymetalero-hue/GTR666/tree/20631010e4050e82d977fc2b6a8d1943918a6c72
+
+OBJETIVO Y ENCARGO
+
+Implementar los diez grupos de mejoras descritos abajo sobre las pantallas existentes. El objetivo es que Digital Store pueda vender, buscar, preparar pedidos, consultar e imprimir con mayor legibilidad y menos esfuerzo, tanto en PC como en celulares verticales y horizontales.
+
+Este archivo es una especificación técnica lista para aplicar. No es un parche ya instalado ni una certificación de pantallas modificadas. La revisión del código y las comprobaciones de base ya realizadas se identifican al final; las pruebas visuales y de aceptación deben ejecutarse después de implementar los cambios.
+
+Trabajar con cambios puntuales y grupos pequeños. Mantener React, TypeScript, Vite, Tailwind, rutas, permisos, datos y flujo de publicación existentes. Si el código ya cambió respecto de esta base, comparar el diff y adaptar las modificaciones conservando los arreglos posteriores. Completar la implementación y sus verificaciones, no limitarse a describir un rediseño.
+
+1. CONDICIONES QUE SE DEBEN CONSERVAR
+
+1) La misma acción del usuario debe producir la misma operación comercial. Una nueva estrella, filtro, pestaña visual, rotación, cambio de tamaño, apertura de detalle o animación no debe enviar una venta, modificar stock, registrar pagos ni disparar una sincronización.
+2) Mantener los handlers existentes de venta, pedido, abono, devolución y entrega. No duplicar el envío entre onClick y onSubmit. Conservar validaciones, estado de procesamiento y claves de operación. No generar o reiniciar una clave por un cambio de diseño, tamaño de pantalla o preferencia visual.
+3) Reutilizar getCartItemPriceBs, getCartItemPriceUSD, roundBs, subtotal, discountValue, pointsRedeemedValue, total y usdTotal. No introducir otro cálculo monetario dentro del JSX ni redondear USD con reglas BOB.
+4) Conservar el carrito, pestaña de venta activa, cantidades, textos de edición, precio manual, cliente, descuento y método de pago al cambiar orientación o vista. No remontar POS usando una key basada en ancho, orientación o tipo de tarjeta.
+5) Mantener permisos y visibilidad actual de módulos, costos, caja y supervisión. Un componente visual no debe mostrar un dato que el rol no puede consultar. Favoritos y detalles solo se derivan del catálogo que el usuario ya está autorizado a recibir.
+6) Conservar la cola offline, la sesión, las claves de operación y los registros históricos. Las preferencias nuevas no deben sobrescribir claves actuales de carrito, auth_token, user, cached_products, colas ni versión PWA.
+7) Mantener los datos comerciales originales de los comprobantes: número, moneda, artículos, precios, total, descuentos, abonos, tasa histórica, cajero y fecha. El formato visual no puede revaluar una venta anterior con el catálogo actual.
+8) Mantener búsqueda y relevancia existentes. Conservar IDs de controles utilizados por código, especialmente search-input, y eventos como gtr-barcode-scanned. Revisar antes de cambiar placeholders: el listener de teclado actual usa algunos textos para identificar campos.
+9) Conservar compatibilidad de PC/Android, modo oscuro, tema RGB, pantalla completa, escáner y vías actuales de impresión. No añadir bibliotecas de interfaz o motores de impresión para este trabajo.
+10) Registrar por separado cualquier defecto de negocio previo que se observe. El éxito de una mejora visual no demuestra que un problema previo de inventario o sincronización quedó corregido. Este encargo se centra en presentación y facilidad de uso.
+
+2. MAPA REAL DE LA APLICACIÓN REVISADA
+
+• src/App.tsx: shell y navegación; montaje de módulos alrededor de la línea 1545; barras inferiores móviles alrededor de 1580 y 1651. Las barras se ocultan desde md y también en el modo horizontal corto mediante landscape-hide.
+• src/views/POS.tsx: renderCartPane alrededor de 2155; catálogo y tres vistas alrededor de 3030; carro lateral y barra móvil alrededor de 3460; ventana de cobro alrededor de 3940.
+• src/views/Inventory.tsx: categoriesList/finalFilteredProducts alrededor de 1464; filtros alrededor de 1650; tarjetas móviles alrededor de 2530; tabla alrededor de 2695.
+• src/views/CuentasPorCobrarView.tsx: módulo real de pedidos y cuentas por cobrar; activeTab separa pendientes/creditos. Raíz alrededor de 1328, listado de pedidos alrededor de 1416 y edición alrededor de 1854.
+• src/views/ExtraViews.tsx: HistorialVentasView alrededor de 248, con detalle, reimpresión PDF, imagen y opciones de compartir. VentasPendientesView alrededor de 1870 es una pantalla informativa; las rutas reales ventas_pendientes y cuentas_por_cobrar montan CuentasPorCobrarView. No aplicar allí el rediseño de pedidos esperando que cambie el módulo real.
+• src/views/ConfiguracionesView.tsx: plantilla de recibo, vista previa y prueba de impresión. Ya permite elegir 58 y 80 mm.
+• src/components/BarcodeScannerModal.tsx: handleScanSuccess alrededor de 81; cooldown de cámara de 1500 ms; callback addToCart y onSuccessScan.
+• src/lib/searchUtils.ts: normalización, puntuación y filterAndRankProducts compartidos. Reutilizarlos.
+• src/context/AppContext.tsx: estado y operaciones compartidos. Mantener su propiedad del carrito y pestañas.
+• src/index.css y src/utils/touchScroll.ts: áreas seguras, scroll táctil, controles touch-target y ajustes de horizontal corto. Reutilizar estas bases, evitando overrides globales amplios.
+• src/views/HardwareConfigView.tsx: compatibilidad de periféricos. Revisar que sus pantallas sigan accesibles; este plan no cambia drivers, conexión USB, protocolos ni simulaciones de hardware.
+
+Hallazgos concretos de interfaz:
+— Ya existen grid, compact-grid y list, con preferencia guardada en pos_view_layout_mode. Mejorarlas; no crear un segundo selector equivalente.
+— Algunas tarjetas tienen line-clamp-2 con h-7/h-8 y texto pequeño, lo que limita la descripción visible.
+— El POS tiene una barra inferior propia, además de la navegación del shell. Su posición debe considerar si la navegación está realmente visible.
+— El módulo de pedidos combina scroll de página, max-h de listado y scroll dentro de cada tarjeta; es un punto a simplificar en celular.
+— Los comprobantes tienen varios generadores. Configuración y último ticket consideran ticketWidth, pero otros generadores fijan width = 80. Modificar solo la vista previa no resolvería la coherencia de impresión.
+— La cámara puede confirmar éxito aunque addToCart haya rechazado un agotado. Este caso se reprodujo y forma parte de M04.
+
+3. CAMBIOS A IMPLEMENTAR
+
+M01. POS ADAPTABLE Y DESCRIPCIONES LEGIBLES
+Archivos principales: POS.tsx, index.css; ajuste mínimo de App.tsx si lo exige la cadena de altura/scroll.
+
+• Mantener las tres vistas existentes. Ajustar el tamaño de tarjeta al ancho real disponible y permitir altura de texto flexible. En vertical, la descripción y capacidad/modelo deben tener prioridad sobre adornos e imagen.
+• Reemplazar alturas rígidas que recortan nombres por min-height y envoltura de texto. Mostrar varias líneas y ofrecer una acción explícita para leer el nombre completo cuando no alcance el espacio. No depender de title/hover en teléfono.
+• Distinguir claramente nombre, SKU, precio y disponibilidad. Ejemplo de prueba: “USB Kingston DataTraveler Exodia 32 GB USB 3.2 Negro y Azul”.
+• Si se toca foto, detalle o estrella, detener la propagación hacia la tarjeta para no agregar un artículo accidentalmente. El botón principal de agregar debe seguir siendo claro.
+• Conservar el límite inicial de 48 productos, Mostrar más y la preferencia existente. El nuevo diseño no debe renderizar todo el catálogo por cada cambio de tamaño.
+• Aplicar min-w-0 y min-h-0 donde corresponda a la cadena flex. Mantener buscador/categorías accesibles y un scroll vertical principal para el catálogo.
+
+Aceptación: a 320/360/412 px no hay desbordamiento horizontal de la página; se distingue el modelo y se puede leer la descripción completa sin zoom. Cambiar a lista o girar el dispositivo no altera carrito, precios o pestaña activa.
+
+M02. PANEL DE COBRO MÁS CLARO Y ACCIÓN ACCESIBLE
+Archivo principal: POS.tsx, ventana existente de checkout.
+
+• Reorganizar visualmente el panel en método/moneda, datos necesarios y resumen. Prioridad: total a cobrar, recibido y vuelto. Referencia de tamaño: total 28–32 px en espacio normal; recibido/vuelto 20–24 px, adaptándolos si la pantalla es muy corta.
+• Mantener BOB por defecto. Mostrar la moneda activa junto a cada importe. En un cobro BOB, no destacar equivalentes USD como si fueran otro total a pagar; conservar el selector para cambiar a USD.
+• Usar los valores ya calculados, sin modificar conversión, descuentos, puntos, abonos o vuelto. Diferenciar descuento porcentual y monto con etiquetas claras.
+• Estructura de ventana: encabezado compacto, cuerpo con scroll, pie accesible con acción principal. Usar altura dinámica disponible; evitar que el teclado deje el campo o la acción fuera de alcance. En horizontal muy bajo, permitir scroll completo en vez de reservar un pie tan alto que anule el cuerpo.
+• Mantener las condiciones disabled y las validaciones actuales. Mostrar cerca del control la razón por la que falta un dato. Los botones secundarios serán type=button.
+• Una adaptación responsive no debe ejecutar setIsCheckoutOpen, limpiar recibido ni cambiar clientOperationId. Mantener los datos durante edición y orientación.
+
+Aceptación: el cajero identifica total, moneda y vuelto sin recorrer toda la ventana; con teclado abierto puede corregir el campo y alcanzar la acción. Efectivo, QR/transferencia y crédito usan exactamente sus handlers actuales.
+
+M03. CARRITO MÁS FÁCIL DE REVISAR Y EDITAR
+Archivo principal: POS.tsx, renderCartPane y variantes móvil/escritorio.
+
+• Cada línea debe presentar nombre, cantidad, precio unitario e importe de línea en un orden estable. Reducir elementos decorativos y dar espacio al nombre completo.
+• Aumentar el área táctil de +, − y quitar, reutilizando touch-target cuando corresponda. Separar suficientemente quitar y aumentar cantidad.
+• Mantener la edición directa y los tipos detalle/mayorista/manual, respetando permisos. La presentación de precio manual debe ser explícita, con la moneda visible.
+• Conservar localPriceInputs y las cadenas que el usuario está escribiendo. No sustituir “12,” o un campo temporalmente vacío por toFixed en cada pulsación; respetar la normalización actual y el momento de confirmación.
+• Mantener visible el resumen y las acciones, con una zona propia de scroll para los artículos. En móvil, coordinar la barra del POS con la navegación del shell: 0 si está oculta, altura real si está visible y área segura inferior. No sumar offsets fijos de kiosco cuando la barra ya está oculta por md o landscape-hide.
+• Mantener un único estado compartido. Si desktop y móvil contienen elementos equivalentes, evitar IDs de input duplicados y llamadas duplicadas al mismo handler.
+
+Aceptación: con 40 líneas se puede llegar a la primera, a la última y al cobro; +/− no generan otra fila del mismo producto y no superan los límites existentes. Cambiar de pestaña de venta conserva sus datos independientes.
+
+M04. CONFIRMACIÓN DE ESCANEO BASADA EN LO QUE REALMENTE SE AGREGÓ
+Archivos: POS.tsx y BarcodeScannerModal.tsx.
+
+• Ya existen sonido, vibración, último producto e historial corto de cámara. Mejorar esos recursos; no añadir otro listener para el mismo evento.
+• Resaltar brevemente la línea efectiva del carrito y mostrar, por ejemplo, “Kingston 32 GB · cantidad 2 → 3”. La cantidad debe derivarse del estado confirmado del carrito, no de una predicción que pueda ser rechazada por el límite.
+• Corregir el hallazgo reproducido: handleScanSuccess llama addToCart y después confirma éxito sin conocer si el artículo se agregó. Cuando el POS rechaza un agotado, no debe sonar ni mostrarse una confirmación de agregado.
+• Introducir una respuesta local de aceptación/rechazo del wrapper o una confirmación asociada al cambio real de carrito. Si cambia la firma del callback, ajustar sus consumidores y tipos. Mantener una sola invocación de agregar por lectura aceptada; la confirmación nunca vuelve a llamar addToCart.
+• Conservar normalización SKU/ID, ceros iniciales y cooldown de cámara existentes. No trasladar el cooldown de cámara indiscriminadamente al lector USB, donde dos lecturas intencionales pueden representar dos unidades.
+• Conservar búsqueda manual, lectura por cámara, evento gtr-barcode-scanned y lector que emula teclado. Los campos de texto deben permitir escribir normalmente.
+
+Aceptación: un agotado o un límite alcanzado produce aviso de rechazo sin éxito contradictorio; un código desconocido no cambia el carrito; una lectura válida suma exactamente una unidad; dos lecturas intencionales admitidas suman dos.
+
+M05. FAVORITOS DEL CAJERO
+Archivos: POS.tsx y, si facilita mantener el código pequeño, un helper local de preferencias en src/utils/posUiPreferences.ts.
+
+• Incorporar una estrella visible y accesible y una sección Favoritos separada del departamento. No usar un nombre de categoría del negocio como identificador interno del filtro.
+• Guardar únicamente identificadores de producto, con clave nueva y versionada por usuario/origen y por entorno si ese dato ya está disponible. No almacenar copias de producto, precios, costos o stock.
+• Resolver cada favorito contra products actual. Si un producto ya no está en el catálogo visible, no reconstruirlo desde datos antiguos ni agregarlo al carrito. Actualizar precio/stock desde el catálogo existente cuando cambien.
+• Usar lectura/escritura protegidas ante almacenamiento bloqueado o JSON inválido. Si no puede persistir, la venta debe seguir funcionando y la preferencia podrá mantenerse en memoria durante la sesión.
+• Cambiar de usuario debe cargar sus propios favoritos sin mostrar los del anterior. No tocar claves de sesión, carrito o cola offline.
+• El toque en estrella no agrega, quita ni vende. La sección utiliza la misma acción de agregar y sus límites actuales.
+
+Aceptación: marcar/desmarcar requiere un toque, no modifica el carrito y no genera solicitudes de escritura al servidor. Desde Favoritos se localiza un artículo habitual sin escribir la búsqueda.
+
+M06. FILTROS DE INVENTARIO COMBINABLES
+Archivo: Inventory.tsx.
+
+• Separar selectedCategory de un filtro de stock propio: Todos, Disponibles, Bajo stock y Sin stock. La categoría se combina con ese filtro y con la consulta existente.
+• Conservar el criterio actual de Bajo stock: stock <= stock_alarm, que incluye agotados; Sin stock será el filtro específico de cantidades <= 0 y Disponibles > 0. No cambiar alarmas ni cantidades para producir las etiquetas.
+• Mostrar filtros activos y un botón Restablecer. Contar los resultados del conjunto realmente cargado/autorizado, sin inventar un total global del servidor.
+• Reutilizar filterAndRankProducts para los productos ya filtrados. No cambiar la puntuación compartida del buscador como parte de este grupo.
+• En tabla, facilitar seguimiento de encabezados y lectura de descripción. Mantener desplazamiento horizontal dentro de la tabla si lo necesita, evitando que arrastre toda la página. En móvil, priorizar tarjetas legibles.
+• Mantener edición, historial y exportación con sus permisos. Un filtro visual no realiza ajustes de inventario.
+
+Aceptación: “Cargadores + Sin stock” y “Memorias + Bajo stock + texto” pueden combinarse; limpiar los filtros recupera el conjunto anterior; las cantidades originales no cambian.
+
+M07. PEDIDOS Y ENTREGAS CON INFORMACIÓN Y SCROLL MÁS CLAROS
+Archivo: CuentasPorCobrarView.tsx; el formulario de creación permanece en POS.tsx.
+
+• Trabajar en la pestaña pendientes del módulo real. Mantener separada su pestaña creditos, sus acciones y sus permisos.
+• En cada tarjeta, priorizar número, cliente, destino, transportadora y estado existente. Permitir envolver nombres/destinos largos. Mostrar cantidades e importes con jerarquía clara y los datos permitidos para ese usuario.
+• Simplificar las zonas de scroll anidadas de página/listado/tarjeta. Evitar depender de max-h:62vh y de múltiples cajas pequeñas con scroll para llegar a la última acción en Android.
+• Agrupar acciones: consultar/documentos, editar, abonos y finalizar. Destacar la acción adecuada al estado actual sin cambiar el estado o la operación comercial.
+• Mejorar ventanas de edición/finalización con cuerpo desplazable y acciones alcanzables, incluyendo teclado abierto. Mantener los mismos handlers y los datos escritos tras un error de validación.
+• Reutilizar el PDF de orden de almacén y las acciones existentes de compartir. Conservar su propósito y la ausencia de precios cuando corresponda; no convertirlo en recibo de cobro.
+• No introducir estados de envío ni casillas persistentes que el modelo actual no soporte para aparentar un nuevo flujo de entrega.
+
+Aceptación: en vertical se leen cliente y destino, se recorren todos los artículos y se alcanza editar/documentos/finalizar. Ver o descargar un documento no finaliza la venta ni modifica reservas.
+
+M08. HISTORIAL Y DETALLE DE TICKET MÁS DIRECTOS
+Archivo: ExtraViews.tsx, HistorialVentasView.
+
+• Ya existe detalle y apertura automática en pantallas menores de 1024 px. Mejorar esa experiencia, sin añadir un segundo modal equivalente.
+• Organizar el detalle en identificación de ticket/cliente/cajero/fecha, productos y resumen de pago. Nombres completos o ampliables, cantidades y precios unitarios claramente asociados.
+• Mantener accesibles Reimprimir/Descargar y Compartir. Reutilizar handleReprintPDF, triggerShareOptions y los generadores existentes; no registrar una venta nueva al reimprimir.
+• Mantener los filtros, fechas y paginación de 25 registros. Aclarar cuándo un filtro aplica a ventas cargadas; no afirmar que un ticket no existe solo porque no está en la página cargada.
+• Conservar selección y posición cuando se cierra un detalle. Mostrar carga/error/reintento sin sustituir un error por una lista vacía definitiva.
+• Reflejar moneda y datos históricos de esa venta. No usar la tasa vigente del POS para rehacer importes del pasado.
+
+Aceptación: encontrar una venta cargada, leer sus artículos y obtener otra copia es sencillo; cambiar la tasa o el precio de catálogo no cambia los importes del comprobante histórico presentado.
+
+M09. TICKET LEGIBLE Y COHERENTE EN VENTA, REIMPRESIÓN Y VISTA PREVIA
+Archivos: POS.tsx, ExtraViews.tsx, ConfiguracionesView.tsx y el generador térmico de CuentasPorCobrarView.tsx cuando comparta el formato.
+
+Puntos concretos a revisar:
+— POS.generateTicketPDF alrededor de 1765 y POS.generatePastTicketPDF alrededor de 1003.
+— HistorialVentasView.generateTicketPDF alrededor de 443 y generateReceiptCanvas alrededor de 744.
+— ConfiguracionesView: vista previa y recibo de prueba.
+— CuentasPorCobrarView.generatePendingThermalTicket alrededor de 307.
+
+• Mantener 80 mm como valor predeterminado y respetar ticketWidth guardado de 58/80 mm en las rutas de salida. Corregir los width=80 fijos que ignoran la opción existente. Conservar otros valores válidos ya guardados sin resetearlos; no añadir formatos nuevos sin soporte comprobado.
+• Usar encabezado sobrio, nombre comercial de la plantilla actual, identificación de ticket y separadores discretos. No inventar ni reemplazar razón social, dirección, NIT o textos comerciales.
+• Mostrar descripción envuelta, cantidad, precio unitario e importe de línea. En 58 mm puede usarse una segunda línea como “2 × Bs 12,50 = Bs 25,00”, sin recalcular los valores de negocio por motivos estéticos.
+• Destacar total y método. En una venta BOB no imprimir USD como un segundo total; en USD identificar esa moneda. Mantener descuentos, abonos y vuelto cuando correspondan, con sus datos originales.
+• Calcular espacio vertical con las líneas reales producidas por splitTextToSize para nombres, notas, cabecera y pie; no estimarlo solamente con cantidad de artículos. Evitar solapamientos o cortes con 40 artículos de descripción larga.
+• Compartir únicamente helpers pequeños de geometría/dibujo si es útil. Mantener adaptadores separados para carrito actual, venta histórica y pedido; no unificar sus modelos comerciales ni trasladar cálculos al helper.
+• Alinear la vista previa de configuración con el PDF real. Conservar impresión, descarga, imagen y compartir existentes, con sus alternativas cuando el navegador no soporte una vía.
+• Distinguir “PDF generado/descargado” de “enviado a impresora” o “impreso”. Solo afirmar lo que la vía utilizada puede confirmar. No prometer conexión física o corte de papel a partir de un PDF.
+
+Aceptación: el mismo ticket reimpreso conserva ID, moneda e importes; el precio unitario es visible; ninguna descripción o total queda cortado en 58/80 mm; las opciones guardadas se reflejan en el documento real.
+
+M10. CONSISTENCIA VISUAL, TECLADO Y ACCESIBILIDAD DE USO
+Archivos: index.css y componentes anteriores; cambios de App.tsx solo para shell/áreas seguras.
+
+• Usar 13–14 px como referencia de lectura operativa y 44×44 px de área táctil en acciones frecuentes. Aprovechar touch-target existente, adaptando densidad para que agrandar botones no oculte otros controles.
+• Unificar espaciado, etiquetas, iconos y variantes de acción principal/secundaria/destructiva. Mantener colores de marca, modo oscuro y personalización RGB.
+• Asegurar que disabled, error, advertencia y éxito sigan distinguiéndose bajo el tema RGB, cuyos selectores actuales usan !important. No aplicar brillo/hover de botón activo a un control deshabilitado.
+• Añadir o conservar nombres accesibles en botones de icono, etiquetas de input, foco visible y diálogo correctamente identificado. Tab recorre el modal activo y al cerrarlo el foco vuelve al control de origen.
+• Reducir animaciones no esenciales cuando el sistema solicita menos movimiento. No eliminar indicadores útiles de carga o procesamiento.
+• Conservar atajos existentes y evitar interferir con escritura normal, cantidades, precios y lector de código. No añadir nuevas teclas globales para esta mejora.
+• Encapsular el CSS de cada módulo para evitar que una corrección de tabla o modal cambie dashboard, conteos, configuración o caja de forma accidental.
+
+Aceptación: controles distinguibles en claro/oscuro/RGB, teclado utilizable, zoom de 200% sin pérdida de acciones y mensajes comprensibles sin depender solo del color.
+
+4. ORDEN DE TRABAJO
+
+A) Guardar referencia del código y capturas de las pantallas actuales con datos ficticios. Registrar importes, carrito, solicitudes y pasos necesarios para cada tarea representativa.
+B) M01–M03 y parte común de M10: POS, carrito, cobro y adaptación a tamaño. Verificar antes de seguir.
+C) M04–M06: confirmación de escaneo, favoritos y filtros. Mantener intacta la lógica monetaria y de stock.
+D) M07–M08: pedidos e historial usando los módulos reales.
+E) M09 y cierre de M10: comprobantes y consistencia global.
+F) Ejecutar compilación, tipado y matriz de aceptación. Entregar cambios concretos y resultados verificables para la publicación habitual de la aplicación.
+
+No cambiar server.ts, database.ts, firebaseSync.ts, reglas de Firestore, autenticación o la cola de operaciones para resolver una cuestión de tamaño, alineación, favoritos o scroll. Si una mejora exige un contrato de datos diferente, conservar el contrato vigente y registrar el punto como una dependencia concreta; no improvisar una reestructuración.
+
+5. MATRIZ DE ACEPTACIÓN DESPUÉS DE IMPLEMENTAR
+
+Cada prueba debe indicar dispositivo/tamaño, rol, datos usados, acción, resultado y evidencia. Estas pruebas son requisitos de implementación; no se han ejecutado contra interfaces nuevas que todavía no existen.
+
+V01 | 320×568, catálogo normal, nombre de 100–150 caracteres: descripción completa accesible, sin desbordar la página ni agregar el producto al abrir el detalle.
+V02 | 360×800, vista compacta, precios grandes y SKU largo: controles sin superponerse y nombre/modelo distinguible.
+V03 | 412×915, carrito de 40 líneas: primera y última línea accesibles, resumen y acción alcanzables.
+V04 | 800×360 horizontal corto: no quedan barras vacías reservadas; catálogo, carrito y cobro conservan scroll útil.
+V05 | 768×1024 y 1024×768: transiciones md/lg sin una doble barra inferior ni controles cortados.
+V06 | 1366×768 y 1920×1080: sidebar de carrito útil, contenido legible y descripción sin espacios rígidos excesivos.
+V07 | Rotar con precio manual a medio escribir y cliente informado: texto, cantidades, pestaña y método conservados.
+V08 | Zoom 200%, modal de cobro y pedido: se puede leer y alcanzar cada acción sin quedar atrapado.
+V09 | Teclado Android abierto en recibido, cliente, destino y precio: campo activo y acción accesibles; cerrar teclado conserva valores.
+V10 | Carrito/barra inferior en kiosco, usuario normal, tablet y horizontal corto: offset según navegación realmente visible y área segura.
+
+C01 | Agregar por tarjeta, botón +, búsqueda y favorito: una acción produce un solo agregado, sin filas duplicadas del mismo producto.
+C02 | Producto agotado o límite alcanzado: no cambia cantidad y no aparece confirmación de agregado exitoso.
+C03 | 40 líneas, edición de cantidad y quitar última unidad: comportamiento comercial igual al actual y controles accesibles.
+C04 | Alternar Venta 1/Venta 2 y las tres vistas: datos independientes conservados; no se mezclan clientes, descuentos o precios.
+C05 | Precio detalle, mayorista y manual: mismos valores antes/después; coma y punto según edición existente no se pierden al escribir.
+C06 | Abrir/cerrar detalle o foto y tocar estrella: cero agregados accidentales y cero POST comerciales.
+C07 | Abrir cobro desde carrito vacío: acción continúa deshabilitada y se ve así también en RGB.
+
+P01 | Efectivo BOB con vuelto: mismo total y vuelto antes/después; BOB claramente identificado.
+P02 | Cobro USD: precio USD sin redondeo BOB; moneda coherente en pantalla y documento.
+P03 | Descuento por monto y por porcentaje, con y sin permiso: mismos cálculos y mismos bloqueos existentes.
+P04 | Canje de puntos y crédito con cliente/abono: mismo payload y resultado comercial que la referencia para datos idénticos.
+P05 | QR/transferencia y efectivo: solo los campos correspondientes; el cambio de diseño no dispara envío.
+P06 | Respuesta lenta: botón de ejecución mantiene procesamiento; el cambio de tamaño no habilita otro envío ni reinicia la clave.
+P07 | Error 400/403/409 o red: mensaje claro, datos conservados y sin indicar un cobro confirmado cuando la respuesta no lo confirma.
+
+E01 | Cámara: lectura válida, desconocida y agotado; beep/mensaje/cantidad coinciden con el efecto real.
+E02 | Cámara: código repetido dentro del cooldown no suma otra unidad; una segunda lectura legítima admitida sí suma.
+E03 | Lector USB que emula teclado y evento gtr-barcode-scanned: siguen funcionando con foco en buscador y sin foco.
+E04 | Escritura humana en nombre/teléfono/notas/precio/cantidad: no se interpreta como escaneo o atajo involuntario.
+
+F01 | Marcar y quitar favorito: un toque, carrito igual y cero solicitudes de escritura.
+F02 | Cerrar sesión de usuario A e iniciar B: favoritos propios, sin datos del anterior.
+F03 | JSON de favoritos inválido o almacenamiento bloqueado: venta normal operativa y sin excepción de render.
+F04 | Favorito con cambio de precio/stock o producto eliminado: usa el catálogo vivo; no aparece un producto reconstruido con datos viejos.
+F05 | Inventario con categoría + Bajo stock/Sin stock + texto: resultados y contador coinciden; Restablecer funciona sin mutar productos.
+F06 | Catálogo grande y 48 visibles inicialmente: filtros y favoritos no renderizan o descargan innecesariamente todo de nuevo.
+
+H01 | Pedido con destino/transportadora largos y 40 productos: todos los artículos y acciones accesibles en vertical.
+H02 | Editar y finalizar pedido con teclado abierto: mismos endpoints/handlers y datos intactos tras validación fallida.
+H03 | Descargar orden de almacén o consultar documento: no cambia reservas, cobros ni estado del pedido.
+H04 | Historial móvil: abrir detalle, volver y reimprimir conserva venta seleccionada y posición útil.
+H05 | Historial con más de 25 ventas: paginación y filtros existentes funcionan; los mensajes no confunden una página sin coincidencias con inexistencia global.
+
+T01 | Ticket 58 mm, nombre largo, SKU, nota y cabecera: contenido envuelto sin cortes ni solapamientos; precio unitario visible.
+T02 | Ticket 80 mm con 40 artículos: altura suficiente, totales completos y espacio final razonable.
+T03 | Venta BOB: documento sin un total USD ambiguo; venta USD: moneda correcta.
+T04 | Reimpresión después de cambiar tasa y precio actual de producto: mismo ID e importes históricos.
+T05 | Vista previa y recibo real con cambios de fuente, logo y ancho: configuración reflejada en ambos.
+T06 | PDF, imagen, compartir nativo y alternativa de descarga: mismo contenido comercial; reimprimir no crea ventas.
+T07 | Logo ausente o imagen que falla: comprobante legible sin bloquear su generación.
+
+A01 | Claro, oscuro y RGB: textos legibles y estados disabled/error/éxito distinguibles.
+A02 | Navegación por Tab, Enter/Espacio en botones y cierre de modal: foco coherente y sin dobles invocaciones.
+A03 | Cajero/kiosco y administrador: mismos permisos y acciones autorizadas que la referencia.
+A04 | Humo de Caja, Conteo físico, Configuración, Devoluciones y Dashboard después de tocar CSS común: montaje, scroll y controles principales siguen accesibles.
+
+6. CRITERIOS OBJETIVOS PARA CONSIDERAR QUE MEJORÓ EL USO
+
+• Descripción completa alcanzable por toque en vertical, sin depender de hover o zoom.
+• Cero superposiciones que oculten datos o acciones en los tamaños de la matriz.
+• Favorito marcado con un toque y acceso al artículo habitual sin escribir una consulta.
+• Total, moneda, recibido y vuelto identificables desde la zona principal de cobro.
+• Ningún paso adicional obligatorio para completar una venta o reimprimir respecto del flujo de referencia.
+• Cero nuevas solicitudes comerciales por cambiar filtros, favorito, orientación o tamaño. Registrar la red en la verificación.
+• Igual carrito, importes, payloads y permisos para los escenarios equivalentes antes/después.
+• Ticket con precio unitario, moneda y total legibles en el ancho configurado.
+• Comparar render y fluidez con el mismo conjunto de productos y equipo; no justificar una regresión de uso por animaciones nuevas.
+
+7. COMPROBACIONES YA REALIZADAS PARA PREPARAR ESTE PLAN
+
+Se confirmó que main seguía en el commit indicado y se verificaron por SHA Git 60 archivos de fuente/configuración/pruebas relevantes. Se inspeccionaron las rutas reales de las pantallas, los handlers asociados, las restricciones de scroll, la plantilla de recibos, los generadores y las interfaces de escáner.
+
+Se ejecutaron 21 controles aislados sobre funciones reales de buscador, precio, carrito y escáner: 20 cumplieron y uno reprodujo una discrepancia existente. Se comprobaron búsqueda por SKU/ID/tildes/términos/categoría, conservación del catálogo, precio detalle/mayorista/manual, USD y umbrales BOB, agregado y consolidación de filas, límites de cantidad, agotados, quitar última unidad, edición directa y cooldown de cámara.
+
+El caso pendiente UI21 reproduce el agotado rechazado por POS seguido de confirmación de éxito de cámara. M04 exige corregirlo manteniendo el rechazo y el stock. No es un fallo de inventario creado por estas mejoras, que todavía no se han aplicado.
+
+Método: funciones TypeScript reales extraídas del código, con commits de estado y auxiliares del navegador controlados. No se montó React ni se ejecutaron DOM, cámara, lector físico, impresora, HTTP o base comercial. Los resultados anteriores son una línea base funcional, no pruebas visuales de una implementación futura.
+
+8. VERIFICACIÓN Y ENTREGA DE LA IMPLEMENTACIÓN
+
+Ejecutar los scripts reales del proyecto: npm run build y npm run lint, además de los escenarios pertinentes. Mantener los tests existentes y añadir solo comprobaciones que detecten regresiones reales de interacción, importes, eventos o documentos; no pruebas que se limiten a repetir clases CSS.
+
+Preparar datos ficticios o una copia aislada para las pruebas. No ejecutar ventas, restauraciones, abonos o borrados de prueba contra la base comercial. No limpiar la cola offline como parte del cambio de estilos.
+
+Entregar al terminar:
+1) Archivos cambiados y propósito de cada cambio.
+2) Capturas antes/después en vertical, horizontal corto y PC, con datos ficticios.
+3) Resultados de compilación, tipado y matriz: aprobado/fallido/no ejecutado con evidencia. Lo no ejecutado no debe marcarse aprobado.
+4) Comparación de operaciones equivalentes que muestre conservación de importes, payloads y permisos.
+5) PDF de muestra de 58 y 80 mm con descripción larga y precio unitario; otro con varias líneas para comprobar altura.
+6) Defectos previos encontrados, separados de regresiones causadas por este cambio, y verificaciones que requieran hardware real.
+
+Considerar completado el trabajo cuando los diez grupos se hayan aplicado, se haya demostrado su mejora de uso y no queden regresiones nuevas sin resolver. No afirmar que toda la aplicación carece de errores a partir de una revisión estética o de un conjunto limitado de controles.
+
+
+ANEXO — RESULTADOS DE LA LÍNEA BASE YA EJECUTADA
+UI01 | PASS | El SKU específico localiza el artículo correspondiente sin cambiar las reglas de relevancia
+UI02 | PASS | La búsqueda por #ID conserva el producto exacto
+UI03 | PASS | Mayúsculas y tildes no impiden encontrar el artículo
+UI04 | PASS | La búsqueda de varias palabras mantiene los términos requeridos
+UI05 | PASS | La categoría sigue formando parte de la búsqueda actual
+UI06 | PASS | Buscar no modifica el catálogo fuente ni su orden
+UI07 | PASS | El precio detalle BOB conserva la función actual y su redondeo
+UI08 | PASS | El precio mayorista BOB conserva la función actual
+UI09 | PASS | El precio manual BOB conserva prioridad y redondeo
+UI10 | PASS | El precio USD no recibe redondeo comercial BOB
+UI11 | PASS | Los umbrales existentes de Bs 0.50 quedan explícitos para regresión
+UI12 | PASS | Agregar un artículo invoca una vez la acción existente
+UI13 | PASS | Dos agregados legítimos consolidan cantidad sin duplicar la fila
+UI14 | PASS | El límite de stock impide agregar otra unidad
+UI15 | PASS | Un agotado no se agrega al carrito
+UI16 | PASS | Restar la última unidad conserva el comportamiento actual de quitar la fila
+UI17 | PASS | La edición directa de cantidad sigue limitada al stock
+UI18 | PASS | Un escaneo permitido agrega una unidad y confirma éxito
+UI19 | PASS | La lectura repetida dentro del intervalo de cámara no suma otra unidad
+UI20 | PASS | Un código desconocido no agrega productos ni confirma éxito
+UI21 | FAIL | La confirmación visual/sonora del escaneo debe reflejar el rechazo de un agotado
+  Esperado: {"qty": 0, "success": false}
+  Obtenido: {"qty": 0, "success": true}

@@ -18,6 +18,8 @@ import OfflineStatusHUD from '../components/OfflineStatusHUD';
 import { saveOfflineSale, saveOfflineAction } from '../utils/offlineStorage';
 import { useElasticScroll } from '../utils/touchScroll';
 import { safeDispatchEvent } from '../utils/events';
+import { getFavorites, toggleFavorite } from '../utils/posUiPreferences';
+import { calculateDynamicTicketHeight, drawTicketItem } from '../utils/ticketFormatter';
 
 interface SaleTab {
     id: number;
@@ -269,7 +271,7 @@ export default function POS() {
     const catalogScroll = useElasticScroll(true);
     const cartScroll = useElasticScroll(true);
 
-    const addToCart = (product: any, quantity: number = 1) => {
+    const addToCart = (product: any, quantity: number = 1): boolean => {
         const existingInCart = cart.find((item: any) => item.id === product.id);
         const currentQty = existingInCart ? existingInCart.cartQuantity : 0;
         const targetQty = currentQty + quantity;
@@ -278,16 +280,17 @@ export default function POS() {
             if (product.stock <= 0) {
                 triggerVibrate([50, 50, 50]);
                 showNotification(`⚠️ El artículo "${product.name}" no tiene stock disponible (0 unidades).`, 'error');
-                return;
+                return false;
             }
             if (targetQty > product.stock) {
                 triggerVibrate([50, 50, 50]);
                 showNotification(`⚠️ No es posible agregar más unidades. El stock disponible de "${product.name}" es de ${product.stock} unidades (ya tienes ${currentQty} en el carrito).`, 'error');
-                return;
+                return false;
             }
         }
         triggerVibrate(30);
         rawAddToCart(product, quantity);
+        return true;
     };
 
     const updateCartItemQuantity = (productId: number, qty: number) => {
@@ -3655,8 +3658,6 @@ export default function POS() {
                 products={products}
                 addToCart={addToCart}
                 onSuccessScan={(product) => {
-                    setIsScannerOpen(false);
-                    setIsMobileCartOpen(true);
                     showNotification(`✓ ${product.name} añadido al carrito`, "success");
                 }}
             />

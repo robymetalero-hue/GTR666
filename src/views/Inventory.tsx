@@ -268,6 +268,7 @@ export default function Inventory() {
 
     // Filter states
     const [selectedCategory, setSelectedCategory] = useState("Todos");
+    const [stockStatusFilter, setStockStatusFilter] = useState<'todos' | 'disponibles' | 'bajo_stock' | 'sin_stock'>('todos');
     const [searchQuery, setSearchQuery] = useState("");
     const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
 
@@ -1666,24 +1667,75 @@ export default function Inventory() {
                     exchangeRate={exchangeRate}
                 />
 
-                {/* Categories Scroll Area arranged like departments */}
-                <div className="flex gap-1.5 overflow-x-auto w-full md:w-auto pb-1 max-w-full scrollbar-none select-none items-center">
-                    <span className="text-[10px] font-extrabold uppercase tracking-widest text-[#64748b] dark:text-slate-500 mr-2 shrink-0 hidden lg:inline">
-                        Departamentos:
-                    </span>
-                    {categoriesList.map(cat => (
-                        <button
-                            key={cat}
-                            onClick={() => setSelectedCategory(cat)}
-                            className={`px-4 py-2 rounded-2xl text-[10.5px] font-extrabold tracking-wide whitespace-nowrap transition-all duration-200 cursor-pointer select-none border ${
-                                selectedCategory === cat 
-                                    ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white border-transparent shadow-md shadow-blue-500/10 scale-[1.01]' 
-                                    : 'bg-slate-50 dark:bg-[#070b13] border-slate-200/40 dark:border-slate-850 text-slate-500 dark:text-slate-400 hover:bg-slate-100 hover:text-indigo-650 dark:hover:bg-slate-850/60 dark:hover:text-[#818cf8]'
-                            }`}
-                        >
-                            <span>{cat}</span>
-                        </button>
-                    ))}
+                {/* Categories & Stock Availability Filters (M06) */}
+                <div className="flex flex-col gap-2 w-full select-none">
+                    <div className="flex gap-1.5 overflow-x-auto w-full pb-0.5 max-w-full scrollbar-none items-center">
+                        <span className="text-[10px] font-extrabold uppercase tracking-widest text-[#64748b] dark:text-slate-500 mr-2 shrink-0 hidden lg:inline">
+                            Departamentos:
+                        </span>
+                        {categoriesList.map(cat => (
+                            <button
+                                key={cat}
+                                onClick={() => setSelectedCategory(cat)}
+                                className={`px-3.5 py-1.5 rounded-xl text-[10px] font-extrabold tracking-wide whitespace-nowrap transition-all duration-200 cursor-pointer select-none border ${
+                                    selectedCategory === cat 
+                                        ? 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white border-transparent shadow-md shadow-blue-500/10 scale-[1.01]' 
+                                        : 'bg-slate-50 dark:bg-[#070b13] border-slate-200/40 dark:border-slate-850 text-slate-500 dark:text-slate-400 hover:bg-slate-100 hover:text-indigo-650 dark:hover:bg-slate-850/60 dark:hover:text-[#818cf8]'
+                                }`}
+                            >
+                                <span>{cat}</span>
+                            </button>
+                        ))}
+                    </div>
+
+                    {/* Stock Status Pills + Live Counter & Reset Button */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-150 dark:border-slate-850/40">
+                        <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-none">
+                            <span className="text-[9px] font-extrabold uppercase tracking-widest text-[#64748b] dark:text-slate-500 mr-1 shrink-0">
+                                Estado Stock:
+                            </span>
+                            {[
+                                { id: 'todos', label: 'Todos' },
+                                { id: 'disponibles', label: 'Disponibles (>0)' },
+                                { id: 'bajo_stock', label: '⚠️ Bajo Stock' },
+                                { id: 'sin_stock', label: 'Agotados (0)' }
+                            ].map(st => (
+                                <button
+                                    key={st.id}
+                                    type="button"
+                                    onClick={() => setStockStatusFilter(st.id as any)}
+                                    className={`px-2.5 py-1 rounded-lg text-[9.5px] font-bold tracking-wide whitespace-nowrap transition-all cursor-pointer border ${
+                                        stockStatusFilter === st.id
+                                            ? 'bg-indigo-600 text-white border-indigo-500 shadow-xs font-black'
+                                            : 'bg-white dark:bg-[#070b13] border-slate-200/50 dark:border-slate-850 text-slate-500 dark:text-slate-400 hover:bg-slate-100'
+                                    }`}
+                                >
+                                    {st.label}
+                                </button>
+                            ))}
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                            <span className="text-[10px] font-mono font-bold text-slate-400 dark:text-slate-500 bg-slate-100 dark:bg-slate-900 px-2 py-0.5 rounded-md">
+                                {finalFilteredProducts.length} de {products.length} productos
+                            </span>
+
+                            {(selectedCategory !== "Todos" || stockStatusFilter !== "todos" || searchQuery.trim() !== "") && (
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setSelectedCategory("Todos");
+                                        setStockStatusFilter("todos");
+                                        setSearchQuery("");
+                                        setDebouncedSearchQuery("");
+                                    }}
+                                    className="px-2.5 py-1 bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/30 dark:hover:bg-rose-900/50 text-rose-600 dark:text-rose-400 rounded-lg text-[9px] font-black uppercase tracking-wider transition-colors cursor-pointer"
+                                >
+                                    Restablecer
+                                </button>
+                            )}
+                        </div>
+                    </div>
                 </div>
             </div>
 
