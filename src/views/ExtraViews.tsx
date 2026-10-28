@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useAppContext } from '../context/AppContext';
 import { hasPermission } from '../utils/permissions';
 import { 
-    Home, Clock, Calendar, ShieldCheck, ArrowRight, ShoppingCart, 
+    Home, Clock, Calendar, ShieldCheck, ShieldAlert, ArrowRight, ShoppingCart, 
     Receipt, Trash2, Printer, Search, RefreshCw, Folder, Sparkles, 
     ArrowLeftRight, FileBarChart, PieChart, TrendingUp, AlertCircle, 
     Check, Undo2, Smartphone, HelpCircle, Activity, ChevronRight, Ban,

@@ -3,21 +3,51 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Helper functions
+    // Default-deny global safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Identity & Role Helpers
     function isAuthenticated() {
       return request.auth != null;
     }
 
-    function isAdmin() {
+    function isVerifiedAdminEmail() {
+      return isAuthenticated()
+        && request.auth.token.email == 'robymetalero@gmail.com'
+        && request.auth.token.email_verified == true;
+    }
+
+    function isSyncDaemon() {
       return isAuthenticated() && (
-        request.auth.token.email == 'robymetalero@gmail.com' ||
-        request.auth.token.role == 'admin'
+        request.auth.token.role == 'sync_daemon' ||
+        request.auth.token.sync_daemon == true ||
+        isVerifiedAdminEmail()
       );
     }
 
-    function hasIntegrityProof() {
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.role == 'admin' ||
+        request.auth.token.admin == true ||
+        isVerifiedAdminEmail() ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
+      );
+    }
+
+    function isAuthorizedSyncOrAdmin() {
+      return isAdmin() || isSyncDaemon();
+    }
+
+    function hasValidIntegrityEnvelope() {
       return request.resource != null && request.resource.data != null && (
-        request.resource.data.keys().hasAll(['_tx_hash', '_tx_timestamp']) ||
+        (request.resource.data.keys().hasAll(['_tx_hash', '_tx_timestamp']) &&
+          request.resource.data._tx_hash is string &&
+          request.resource.data._tx_hash.size() == 64 &&
+          request.resource.data._tx_timestamp is string &&
+          request.resource.data._tx_timestamp.size() <= 64) ||
         request.resource.data.keys().hasAny(['initialized', 'admin_username', 'timestamp'])
       );
     }
@@ -26,103 +56,168 @@ service cloud.firestore {
       return coll.matches('^sandbox_.*');
     }
 
-    function isBlockedIncidentSaleId(docId) {
-      return docId in ['437', '438', '439', '440'];
+    // Strictly isolated operational collections so wildcard match NEVER overlaps protected collections
+    // (users, usuarios, settings, system_audit_logs, firestore_transaction_ledger, inventory_audit_logs, sale_returns, products)
+    function isOperationalBusinessCollection(coll) {
+      return coll in [
+        'departments',
+        'clients',
+        'sales',
+        'sale_items',
+        'shifts',
+        'exchange_rate_audit',
+        'caja_cierres',
+        'stock_arrivals',
+        'accounts_receivable',
+        'credit_payments',
+        'pending_sales',
+        'pending_sale_items',
+        'pending_sale_payments',
+        'deleted_records',
+        'offline_pending_sales',
+        'cash_accounts',
+        'cash_movements',
+        'cash_settlements',
+        'product_groups',
+        'product_group_items',
+        'inventory_counts',
+        'inventory_count_items',
+        'incident_quarantine_records',
+        'processed_operations'
+      ];
     }
 
     function hasValidNumericInvariants(coll, docId) {
-      return !(coll == 'sales' && isBlockedIncidentSaleId(docId))
-        && !(coll == 'products' && request.resource.data.keys().hasAny(['stock']) && request.resource.data.stock is number && request.resource.data.stock < 0)
+      return !(coll == 'products' && request.resource.data.keys().hasAny(['stock']) && request.resource.data.stock is number && request.resource.data.stock < 0)
         && !(coll == 'sales' && request.resource.data.keys().hasAny(['total']) && request.resource.data.total is number && request.resource.data.total < 0)
-        && !(coll == 'accounts_receivable' && request.resource.data.keys().hasAny(['remaining_amount']) && request.resource.data.remaining_amount is number && request.resource.data.remaining_amount < -0.01);
+        && !(coll == 'accounts_receivable' && request.resource.data.keys().hasAny(['remaining_amount']) && request.resource.data.remaining_amount is number && request.resource.data.remaining_amount < -0.01)
+        && !(coll == 'clients' && request.resource.data.keys().hasAny(['points']) && request.resource.data.points is number && request.resource.data.points < 0);
     }
 
-    // System sync state - client needs read to detect sync pulses
+    // System sync pulse metadata - authenticated or authorized sync daemon
     match /system/{docId} {
-      allow read, write: if true;
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthorizedSyncOrAdmin() && hasValidIntegrityEnvelope();
+      allow delete: if false;
     }
     match /sandbox_system/{docId} {
-      allow read, write: if true;
+      allow read, write: if isAuthenticated();
     }
 
     match /sync_metadata/{docId} {
-      allow read, write: if true;
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthorizedSyncOrAdmin() && hasValidIntegrityEnvelope();
+      allow delete: if false;
     }
     match /sandbox_sync_metadata/{docId} {
-      allow read, write: if true;
+      allow read, write: if isAuthenticated();
     }
 
-    // Security logs & admin activity auditing
+    // Security logs & admin activity auditing (Append-Only)
     match /security_logs/{docId} {
-      allow read, write: if true;
+      allow read: if isAuthorizedSyncOrAdmin();
+      allow create, update: if isAuthorizedSyncOrAdmin() && hasValidIntegrityEnvelope();
+      allow delete: if false;
     }
     match /sandbox_security_logs/{docId} {
-      allow read, write: if true;
+      allow read, write: if isAuthenticated();
     }
 
-    // User accounts & security (Protected under Fase 4 rules)
+    // User accounts & security (Strictly protected - no delete allowed)
     match /users/{userId} {
-      allow read: if isAuthenticated();
-      allow create, update: if (isAuthenticated() || hasIntegrityProof());
+      allow read: if isAuthorizedSyncOrAdmin() || (isAuthenticated() && request.auth.uid == userId);
+      allow create, update: if isAuthorizedSyncOrAdmin() && hasValidIntegrityEnvelope();
       allow delete: if false;
     }
     match /sandbox_users/{userId} {
-      allow read, write: if true;
+      allow read, write: if isAuthenticated();
     }
 
     match /usuarios/{userId} {
       allow read, write: if false;
     }
 
-    // Internal System Settings - allows read of non-sensitive settings; writes require authentication or server integrity proof
+    // Internal System Settings (jwt_secret strictly forbidden; no delete allowed)
     match /settings/{settingId} {
-      allow read: if settingId != 'jwt_secret';
-      allow create, update: if (isAuthenticated() || isSandbox('settings') || hasIntegrityProof()) && settingId != 'jwt_secret';
+      allow read: if isAuthenticated() && settingId != 'jwt_secret';
+      allow create, update: if isAuthorizedSyncOrAdmin() && hasValidIntegrityEnvelope() && settingId != 'jwt_secret';
       allow delete: if false;
     }
     match /sandbox_settings/{settingId} {
-      allow read: if settingId != 'jwt_secret';
-      allow write: if settingId != 'jwt_secret';
+      allow read, write: if isAuthenticated() && settingId != 'jwt_secret';
+    }
+
+    // Products catalog (Protected against anonymous cost leakage and unauthorized positive stock manipulation)
+    match /products/{productId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthorizedSyncOrAdmin()
+        && hasValidIntegrityEnvelope()
+        && hasValidNumericInvariants('products', productId);
+      allow update: if (
+          isAuthorizedSyncOrAdmin() ||
+          (isAuthenticated() && request.resource.data.stock <= resource.data.stock)
+        )
+        && hasValidIntegrityEnvelope()
+        && hasValidNumericInvariants('products', productId);
+      allow delete: if isAuthorizedSyncOrAdmin();
+    }
+    match /sandbox_products/{productId} {
+      allow read, write: if isAuthenticated() && hasValidNumericInvariants('products', productId);
     }
 
     // Sale Returns (Auditoría de Devoluciones - FASE 4)
     match /sale_returns/{returnId} {
       allow read: if isAuthenticated();
-      allow create, update: if (isSandbox('sale_returns') || isAuthenticated() || hasIntegrityProof())
+      allow create, update: if isAuthorizedSyncOrAdmin()
+        && hasValidIntegrityEnvelope()
         && !(request.resource.data.keys().hasAny(['refund_amount']) && request.resource.data.refund_amount is number && request.resource.data.refund_amount < 0);
-      allow delete: if isAdmin();
+      allow delete: if isAuthorizedSyncOrAdmin();
     }
     match /sandbox_sale_returns/{returnId} {
-      allow read, write: if true;
+      allow read, write: if isAuthenticated();
     }
 
-    // Audit logs & transaction ledger (Append-Only in Production)
+    // Audit logs, inventory Kárdex & transaction ledger (Strictly Append-Only in Production; update/delete is impossible)
     match /system_audit_logs/{logId} {
-      allow read: if isAuthenticated();
-      allow create, update: if isAuthenticated() || hasIntegrityProof();
-      allow delete: if false;
+      allow read: if isAuthorizedSyncOrAdmin();
+      allow create: if isAuthorizedSyncOrAdmin() && hasValidIntegrityEnvelope();
+      allow update, delete: if false;
     }
     match /sandbox_system_audit_logs/{logId} {
-      allow read, write: if true;
+      allow read, write: if isAuthenticated();
+    }
+
+    match /inventory_audit_logs/{logId} {
+      allow read: if isAuthorizedSyncOrAdmin();
+      allow create: if isAuthorizedSyncOrAdmin() && hasValidIntegrityEnvelope();
+      allow update, delete: if false;
+    }
+    match /sandbox_inventory_audit_logs/{logId} {
+      allow read, write: if isAuthenticated();
     }
 
     match /firestore_transaction_ledger/{txId} {
-      allow read: if isAuthenticated();
-      allow create, update: if isAuthenticated() || hasIntegrityProof();
+      allow read: if isAuthorizedSyncOrAdmin();
+      allow create, update: if isAuthorizedSyncOrAdmin() && hasValidIntegrityEnvelope();
       allow delete: if false;
     }
     match /sandbox_firestore_transaction_ledger/{txId} {
-      allow read, write: if true;
+      allow read, write: if isAuthenticated();
     }
 
-    // Business Data collections (sales, inventory, clients, credits, caja, products)
-    // Sandbox collections are isolated for dev testing; production writes accept integrity proof or authenticated server daemon
+    // Isolated Operational Business Data collections
     match /{collectionName}/{docId} {
-      allow read: if isSandbox(collectionName) || isAuthenticated() || collectionName in ['products', 'departments', 'deleted_records'];
-      allow create, update: if (isSandbox(collectionName) || isAuthenticated() || hasIntegrityProof()) && hasValidNumericInvariants(collectionName, docId);
-      allow delete: if isSandbox(collectionName) || isAuthenticated() || isAdmin();
+      allow read: if isOperationalBusinessCollection(collectionName) && isAuthenticated()
+        || (isSandbox(collectionName) && isAuthenticated());
+      allow create, update: if (
+          (isOperationalBusinessCollection(collectionName) && isAuthorizedSyncOrAdmin() && hasValidIntegrityEnvelope()) ||
+          (isSandbox(collectionName) && isAuthenticated())
+        ) && hasValidNumericInvariants(collectionName, docId);
+      allow delete: if (isOperationalBusinessCollection(collectionName) && isAuthorizedSyncOrAdmin())
+        || (isSandbox(collectionName) && isAuthenticated());
     }
   }
 }
+
 
 

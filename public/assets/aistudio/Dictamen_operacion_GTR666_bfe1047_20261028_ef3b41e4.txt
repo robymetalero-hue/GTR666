@@ -1,0 +1,282 @@
+GTR666 — REVISIÓN DE CAMBIOS Y CONDICIONES PARA OPERAR
+Fecha: 28 de octubre de 2026, Bolivia (America/La_Paz)
+Repositorio: https://github.com/robymetalero-hue/GTR666
+Versión revisada: bfe1047767f31b19bdb5b2ab5dfd6d07bdd385f2
+Comparación: e8f55b7eba4c3a975998d1d0e2c9d7b9fdfae3ec
+
+DICTAMEN
+
+TODAVÍA NO ES SUFICIENTE PARA DAR POR CERRADOS LOS RIESGOS Y ENTREGAR EL
+SISTEMA AL CAJERO COMO OPERATIVAMENTE VALIDADO.
+
+La nueva versión corrige una parte importante de las observaciones anteriores.
+De los 210 casos que ya existían, ahora cumplen 203, frente a 174 anteriormente.
+Sin embargo, aparecieron fallas en la recuperación del incidente y en la
+continuidad de ventas al alcanzar ciertos IDs. Las reglas de Firestore del
+repositorio también mantienen accesos excesivos.
+
+Esto no exige reestructurar la aplicación. Primero deben cerrarse los puntos
+concretos descritos a continuación y comprobarse la versión realmente desplegada.
+El número de pruebas aprobadas no constituye una certificación de producción.
+
+1. ALCANCE Y EVIDENCIA
+
+- Se fijaron 153 archivos de código/configuración al commit indicado y se
+  verificaron sus hashes contra GitHub. Hay 16 archivos de código o reglas
+  modificados/agregados respecto de la revisión anterior.
+- Se repitieron los 210 casos anteriores y se añadieron 7 escenarios de operación.
+- Resultado total: 217 comprobaciones, 205 cumplen, 12 diferencias y 0 errores
+  del arnés de pruebas. Las 12 diferencias NO equivalen a 12 vulnerabilidades:
+  algunas corresponden a contratos anteriores, políticas o topología condicionada.
+- Los 29 casos anteriores que dejaron de fallar se detallan por grupos más abajo.
+  Ningún caso anterior que cumplía dejó de cumplir en esta comparación adaptada.
+- Se verificó sintaxis en 113 archivos JS/CJS/TS sin JSX: 113 cumplen.
+  Los 31 TSX no recibieron compilación completa.
+- Se intentaron npm run build y npm run lint. No pudieron completarse porque
+  en este entorno no están instalados vite y tsc. Esto no demuestra un error
+  del código, pero deja pendiente demostrar que compila y pasa tipos.
+- Las pruebas utilizan funciones reales extraídas del código, SQLite en memoria
+  o temporales ficticios, y sustitutos de Firebase, red y estado de React.
+  No equivalen a una prueba HTTP/JWT completa, navegador real o emulador de reglas.
+- Para comparar de forma justa se actualizaron dependencias del arnés: helpers
+  reales de hashes/sincronización, moneda devuelta por el GET actual, permisos
+  válidos para abonar y comportamiento terminante de process.exit.
+- La prueba de cantidades devueltas admite ahora el rechazo explícito de una
+  cantidad excesiva; verifica que nunca se repone más de lo vendido.
+- No se ejecutaron los scripts del repositorio contra producción ni se descargó
+  su base comercial. Tampoco se modificaron GitHub, la aplicación publicada o datos.
+- La rama main seguía en bfe1047 al finalizar la consulta de fuentes.
+
+2. BLOQUEO: LAS NUEVAS PROTECCIONES PUEDEN DETENER LAS VENTAS
+
+Ubicación principal:
+database.ts, líneas 946–971, triggers trg_block_ghost_sales y
+trg_block_ghost_sale_items. También hay una lista fija en firestore.rules,
+líneas 29–30.
+
+El código prohíbe para siempre los IDs 437, 438, 439 y 440. No resuelve cómo
+continuar si la asignación automática de SQLite llega a uno de esos números.
+
+Caso Z01, ejecutado con datos ficticios:
+  Último ID asignado: 436.
+  Stock inicial: 15.
+  Dos ventas nuevas legítimas, con claves de operación diferentes.
+  Resultado: HTTP 500 en ambas.
+  Mensaje: GHOST_RECORD_BLOCKED: sale_item or parent sale is in deleted_records
+           or incident blacklist.
+  Secuencia final: continúa en 436. Ninguna venta se completa.
+
+El rollback conserva el inventario, pero el siguiente intento vuelve a escoger
+el mismo ID prohibido. Esto puede detener la caja. No se verificó cuál es el
+contador actual en producción; el bloqueo se reprodujo bajo esta condición.
+
+Corrección puntual necesaria:
+  - Proteger las identidades/operaciones realmente invalidadas por el incidente.
+  - Garantizar que una venta nueva obtenga un ID utilizable, incluso después de
+    restaurar una réplica que conserve registros hasta antes de esos números.
+  - Conservar los IDs históricos existentes; no renumerar ni reiniciar contadores.
+  - Verificar varias ventas consecutivas al cruzar la zona afectada y después
+    de una restauración. Agregar números a la lista negra no cierra este caso.
+
+3. BLOQUEO: RECUPERAR EL INCIDENTE AÚN PUEDE ALTERAR STOCK Y CAJA
+
+Ubicación:
+firebaseSync.ts, hydrateRemediationStateFromRawJson, aproximadamente 881–923.
+Se activa durante pullFirestoreToLocal al hidratar el estado del incidente.
+
+La nueva recuperación repone todas las cantidades de sale_items y descuenta
+movimientos positivos de caja. No descuenta de esa reposición las unidades ya
+devueltas ni considera correctamente el efecto neto de movimientos negativos.
+
+Caso Z02, venta y devolución realizadas por los handlers actuales:
+  Antes de la venta de prueba: stock 12 y caja Bs 0.
+  Venta: 3 unidades a Bs 10; stock 9 y caja Bs 30.
+  Devolución de 1 unidad: stock 10 y caja Bs 20.
+  Al retirar todo ese negocio de prueba, debe quedar stock 12 y caja Bs 0.
+  Recuperación observada: stock 13 y caja Bs -10, sin la venta en el historial.
+
+Además, en Z03 se modeló una recuperación parcial: inventario y caja ya estaban
+corregidos, pero permanecían relaciones antiguas de la venta. La recuperación
+volvió a sumar 3 unidades y descontar Bs 30. La presencia de una línea antigua
+no demuestra que su efecto financiero siga pendiente de revertir.
+
+Se amplió la prueba a TODAS las 26 colecciones reales de SYNC_TABLES (Z07),
+precargadas con el estado comercial ficticio de la venta y devolución:
+  Esperado: stock 12, caja Bs 0, venta eliminada.
+  Observado después del pull: stock 13, caja Bs 20, venta eliminada.
+La importación de la réplica de caja también puede reemplazar el ajuste local
+con el saldo anterior. Esta prueba no registró errores del sustituto de nube.
+
+La recuperación ya elimina el encabezado #399 y protege sus tombstones en los
+casos anteriores, pero retirar el encabezado no basta para demostrar que el
+inventario y la caja quedaron correctos.
+
+Corrección puntual necesaria:
+  - Calcular el efecto NETO demostrado: venta menos devoluciones y movimientos
+    con signo, incluyendo las relaciones de crédito que correspondan.
+  - Registrar de forma atómica qué efecto se revirtió y a qué revisión de stock
+    y caja pertenece. Repetir o restaurar no debe aplicarlo nuevamente.
+  - Coordinar el resultado corregido con la réplica; el mismo pull no debe
+    restaurar saldos anteriores.
+  - Separar el retiro de relaciones antiguas de una autorización para volver a
+    ajustar cantidades. No inferir ese ajuste solo por encontrar filas antiguas.
+  - Validar venta sin devolución, devolución parcial, devolución total,
+    recuperación parcial y segundo pull consecutivo.
+  - Evitar fabricar auditorías de éxito por la sola existencia de una clave
+    de settings. La migración y la hidratación actuales también insertan
+    ajustes fijos +1/+24 y un éxito con fecha fija si no encuentran sus logs;
+    esos registros deben derivarse de acciones efectivamente demostradas.
+
+4. BLOQUEO: LAS REGLAS DE FIRESTORE SIGUEN SIENDO INSUFICIENTES
+
+Ubicación: firestore.rules, líneas 18–22 y 120–123.
+
+Cambios positivos: se retiró parte del acceso anónimo de lectura y se añadieron
+invariantes numéricas y una función isAdmin. La contraseña fija del módulo
+firebaseSync.ts fue reemplazada por variables de entorno.
+
+Pendiente por lectura directa de las reglas:
+  - hasIntegrityProof solo comprueba presencia de campos del documento. No
+    verifica una firma ni exige una identidad de servidor. Un cliente puede
+    proporcionar esos campos; su presencia no acredita una operación autorizada.
+  - La regla general permite crear/actualizar mediante esa comprobación.
+    Una modificación indebida con cantidades positivas sigue siendo posible
+    según esas condiciones; impedir valores negativos no evita stock fantasma.
+  - La regla general permite eliminar a cualquier identidad autenticada,
+    sin exigir el permiso comercial específico ni rol administrador.
+  - Ese permiso general también coincide con rutas users, settings y auditoría,
+    donde reglas más específicas intentan impedir eliminaciones.
+  - products continúa siendo de lectura pública de documentos completos. Debe
+    comprobarse que no se expongan costos u otros campos reservados del cajero.
+
+Firestore concede acceso si cualquiera de las reglas coincidentes permite la
+operación. Un allow delete:false específico no anula un allow genérico verdadero.
+Referencia oficial verificada:
+https://firebase.google.com/docs/rules/rules-behavior
+https://firebase.google.com/docs/firestore/enterprise/security/rules-structure?hl=en
+
+Esto describe las reglas del commit. NO se consultaron datos remotos ni se
+comprobó qué reglas están desplegadas. Tampoco se ejecutó un emulador de reglas.
+
+Corrección puntual necesaria:
+  - Reemplazar el permiso basado en campos aportados por el cliente por una
+    identidad/rol de sincronización verificable.
+  - Quitar los permisos generales que contradicen la protección de usuarios,
+    configuración, caja y auditoría; conservar solo accesos explícitos necesarios.
+  - Comprobar las reglas efectivas en la base nombrada utilizada por la aplicación.
+  - Probar acceso anónimo, cajero, administrador y sincronización autorizada,
+    incluyendo actualización positiva de stock y borrado de datos protegidos.
+  - Verificar en despliegue FIREBASE_SYNC_EMAIL y FIREBASE_SYNC_PASSWORD sin
+    incluir sus valores en mensajes, reportes o repositorios. Su configuración
+    efectiva no se pudo comprobar en esta revisión.
+
+El repositorio sigue siendo público y conserva archivos llamados
+backups/full_backup_pre_purge.json y exportaciones firestore_products/sales/
+sale_items/audit_logs. Se verificaron sus nombres y tamaños en el árbol, no su
+contenido comercial. Revisar su exposición y rotar credenciales que estuvieron
+publicadas; borrar el literal del último commit no lo elimina del historial.
+
+5. EL SCRIPT DE CERTIFICACIÓN TODAVÍA MODIFICA PRODUCCIÓN
+
+Ubicación: scripts/verify_zero_defect_suite.cjs, líneas 121–134.
+
+Antes de crear la copia temporal, abre gtr_pos.db y gtr_pos_sandbox.db con acceso
+de escritura y ejecuta DROP/CREATE TRIGGER sobre ambas. No exige --execute.
+
+Z04 reprodujo la inicialización con módulos ficticios: dos aperturas con escritura
+y dos ejecuciones de cambios de triggers, antes de la primera copia. No se abrió
+ningún archivo real. Esto prueba la conducta del script, no que alguien lo haya
+ejecutado en producción. Tampoco demuestra inserción de ventas ficticias en vivo.
+
+La suite también usa comprobaciones de presencia de texto, por ejemplo en ZD-18
+la existencia de nombres de funciones en firestore.rules se considera prueba de
+seguridad. Eso no comprueba que las reglas rechacen operaciones indebidas.
+
+Corrección necesaria: hacer el respaldo consistente y las pruebas sobre una
+copia aislada desde el comienzo. La instalación de triggers de producción debe
+pertenecer a la migración controlada, no a un verificador que aparenta ser de
+lectura. No ejecutar esa suite sobre la base comercial para cerrar esta revisión.
+
+6. QUÉ CORRECCIONES ANTERIORES SÍ QUEDARON COMPROBADAS
+
+- Permisos: eliminar pedidos respeta la revocación y crear pedidos ya no habilita
+  por sí solo editar reservas existentes. Y01 y Y02 cumplen.
+- Pagos: un abono de pedido con la misma clave se registra una sola vez;
+  reintentar un abono grande confirmado recupera su resultado. Y03/Y04 cumplen.
+- Monedas: el formulario toma la moneda de la venta devuelta por el GET actual.
+  Bs 50 sobre USD 10 a tasa 10 deja USD 5 y registra Bs 50 en caja. Y05 cumple.
+  El mensaje de un pago USD informa la reducción correcta de deuda. Y06 cumple.
+- Registros retirados: un pull forzado no reintroduce #399 y una copia local
+  antigua del encabezado es retirada. Y07/Y08 cumplen en sus escenarios previos.
+  Los efectos netos pendientes se explican en la sección 3.
+- Reintentos de ventas guardadas: se recuperan resultados al cambiar la tasa,
+  al migrar desde hashes anteriores y cuando falta la respuesta procesada.
+  D03/D04/Y10/T18 cumplen.
+- Se conservan respuestas de operaciones al migrar el esquema anterior. N01 cumple.
+- Repetir creación de producto o el mismo ingreso de compra con su clave ya no
+  crea otro producto ni repone unidades por segunda vez. N02/T21 cumplen.
+- Los respaldos ya no aceptan la copia incompleta del caso con WAL activo y
+  fallo del respaldo nativo. N03 cumple.
+- La auditoría individual y la del catálogo coinciden en el conteo aprobado del
+  caso anterior; la caché no etiqueta datos viejos con la versión posterior.
+  T11/Q01 cumplen.
+- Se rechaza el exceso combinado de abonos al finalizar un pedido. P06 cumple.
+- La devolución completa de 40 unidades recupera los Bs 32,50 cobrados en el
+  escenario con descuento, sin dejar el residuo anterior de Bs 0,10. Y13 cumple.
+- El formulario nuevo de devolución conserva la clave cuando se pierde la
+  respuesta después del commit: dos solicitudes, una devolución. Z05 cumple.
+- Un commit de nube fallido puede reintentarse; la caché de hashes no marca ese
+  primer envío como completo. Z06 cumple. T09 también cumple en su caso anterior.
+- Los scripts de purga anteriores tienen un modo por defecto que sale antes de
+  abrir producción. La limpieza sin ventas objetivo no cambia stock/caja;
+  la purga remota usa stock actual y termina con error si falla la nube.
+  W09/W10/W11/Y11/Y12 cumplen. El riesgo de la nueva suite es un archivo distinto.
+- El verificador de 30 escenarios ahora calcula fallidos y devuelve error en el
+  caso negativo; el diagnóstico del incidente usa columnas existentes. W12/W15.
+- Las 21 comprobaciones aisladas de búsqueda, precios, carrito y cámara cumplen.
+
+7. DIFERENCIAS ANTERIORES QUE NECESITAN INTERPRETACIÓN
+
+T05/T06: los endpoints todavía aceptan devoluciones y abonos SIN clave. Repetir
+esas solicitudes duplica el efecto: dos devoluciones de 1 unidad o dos abonos
+de Bs 10. Los formularios nuevos envían clave; no se debe afirmar que su flujo
+normal siga fallando por ese caso antiguo. Es necesario controlar clientes PWA
+anteriores y cerrar/rechazar de forma clara los comandos financieros sin clave.
+
+S07: dos SQLite independientes escribiendo al mismo Firestore pierden una venta
+y dejan stock 8 en lugar de 1 en el modelo de dos servidores. La topología real
+no fue verificada. Comprobar cantidad de instancias y persistencia compartida
+antes de asumir que un mutex de un proceso protege a todos los servidores.
+
+E15: el tratamiento de la cola al cambiar de cajero requiere una política
+explícita de autoría. El escenario sigue enviando y retirando la operación de
+otro usuario local; no se presenta como pérdida confirmada de datos productivos.
+
+K02/F10: una petición antigua intenta cambiar stock mediante editar producto.
+La ruta ahora ignora ese stock: responde 200, pero el inventario queda intacto.
+Estas diferencias NO demuestran un ajuste no autorizado ni fallo de atomicidad.
+
+K12: consultar la propia cola offline con costos ocultos responde 200. El test
+antiguo esperaba un bloqueo total; no se observó exposición del costo.
+
+8. CONDICIONES CONCRETAS PARA APROBAR LA OPERACIÓN
+
+1) Corregir asignación de IDs/protecciones para que la caja siga vendiendo al
+   cruzar 437–440 y después de restaurar. Repetir Z01 y el flujo de reserva/offline.
+2) Corregir la recuperación contable y su réplica: Z02/Z03/Z07 deben conservar
+   el stock y caja netos, también al repetir pull o recuperar datos parcialmente.
+3) Cerrar y comprobar las reglas reales de Firestore, manteniendo los permisos
+   del cajero y la sincronización autorizada.
+4) Aislar el verificador nuevo desde su inicio y ejecutar la aceptación sobre
+   datos ficticios o una copia protegida, nunca sembrando ventas en producción.
+5) Completar compilación y tipos con las dependencias del proyecto, confirmar
+   que la versión publicada corresponde al commit validado y probar reintentos
+   desde las PWA utilizadas por cajero/administrador.
+6) Verificar la topología de escritores SQLite y que los saldos productivos
+   actuales coincidan con el inventario físico y las operaciones reales.
+
+No hace falta sumar mejoras visuales ni módulos para cerrar estos puntos.
+La prioridad es continuidad de ventas, recuperación correcta y acceso a los datos.
+Esta revisión no prueba que el despliegue actual esté averiado: prueba que el
+código propuesto aún contiene rutas capaces de producir esos errores y que no
+hay evidencia suficiente para aprobarlo como listo para operar sin esas reservas.

@@ -74,7 +74,7 @@ export default function LoginScreen() {
             optimisticUser = {
                 id: 1,
                 username: cleanUsername,
-                role: isAdminLogin ? 'admin' : 'vendedor',
+                role: isAdminLogin ? 'admin' : 'trabajador',
                 permissions: isAdminLogin ? {
                     view_reports: true,
                     edit_prices: true,

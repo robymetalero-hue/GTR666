@@ -18,6 +18,7 @@ import { createServer as createViteServer } from "vite";
 import jwt from "jsonwebtoken";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
+import Database from "better-sqlite3";
 import { 
   db, 
   getBoliviaISOString, 
@@ -25,7 +26,8 @@ import {
   dbAsyncLocalStorage, 
   isCurrentContextSandbox, 
   getActiveDbPath, 
-  cloneProductionToSandbox 
+  cloneProductionToSandbox,
+  ensureSafeAutoincrementSequence
 } from "./database.ts";
 import { hashPassword, verifyPassword, isPasswordHashed, getJwtSecret } from "./authSecurity.ts";
 import { normalizeProductName } from "./src/utils/productUtils.ts";
@@ -6561,13 +6563,16 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         }))
       })).digest('hex');
 
-      if (clientOpId) {
-        const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
+      // T05: Synthesize deterministic short-window operation ID when legacy client omits client_operation_id
+      const effectiveClientOpId = clientOpId || `auto_refund_${Number(sale_id)}_${refundPayloadHash.slice(0, 24)}_${Math.floor(Date.now() / 15000)}`;
+
+      if (effectiveClientOpId) {
+        const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(effectiveClientOpId) as any;
         if (existingOp && existingOp.response_body) {
           if (existingOp.payload_hash && existingOp.payload_hash !== refundPayloadHash) {
             return res.status(409).json({
               error: "Conflicto: la clave de operación de devolución ya fue utilizada con artículos o cantidades diferentes.",
-              client_operation_id: clientOpId
+              client_operation_id: effectiveClientOpId
             });
           }
           return res.status(200).json({ ...JSON.parse(existingOp.response_body), isDuplicate: true });
@@ -6579,8 +6584,8 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
       const refundTrx = db.transaction(() => {
         // F03 & T05: Check processed_operations inside transaction with payload_hash verification
-        if (clientOpId) {
-          const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
+        if (effectiveClientOpId) {
+          const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(effectiveClientOpId) as any;
           if (existingOp && existingOp.response_body) {
             if (existingOp.payload_hash && existingOp.payload_hash !== refundPayloadHash) {
               const conflictErr = new Error("CONFLICT_409");
@@ -6590,6 +6595,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
             return { ...JSON.parse(existingOp.response_body), isDuplicate: true };
           }
         }
+        ensureSafeAutoincrementSequence(db, ['sale_returns', 'cash_movements']);
 
         const nowIso = getBoliviaISOString();
         // Find original sale to know the seller, client, total, currency, rate and discount (F01, F02)
@@ -6696,7 +6702,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           totalRefundAmount += itemRefundValue;
 
           // T04: Unique per-item client operation id to avoid collision on multi-item returns
-          const itemClientOpId = clientOpId ? `${clientOpId}_item_${saleItem.id}` : null;
+          const itemClientOpId = effectiveClientOpId ? `${effectiveClientOpId}_item_${saleItem.id}` : null;
 
           // FASE 4: Registrar en la tabla dedicada `sale_returns` SIN alterar el comprobante original de venta
           const returnInsert = db.prepare(`
@@ -6912,12 +6918,12 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           refAccId = accRow?.id;
         }
 
-        if (clientOpId) {
+        if (effectiveClientOpId) {
           try {
             db.prepare(`
               INSERT INTO processed_operations (client_operation_id, operation_type, payload_hash, response_body, status, created_at)
               VALUES (?, 'refund', ?, ?, 'completed', ?)
-            `).run(clientOpId, refundPayloadHash, JSON.stringify({ success: true, totalRefundAmount, pointsReverted, inventoryReconciliation: reconciledItems }), nowIso);
+            `).run(effectiveClientOpId, refundPayloadHash, JSON.stringify({ success: true, totalRefundAmount, pointsReverted, inventoryReconciliation: reconciledItems }), nowIso);
           } catch (_) {}
         }
 
@@ -7362,6 +7368,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           }
 
           const nowIso = getBoliviaISOString();
+          ensureSafeAutoincrementSequence(db, ['sales', 'sale_items', 'cash_movements', 'accounts_receivable', 'credit_payments']);
           const result = saleInsert.run(safeTotal, safeDiscount, payment_method || 'Efectivo', effectiveUserId, client_id || null, currentRate, safeCurrency, notes || null, clientOpId, nowIso);
           const saleId = result.lastInsertRowid;
           const itemIds: any[] = [];
@@ -7753,14 +7760,17 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         payment_method: payment_method || 'Efectivo'
       })).digest('hex');
 
+      // T06: Synthesize deterministic short-window operation ID when legacy client omits client_operation_id
+      const effectiveClientOpId = clientOpId || `auto_arpay_${Number(id)}_${arPayHash.slice(0, 24)}_${Math.floor(Date.now() / 15000)}`;
+
       // Y04: Check processed_operations BEFORE checking remaining_amount so confirmed payment retries return 200 idempotent
-      if (clientOpId) {
-        const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
+      if (effectiveClientOpId) {
+        const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(effectiveClientOpId) as any;
         if (existingOp && existingOp.response_body) {
           if (existingOp.payload_hash && existingOp.payload_hash !== arPayHash) {
             return res.status(409).json({
               error: "Conflicto: la clave de operación de abono ya fue utilizada con parámetros distintos.",
-              client_operation_id: clientOpId
+              client_operation_id: effectiveClientOpId
             });
           }
           return res.status(200).json({ ...JSON.parse(existingOp.response_body), isDuplicate: true });
@@ -7802,9 +7812,9 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const amountInBs = payCurrency === 'USD' ? Math.round(actualPayReceived * payRate * 100) / 100 : actualPayReceived;
 
       const txPay = db.transaction(() => {
-        // F07 & Y04: Atomic check in processed_operations
-        if (clientOpId) {
-          const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
+        // F07 & Y04 & T06: Atomic check in processed_operations
+        if (effectiveClientOpId) {
+          const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(effectiveClientOpId) as any;
           if (existingOp && existingOp.response_body) {
             if (existingOp.payload_hash && existingOp.payload_hash !== arPayHash) {
               const conflictErr = new Error("CONFLICT_409");
@@ -7814,6 +7824,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
             return { ...JSON.parse(existingOp.response_body), isDuplicate: true };
           }
         }
+        ensureSafeAutoincrementSequence(db, ['credit_payments', 'cash_movements']);
 
         const paymentNote = notes || (payCurrency !== saleCurrency 
           ? `Abono de ${actualPayReceived} ${payCurrency} (Equivalente a ${actualDebtReduction} ${saleCurrency} a t/c ${payRate})` 
@@ -7823,7 +7834,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         const result = db.prepare(`
           INSERT INTO credit_payments (account_receivable_id, amount, currency, exchange_rate, debt_reduction, payment_method, user_id, notes, client_operation_id)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(id, actualPayReceived, payCurrency, payRate, actualDebtReduction, payment_method || 'Efectivo', user_id || 1, paymentNote, clientOpId);
+        `).run(id, actualPayReceived, payCurrency, payRate, actualDebtReduction, payment_method || 'Efectivo', user_id || 1, paymentNote, effectiveClientOpId);
 
         db.prepare(`
           UPDATE accounts_receivable
@@ -7875,12 +7886,12 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           newStatus
         };
 
-        if (clientOpId) {
+        if (effectiveClientOpId) {
           try {
             db.prepare(`
               INSERT INTO processed_operations (client_operation_id, operation_type, payload_hash, response_body, status, created_at)
               VALUES (?, 'payment', ?, ?, 'completed', ?)
-            `).run(clientOpId, arPayHash, JSON.stringify(responsePayload), getBoliviaISOString());
+            `).run(effectiveClientOpId, arPayHash, JSON.stringify(responsePayload), getBoliviaISOString());
           } catch (_) {}
         }
 
@@ -8115,6 +8126,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       }
       
       const { pendingSaleId, itemIds } = db.transaction(() => {
+        ensureSafeAutoincrementSequence(db, ['pending_sales', 'pending_sale_items', 'pending_sale_payments']);
         const result = db.prepare(`
           INSERT INTO pending_sales (client_name, destination, client_phone, transport_company, total, discount, exchange_rate, currency, status, paid_amount, order_type, valid_until, reserve_stock, notes)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pendiente', ?, ?, ?, ?, ?)
@@ -8483,14 +8495,17 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         payment_method: payment_method || 'Efectivo'
       })).digest('hex');
 
+      // T06: Synthesize deterministic short-window operation ID when legacy client omits client_operation_id
+      const effectiveClientOpId = clientOpId || `auto_pendpay_${Number(id)}_${pendingPayHash.slice(0, 24)}_${Math.floor(Date.now() / 15000)}`;
+
       // Y03: Check processed_operations BEFORE checking sale status or remaining balance
-      if (clientOpId) {
-        const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
+      if (effectiveClientOpId) {
+        const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(effectiveClientOpId) as any;
         if (existingOp && existingOp.response_body) {
           if (existingOp.payload_hash && existingOp.payload_hash !== pendingPayHash) {
             return res.status(409).json({
               error: "Conflicto: la clave de operación de abono a pedido ya fue utilizada con parámetros diferentes.",
-              client_operation_id: clientOpId
+              client_operation_id: effectiveClientOpId
             });
           }
           return res.status(200).json({ ...JSON.parse(existingOp.response_body), isDuplicate: true });
@@ -8515,8 +8530,8 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const newRemainingAmount = Math.max(0, Math.round((totalAmount - newPaidAmount) * 100) / 100);
       
       const txPendingPay = db.transaction(() => {
-        if (clientOpId) {
-          const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
+        if (effectiveClientOpId) {
+          const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(effectiveClientOpId) as any;
           if (existingOp && existingOp.response_body) {
             if (existingOp.payload_hash && existingOp.payload_hash !== pendingPayHash) {
               const conflictErr = new Error("CONFLICT_409");
@@ -8526,6 +8541,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
             return { ...JSON.parse(existingOp.response_body), isDuplicate: true };
           }
         }
+        ensureSafeAutoincrementSequence(db, ['pending_sale_payments']);
 
         db.prepare(`UPDATE pending_sales SET paid_amount = ? WHERE id = ?`).run(newPaidAmount, id);
         db.prepare(`
@@ -8534,11 +8550,11 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         `).run(id, actualAccepted, payment_method || 'Efectivo', effectiveOperatorId, notes || 'Abono registrado');
 
         const resBody = { success: true, actualPayment: actualAccepted, newPaidAmount, newRemainingAmount };
-        if (clientOpId) {
+        if (effectiveClientOpId) {
           db.prepare(`
             INSERT INTO processed_operations (client_operation_id, operation_type, payload_hash, response_body, status, created_at)
             VALUES (?, 'pending_payment', ?, ?, 'completed', ?)
-          `).run(clientOpId, pendingPayHash, JSON.stringify(resBody), getBoliviaISOString());
+          `).run(effectiveClientOpId, pendingPayHash, JSON.stringify(resBody), getBoliviaISOString());
         }
         return { ...resBody, isDuplicate: false };
       })();
@@ -8709,6 +8725,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
             return { ...JSON.parse(existingOp.response_body), isDuplicate: true };
           }
         }
+        ensureSafeAutoincrementSequence(db, ['sales', 'sale_items', 'cash_movements', 'accounts_receivable', 'credit_payments']);
 
         // Re-verify pending sale status atomically inside transaction
         const lockedSale = db.prepare('SELECT status, reserve_stock, paid_amount FROM pending_sales WHERE id = ?').get(id) as any;
@@ -9379,6 +9396,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const auditPayloads: any[] = [];
 
       const txResult = db.transaction(() => {
+        ensureSafeAutoincrementSequence(db, ['sales', 'sale_items', 'cash_movements', 'accounts_receivable', 'credit_payments']);
         // 1. Insert into sales
         const notesWithAudit = `${pendingSale.notes ? pendingSale.notes + ' | ' : ''}[Offline Autorizado por ${adminName}]`;
         const sRes = saleInsert.run(

@@ -170,54 +170,48 @@ export function runDatabaseMigrations(targetDb: Database.Database) {
       console.log("[Database Migration] Added initial_abono column to offline_pending_sales.");
     }
   } catch (e: any) {}
+}
 
+export function ensureSafeAutoincrementSequence(
+  targetDb: Database.Database = db,
+  tables: string[] = [
+    'sales',
+    'sale_items',
+    'cash_movements',
+    'pending_sales',
+    'pending_sale_items',
+    'pending_sale_payments',
+    'accounts_receivable',
+    'credit_payments',
+    'sale_returns'
+  ]
+): void {
   try {
-    const remRow = targetDb.prepare("SELECT value FROM settings WHERE key = 'incident_399_remediation_state'").get() as any;
-    if (remRow && remRow.value) {
-      const p1Log = targetDb.prepare("SELECT COUNT(*) as c FROM inventory_audit_logs WHERE reference = 'INCIDENT_399' AND product_id = 1").get() as any;
-      if ((p1Log?.c || 0) === 0) {
-        targetDb.prepare(`
-          INSERT INTO inventory_audit_logs (product_id, product_name, product_sku, type, quantity, price, user_id, username, reference, notes, created_at)
-          VALUES (1, 'MOUSE LOGITECH SUPER LIGTH 2', '1', 'ajuste', 1, 99, 4, 'admin', 'INCIDENT_399', 'Restitución administrativa por remediación incidente #399 (1 u. en venta de prueba #404)', '2026-10-27T12:30:00-04:00')
-        `).run();
-      }
-      const p5Log = targetDb.prepare("SELECT COUNT(*) as c FROM inventory_audit_logs WHERE reference = 'INCIDENT_399' AND product_id = 5").get() as any;
-      if ((p5Log?.c || 0) === 0) {
-        targetDb.prepare(`
-          INSERT INTO inventory_audit_logs (product_id, product_name, product_sku, type, quantity, price, user_id, username, reference, notes, created_at)
-          VALUES (5, 'Hp goma/metal 16gb', '5', 'ajuste', 24, 58, 4, 'admin', 'INCIDENT_399', 'Restitución administrativa por remediación incidente #399 (24 u. netas en ventas de prueba)', '2026-10-27T12:30:00-04:00')
-        `).run();
-      }
-      const sysLog = targetDb.prepare("SELECT id FROM system_audit_logs WHERE action = 'INCIDENT_REMEDIATION' LIMIT 1").get() as any;
-      if (!sysLog) {
-        targetDb.prepare(`
-          INSERT INTO system_audit_logs (
-            event_type, category, module, action, severity,
-            entity_type, entity_id, user_id, user_name, user_role,
-            reason, result, status, metadata, created_at
-          ) VALUES (
-            'ADMIN_INTERVENTION', 'AUDIT', 'SALES', 'INCIDENT_REMEDIATION', 'HIGH',
-            'sales', '399-428', 4, 'admin', 'admin',
-            'Remediación incidente #399: retiro de ventas de prueba y preservación de #398 y #424',
-            'SUCCESS', 'COMPLETED', ?, '2026-10-27T12:30:00-04:00'
-          )
-        `).run(JSON.stringify({
-          incident_id: 'INCIDENT_399_20261027',
-          preserved_sale_398: { id: 398, total: 2150, user: 'maria', items: 40 },
-          preserved_sale_424: { id: 424, total: 610, user: 'maria', items: 20 }
-        }));
-      }
-      const backupDir = path.resolve(process.cwd(), 'backups');
-      if (!fs.existsSync(backupDir)) {
-        fs.mkdirSync(backupDir, { recursive: true });
-      }
-      const existingBackups = fs.readdirSync(backupDir).filter(f => f.startsWith('incident_399_pre_clean_'));
-      if (existingBackups.length === 0 && fs.existsSync(prodDbPath)) {
-        const snapPath = path.resolve(backupDir, 'incident_399_pre_clean_2026-10-27T12-30-00Z.db');
-        fs.copyFileSync(prodDbPath, snapPath);
+    for (const table of tables) {
+      const maxTableRow = targetDb.prepare(`SELECT COALESCE(MAX(id), 0) as max_id FROM ${table}`).get() as any;
+      const maxDeletedRow = targetDb.prepare(`
+        SELECT COALESCE(MAX(CAST(record_id AS INTEGER)), 0) as max_del_id
+        FROM deleted_records
+        WHERE table_name = ? AND record_id GLOB '[0-9]*' AND NOT (record_id GLOB '*[^0-9]*')
+      `).get(table) as any;
+      const seqRow = targetDb.prepare(`SELECT seq FROM sqlite_sequence WHERE name = ?`).get(table) as any;
+
+      const maxId = Number(maxTableRow?.max_id || 0);
+      const maxDelId = Number(maxDeletedRow?.max_del_id || 0);
+      const currentSeq = Number(seqRow?.seq || 0);
+      const targetSeq = Math.max(maxId, maxDelId, currentSeq);
+
+      if (targetSeq > 0) {
+        if (seqRow) {
+          if (targetSeq > currentSeq) {
+            targetDb.prepare(`UPDATE sqlite_sequence SET seq = ? WHERE name = ?`).run(targetSeq, table);
+          }
+        } else if (maxDelId > maxId) {
+          targetDb.prepare(`INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)`).run(table, targetSeq);
+        }
       }
     }
-  } catch (e: any) {}
+  } catch (_) {}
 }
 
 
@@ -949,12 +943,11 @@ try {
     DROP TRIGGER IF EXISTS trg_block_ghost_sales;
     CREATE TRIGGER IF NOT EXISTS trg_block_ghost_sales
     BEFORE INSERT ON sales
-    WHEN (NEW.id IS NOT NULL AND (
-      NEW.id IN (437, 438, 439, 440)
-      OR EXISTS (SELECT 1 FROM deleted_records WHERE table_name = 'sales' AND record_id = CAST(NEW.id AS TEXT))
+    WHEN (NEW.id IS NOT NULL AND EXISTS (
+      SELECT 1 FROM deleted_records WHERE table_name = 'sales' AND record_id = CAST(NEW.id AS TEXT)
     ))
     BEGIN
-      SELECT RAISE(ABORT, 'GHOST_RECORD_BLOCKED: sale is in deleted_records or incident blacklist');
+      SELECT RAISE(ABORT, 'GHOST_RECORD_BLOCKED: sale is in deleted_records');
     END;
 
     DROP TRIGGER IF EXISTS trg_block_ghost_sale_items;
@@ -962,13 +955,10 @@ try {
     BEFORE INSERT ON sale_items
     WHEN (
       (NEW.id IS NOT NULL AND EXISTS (SELECT 1 FROM deleted_records WHERE table_name = 'sale_items' AND record_id = CAST(NEW.id AS TEXT)))
-      OR (NEW.sale_id IS NOT NULL AND (
-        NEW.sale_id IN (437, 438, 439, 440)
-        OR EXISTS (SELECT 1 FROM deleted_records WHERE table_name = 'sales' AND record_id = CAST(NEW.sale_id AS TEXT))
-      ))
+      OR (NEW.sale_id IS NOT NULL AND EXISTS (SELECT 1 FROM deleted_records WHERE table_name = 'sales' AND record_id = CAST(NEW.sale_id AS TEXT)))
     )
     BEGIN
-      SELECT RAISE(ABORT, 'GHOST_RECORD_BLOCKED: sale_item or parent sale is in deleted_records or incident blacklist');
+      SELECT RAISE(ABORT, 'GHOST_RECORD_BLOCKED: sale_item or parent sale is in deleted_records');
     END;
 
     DROP TRIGGER IF EXISTS trg_block_ghost_cash_movements;
@@ -976,13 +966,10 @@ try {
     BEFORE INSERT ON cash_movements
     WHEN (
       (NEW.id IS NOT NULL AND EXISTS (SELECT 1 FROM deleted_records WHERE table_name = 'cash_movements' AND record_id = CAST(NEW.id AS TEXT)))
-      OR (NEW.sale_id IS NOT NULL AND (
-        NEW.sale_id IN (437, 438, 439, 440)
-        OR EXISTS (SELECT 1 FROM deleted_records WHERE table_name = 'sales' AND record_id = CAST(NEW.sale_id AS TEXT))
-      ))
+      OR (NEW.sale_id IS NOT NULL AND EXISTS (SELECT 1 FROM deleted_records WHERE table_name = 'sales' AND record_id = CAST(NEW.sale_id AS TEXT)))
     )
     BEGIN
-      SELECT RAISE(ABORT, 'GHOST_RECORD_BLOCKED: cash_movement or parent sale is in deleted_records or incident blacklist');
+      SELECT RAISE(ABORT, 'GHOST_RECORD_BLOCKED: cash_movement or parent sale is in deleted_records');
     END;
 
     DROP TRIGGER IF EXISTS trg_block_ghost_pending_sales;
@@ -1009,13 +996,10 @@ try {
     BEFORE INSERT ON accounts_receivable
     WHEN (
       (NEW.id IS NOT NULL AND EXISTS (SELECT 1 FROM deleted_records WHERE table_name = 'accounts_receivable' AND record_id = CAST(NEW.id AS TEXT)))
-      OR (NEW.sale_id IS NOT NULL AND (
-        NEW.sale_id IN (437, 438, 439, 440)
-        OR EXISTS (SELECT 1 FROM deleted_records WHERE table_name = 'sales' AND record_id = CAST(NEW.sale_id AS TEXT))
-      ))
+      OR (NEW.sale_id IS NOT NULL AND EXISTS (SELECT 1 FROM deleted_records WHERE table_name = 'sales' AND record_id = CAST(NEW.sale_id AS TEXT)))
     )
     BEGIN
-      SELECT RAISE(ABORT, 'GHOST_RECORD_BLOCKED: accounts_receivable or parent sale is in deleted_records or incident blacklist');
+      SELECT RAISE(ABORT, 'GHOST_RECORD_BLOCKED: accounts_receivable or parent sale is in deleted_records');
     END;
 
     DROP TRIGGER IF EXISTS trg_invariant_product_stock;
@@ -1055,6 +1039,7 @@ try {
 }
 
   runDatabaseMigrations(targetDb);
+  ensureSafeAutoincrementSequence(targetDb);
 // Additive and safe unique indexes with pre-deduplication check
 try {
   const dupSales = targetDb.prepare(`
