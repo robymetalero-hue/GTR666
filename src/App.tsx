@@ -1274,7 +1274,7 @@ function AppLayout() {
                             animate={{ opacity: 1 }}
                             exit={{ opacity: 0 }}
                             transition={{ duration: 0.18 }}
-                            className="fixed inset-0 bg-slate-950/40 backdrop-blur-xs z-40 lg:hidden"
+                            className="fixed inset-0 bg-slate-950/40 backdrop-blur-xs z-40 md:hidden"
                             onClick={() => setMobileSidebarOpen(false)}
                         />
                         
@@ -1285,7 +1285,7 @@ function AppLayout() {
                             animate={{ opacity: 1, y: 0, height: "auto" }}
                             exit={{ opacity: 0, y: -40, height: 0 }}
                             transition={{ type: "spring", stiffness: 350, damping: 28 }}
-                            className="fixed top-14 left-0 right-0 z-40 bg-white dark:bg-[#0c111e]/98 border-b border-slate-200 dark:border-slate-850/90 shadow-2xl overflow-hidden lg:hidden"
+                            className="fixed top-12 sm:top-14 left-0 right-0 z-40 bg-white dark:bg-[#0c111e]/98 border-b border-slate-200 dark:border-slate-850/90 shadow-2xl overflow-hidden md:hidden"
                         >
                             <motion.div 
                                 initial="hidden"
@@ -1299,7 +1299,7 @@ function AppLayout() {
                                         }
                                     }
                                 }}
-                                className="p-4 flex flex-col gap-4 max-h-[82vh] overflow-y-auto"
+                                className="p-4 pb-6 flex flex-col gap-3.5 max-h-[calc(100dvh-7.5rem)] overflow-y-auto touch-momentum"
                             >
                                 {/* PRINCIPAL SECTION */}
                                 <motion.div 
@@ -1467,7 +1467,7 @@ function AppLayout() {
                 
                 {/* Real-time Firestore Sync Fine Progress Bar */}
                 {isSyncing && (
-                    <div className="absolute top-14 lg:top-0 left-0 right-0 h-0.5 bg-indigo-100 dark:bg-indigo-950/20 overflow-hidden z-50">
+                    <div className="absolute top-12 sm:top-14 md:top-0 left-0 right-0 h-0.5 bg-indigo-100 dark:bg-indigo-950/20 overflow-hidden z-50">
                         <motion.div 
                             className="h-full bg-gradient-to-r from-indigo-500 via-purple-500 to-indigo-600"
                             initial={{ width: "0%" }}
@@ -1565,7 +1565,7 @@ function AppLayout() {
                 )}
 
                 {/* Main page view content display */}
-                <main className={`flex-grow flex-1 relative ${isKioskLocked ? 'pb-16 md:pb-0' : 'pb-14 md:pb-0'} ${view === 'pos' ? 'overflow-hidden' : 'overflow-hidden'}`}>
+                <main className={`flex-grow flex-1 relative ${isKioskLocked ? 'pb-16 md:pb-0' : 'pb-14 md:pb-0 landscape-pb-0'} ${view === 'pos' ? 'overflow-hidden' : 'overflow-hidden'}`}>
                     <AnimatePresence mode="wait">
                         <motion.div
                             key={view}

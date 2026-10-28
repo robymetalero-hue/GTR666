@@ -1589,38 +1589,38 @@ export default function CuentasPorCobrarView() {
             {activeTab === 'pendientes' ? (
                 <>
                     {/* Ventas Pendientes KPIs */}
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
-                        <div className="bg-white dark:bg-[#0c111e] border border-slate-200/60 dark:border-slate-850 p-3.5 rounded-2xl flex items-center gap-3.5 shadow-xs">
-                            <div className="w-10 h-10 rounded-xl bg-amber-500/10 flex items-center justify-center text-amber-500 shrink-0">
-                                <Clock size={18} />
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 sm:gap-3.5">
+                        <div className="bg-white dark:bg-[#0c111e] border border-slate-200/60 dark:border-slate-850 p-3 sm:p-3.5 rounded-2xl flex items-center gap-2.5 sm:gap-3.5 shadow-xs">
+                            <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-amber-500/10 flex items-center justify-center text-amber-500 shrink-0">
+                                <Clock size={16} className="sm:w-[18px] sm:h-[18px]" />
                             </div>
-                            <div>
-                                <span className="text-[8.5px] font-black uppercase text-slate-400 block tracking-wider">Con Reserva de Stock</span>
-                                <span className="text-base font-black font-mono text-amber-600 dark:text-amber-400 block mt-0.5">
-                                    {totalReservedCount} Registro(s)
+                            <div className="min-w-0">
+                                <span className="text-[8px] sm:text-[8.5px] font-black uppercase text-slate-400 block tracking-wider truncate">Con Reserva Stock</span>
+                                <span className="text-sm sm:text-base font-black font-mono tabular-nums text-amber-600 dark:text-amber-400 block mt-0.5 truncate">
+                                    {totalReservedCount} Reg.
                                 </span>
                             </div>
                         </div>
 
-                        <div className="bg-white dark:bg-[#0c111e] border border-slate-200/60 dark:border-slate-850 p-3.5 rounded-2xl flex items-center gap-3.5 shadow-xs">
-                            <div className="w-10 h-10 rounded-xl bg-blue-500/10 flex items-center justify-center text-blue-500 shrink-0">
-                                <FileText size={18} />
+                        <div className="bg-white dark:bg-[#0c111e] border border-slate-200/60 dark:border-slate-850 p-3 sm:p-3.5 rounded-2xl flex items-center gap-2.5 sm:gap-3.5 shadow-xs">
+                            <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-blue-500/10 flex items-center justify-center text-blue-500 shrink-0">
+                                <FileText size={16} className="sm:w-[18px] sm:h-[18px]" />
                             </div>
-                            <div>
-                                <span className="text-[8.5px] font-black uppercase text-slate-400 block tracking-wider">Solo Cotización (Sin Reserva)</span>
-                                <span className="text-base font-black font-mono text-blue-600 dark:text-blue-400 block mt-0.5">
-                                    {totalQuotesOnlyCount} Proforma(s)
+                            <div className="min-w-0">
+                                <span className="text-[8px] sm:text-[8.5px] font-black uppercase text-slate-400 block tracking-wider truncate">Solo Cotización</span>
+                                <span className="text-sm sm:text-base font-black font-mono tabular-nums text-blue-600 dark:text-blue-400 block mt-0.5 truncate">
+                                    {totalQuotesOnlyCount} Prof.
                                 </span>
                             </div>
                         </div>
 
-                        <div className="bg-white dark:bg-[#0c111e] border border-slate-200/60 dark:border-slate-850 p-3.5 rounded-2xl flex items-center gap-3.5 shadow-xs">
-                            <div className="w-10 h-10 rounded-xl bg-indigo-500/10 flex items-center justify-center text-indigo-500 shrink-0">
-                                <CircleDollarSign size={18} />
+                        <div className="col-span-2 sm:col-span-1 bg-white dark:bg-[#0c111e] border border-slate-200/60 dark:border-slate-850 p-3 sm:p-3.5 rounded-2xl flex items-center gap-2.5 sm:gap-3.5 shadow-xs">
+                            <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-indigo-500/10 flex items-center justify-center text-indigo-500 shrink-0">
+                                <CircleDollarSign size={16} className="sm:w-[18px] sm:h-[18px]" />
                             </div>
-                            <div>
-                                <span className="text-[8.5px] font-black uppercase text-slate-400 block tracking-wider">Monto Total Estimado</span>
-                                <span className="text-base font-black font-mono text-indigo-600 dark:text-indigo-400 block mt-0.5">
+                            <div className="min-w-0">
+                                <span className="text-[8px] sm:text-[8.5px] font-black uppercase text-slate-400 block tracking-wider truncate">Monto Total Estimado</span>
+                                <span className="text-sm sm:text-base font-black font-mono tabular-nums text-indigo-600 dark:text-indigo-400 block mt-0.5 truncate">
                                     Bs. {totalPendingValueSum.toFixed(2)}
                                 </span>
                             </div>
@@ -1959,26 +1959,26 @@ export default function CuentasPorCobrarView() {
             ) : (
                 <>
                     {/* Cuentas por Cobrar original layout */}
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                        <div className="bg-white dark:bg-[#0c111e] border border-slate-200/60 dark:border-slate-850 p-3.5 rounded-2xl flex items-center gap-3.5 shadow-xs">
-                            <div className="w-10 h-10 rounded-xl bg-rose-500/10 flex items-center justify-center text-rose-500 shrink-0">
-                                <Wallet size={18} />
+                    <div className="grid grid-cols-2 gap-2.5 sm:gap-3.5">
+                        <div className="bg-white dark:bg-[#0c111e] border border-slate-200/60 dark:border-slate-850 p-3 sm:p-3.5 rounded-2xl flex items-center gap-2.5 sm:gap-3.5 shadow-xs">
+                            <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-rose-500/10 flex items-center justify-center text-rose-500 shrink-0">
+                                <Wallet size={16} className="sm:w-[18px] sm:h-[18px]" />
                             </div>
-                            <div>
-                                <span className="text-[8.5px] font-black uppercase text-slate-400 block tracking-wider">Deuda Pendiente General</span>
-                                <span className="text-base font-black font-mono text-rose-600 dark:text-rose-400 block mt-0.5">
+                            <div className="min-w-0">
+                                <span className="text-[8px] sm:text-[8.5px] font-black uppercase text-slate-400 block tracking-wider truncate">Deuda Pendiente</span>
+                                <span className="text-sm sm:text-base font-black font-mono tabular-nums text-rose-600 dark:text-rose-400 block mt-0.5 truncate">
                                     Bs. {totalDeudaPendiente.toFixed(2)}
                                 </span>
                             </div>
                         </div>
 
-                        <div className="bg-white dark:bg-[#0c111e] border border-slate-200/60 dark:border-slate-850 p-3.5 rounded-2xl flex items-center gap-3.5 shadow-xs">
-                            <div className="w-10 h-10 rounded-xl bg-emerald-500/10 flex items-center justify-center text-emerald-500 shrink-0">
-                                <CircleDollarSign size={18} />
+                        <div className="bg-white dark:bg-[#0c111e] border border-slate-200/60 dark:border-slate-850 p-3 sm:p-3.5 rounded-2xl flex items-center gap-2.5 sm:gap-3.5 shadow-xs">
+                            <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-emerald-500/10 flex items-center justify-center text-emerald-500 shrink-0">
+                                <CircleDollarSign size={16} className="sm:w-[18px] sm:h-[18px]" />
                             </div>
-                            <div>
-                                <span className="text-[8.5px] font-black uppercase text-slate-400 block tracking-wider">Abonos Cobrados</span>
-                                <span className="text-base font-black font-mono text-emerald-600 dark:text-emerald-400 block mt-0.5">
+                            <div className="min-w-0">
+                                <span className="text-[8px] sm:text-[8.5px] font-black uppercase text-slate-400 block tracking-wider truncate">Abonos Cobrados</span>
+                                <span className="text-sm sm:text-base font-black font-mono tabular-nums text-emerald-600 dark:text-emerald-400 block mt-0.5 truncate">
                                     Bs. {totalCobrado.toFixed(2)}
                                 </span>
                             </div>
@@ -2184,7 +2184,7 @@ export default function CuentasPorCobrarView() {
                             animate={{ scale: 1, opacity: 1, y: 0 }}
                             exit={{ scale: 0.95, opacity: 0, y: 15 }}
                             transition={{ type: 'spring', stiffness: 350, damping: 25 }}
-                            className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-200 dark:border-slate-850 p-4 sm:p-6 max-w-4xl w-full relative z-10 flex flex-col gap-4 shadow-2xl max-h-[95vh] overflow-hidden text-slate-800 dark:text-white"
+                            className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-200 dark:border-slate-850 p-4 sm:p-6 max-w-4xl w-full relative z-10 flex flex-col gap-4 shadow-2xl max-h-[92dvh] modal-landscape-compact overflow-hidden text-slate-800 dark:text-white"
                         >
                             <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-850/60 shrink-0">
                                 <div className="flex items-center gap-2 text-amber-500">
@@ -2471,7 +2471,7 @@ export default function CuentasPorCobrarView() {
                             animate={{ scale: 1, opacity: 1, y: 0 }}
                             exit={{ scale: 0.95, opacity: 0, y: 15 }}
                             transition={{ type: 'spring', stiffness: 350, damping: 25 }}
-                            className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-205 dark:border-slate-850 p-6 max-w-md w-full relative z-10 flex flex-col gap-4 shadow-2xl text-slate-800 dark:text-white"
+                            className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-205 dark:border-slate-850 p-4 sm:p-6 max-w-md w-full relative z-10 flex flex-col gap-4 shadow-2xl max-h-[92dvh] modal-landscape-compact overflow-y-auto touch-momentum text-slate-800 dark:text-white"
                         >
                             <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-850/60 shrink-0">
                                 <div className="flex items-center gap-2 text-emerald-500">
@@ -2616,7 +2616,7 @@ export default function CuentasPorCobrarView() {
                             animate={{ opacity: 1, scale: 1, y: 0 }}
                             exit={{ opacity: 0, scale: 0.95, y: 15 }}
                             transition={{ type: "spring", stiffness: 350, damping: 28 }}
-                            className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-200 dark:border-slate-850 p-6 max-w-md w-full relative z-10 shadow-2xl flex flex-col gap-4 select-none"
+                            className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-200 dark:border-slate-850 p-4 sm:p-6 max-w-md w-full relative z-10 shadow-2xl flex flex-col gap-4 select-none max-h-[92dvh] modal-landscape-compact overflow-y-auto touch-momentum"
                         >
                             <div className="flex justify-between items-center border-b border-slate-100 dark:border-slate-850/60 pb-3">
                                 <div className="flex items-center gap-2 text-emerald-600">
@@ -2810,7 +2810,7 @@ export default function CuentasPorCobrarView() {
                             animate={{ opacity: 1, scale: 1, y: 0 }}
                             exit={{ opacity: 0, scale: 0.95, y: 15 }}
                             transition={{ type: "spring", stiffness: 350, damping: 28 }}
-                            className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-200 dark:border-slate-850 p-6 max-w-md w-full relative z-10 shadow-2xl flex flex-col gap-4 select-none max-h-[85vh] overflow-y-auto"
+                            className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-200 dark:border-slate-850 p-4 sm:p-6 max-w-md w-full relative z-10 shadow-2xl flex flex-col gap-4 select-none max-h-[92dvh] modal-landscape-compact overflow-y-auto touch-momentum"
                         >
                             <div className="flex justify-between items-center border-b border-slate-100 dark:border-slate-850/60 pb-3">
                                 <div className="flex items-center gap-2 text-indigo-500">
@@ -2914,7 +2914,7 @@ export default function CuentasPorCobrarView() {
                             animate={{ scale: 1, opacity: 1, y: 0 }}
                             exit={{ scale: 0.95, opacity: 0, y: 15 }}
                             transition={{ type: 'spring', stiffness: 350, damping: 25 }}
-                            className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-200 dark:border-slate-850 p-6 max-w-md w-full relative z-10 flex flex-col gap-4 shadow-2xl text-slate-800 dark:text-white"
+                            className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-200 dark:border-slate-850 p-4 sm:p-6 max-w-md w-full relative z-10 flex flex-col gap-4 shadow-2xl max-h-[92dvh] modal-landscape-compact overflow-y-auto touch-momentum text-slate-800 dark:text-white"
                         >
                             <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-850/60 shrink-0">
                                 <div className="flex items-center gap-2 text-indigo-500">
@@ -3031,7 +3031,7 @@ export default function CuentasPorCobrarView() {
                             animate={{ scale: 1, opacity: 1, y: 0 }}
                             exit={{ scale: 0.95, opacity: 0, y: 15 }}
                             transition={{ type: 'spring', stiffness: 350, damping: 25 }}
-                            className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-200 dark:border-slate-850 p-6 max-w-md w-full relative z-10 flex flex-col gap-4 shadow-2xl text-slate-800 dark:text-white select-none"
+                            className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-200 dark:border-slate-850 p-4 sm:p-6 max-w-md w-full relative z-10 flex flex-col gap-4 shadow-2xl max-h-[92dvh] modal-landscape-compact overflow-y-auto touch-momentum text-slate-800 dark:text-white select-none"
                         >
                             <div className="flex justify-between items-center border-b border-slate-100 dark:border-slate-850/60 pb-3">
                                 <div className="flex items-center gap-2 text-indigo-500">

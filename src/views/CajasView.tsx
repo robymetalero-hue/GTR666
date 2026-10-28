@@ -725,8 +725,8 @@ export default function CajasView() {
 
       {/* --- MODAL DETALLE DE CAJA Y LIQUIDACIÓN (SOLO ADMIN/PROPIETARIO) --- */}
       {isDetailModalOpen && selectedAccount && (
-        <div className="fixed inset-0 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
-          <div className="bg-white dark:bg-[#0c111e] rounded-2xl w-full max-w-4xl border border-slate-150 dark:border-slate-850 flex flex-col gap-4 shadow-2xl overflow-hidden max-h-[90vh]">
+        <div className="fixed inset-0 bg-black/75 backdrop-blur-xs flex items-center justify-center p-2.5 sm:p-4 z-50 animate-in fade-in duration-200">
+          <div className="bg-white dark:bg-[#0c111e] rounded-2xl w-full max-w-4xl border border-slate-150 dark:border-slate-850 flex flex-col gap-3 sm:gap-4 shadow-2xl overflow-hidden max-h-[92dvh] modal-landscape-compact">
             
             {/* Header del Modal */}
             <div className="p-5 border-b border-slate-100 dark:border-slate-850/60 flex justify-between items-center bg-slate-50/50 dark:bg-black/10 select-none">
@@ -926,8 +926,8 @@ export default function CajasView() {
 
       {/* --- FORMULARIO DE LIQUIDACIÓN / ARQUEO DE CAJA CIEGA --- */}
       {isSettleFormOpen && selectedAccount && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4 z-[60] animate-in zoom-in-95 duration-200 select-none">
-          <div className="bg-white dark:bg-[#0f1424] rounded-2xl w-full max-w-lg p-6 border border-slate-200 dark:border-slate-850 flex flex-col gap-4 shadow-2xl max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-xs flex items-center justify-center p-2.5 sm:p-4 z-[60] animate-in zoom-in-95 duration-200 select-none">
+          <div className="bg-white dark:bg-[#0f1424] rounded-2xl w-full max-w-lg p-4 sm:p-6 border border-slate-200 dark:border-slate-850 flex flex-col gap-4 shadow-2xl max-h-[92dvh] modal-landscape-compact overflow-y-auto touch-momentum">
             <div className="flex justify-between items-center border-b border-slate-100 dark:border-slate-850 pb-2.5">
               <div className="flex items-center gap-2">
                 <h3 className="font-extrabold text-xs uppercase tracking-wider text-slate-805 dark:text-white">

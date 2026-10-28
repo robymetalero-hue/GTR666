@@ -109,62 +109,62 @@ export function InicioView() {
             </div>
 
             {/* Quick KPI Stats Grid */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
-                <div className="bg-white dark:bg-[#0c111e] p-6 rounded-3xl border border-slate-200/80 dark:border-slate-850 flex flex-col gap-3 shadow-sm hover:shadow-md transition-shadow">
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-5">
+                <div className="bg-white dark:bg-[#0c111e] p-3.5 sm:p-6 rounded-2xl sm:rounded-3xl border border-slate-200/80 dark:border-slate-850 flex flex-col justify-between gap-2 sm:gap-3 shadow-sm hover:shadow-md transition-shadow">
                     <div className="flex justify-between items-start">
-                        <div className="p-3 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 rounded-2xl">
-                            <TrendingUp size={22} />
+                        <div className="p-2 sm:p-3 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 rounded-xl sm:rounded-2xl">
+                            <TrendingUp size={18} className="sm:w-[22px] sm:h-[22px]" />
                         </div>
-                        <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Hoy</span>
+                        <span className="text-[9px] sm:text-[10px] font-black uppercase tracking-widest text-slate-400">Hoy</span>
                     </div>
                     <div>
-                        <span className="text-xs font-bold text-slate-500 dark:text-slate-400">Ventas del Día</span>
-                        <div className="flex items-end gap-2 mt-1">
-                            <span className="text-2xl font-black tracking-tight text-slate-900 dark:text-white">
+                        <span className="text-[11px] sm:text-xs font-bold text-slate-500 dark:text-slate-400 block truncate">Ventas del Día</span>
+                        <div className="flex items-end gap-1.5 mt-0.5 sm:mt-1">
+                            <span className="text-lg sm:text-2xl font-black font-mono tabular-nums tracking-tight text-slate-900 dark:text-white truncate">
                                 {loading ? '...' : formatCurrency(stats.salesToday)}
                             </span>
                         </div>
                     </div>
                 </div>
 
-                <div className="bg-white dark:bg-[#0c111e] p-6 rounded-3xl border border-slate-200/80 dark:border-slate-850 flex flex-col gap-3 shadow-sm hover:shadow-md transition-shadow">
+                <div className="bg-white dark:bg-[#0c111e] p-3.5 sm:p-6 rounded-2xl sm:rounded-3xl border border-slate-200/80 dark:border-slate-850 flex flex-col justify-between gap-2 sm:gap-3 shadow-sm hover:shadow-md transition-shadow">
                     <div className="flex justify-between items-start">
-                        <div className="p-3 bg-blue-500/10 text-blue-600 dark:text-blue-400 rounded-2xl">
-                            <Receipt size={22} />
+                        <div className="p-2 sm:p-3 bg-blue-500/10 text-blue-600 dark:text-blue-400 rounded-xl sm:rounded-2xl">
+                            <Receipt size={18} className="sm:w-[22px] sm:h-[22px]" />
                         </div>
-                        <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Hoy</span>
+                        <span className="text-[9px] sm:text-[10px] font-black uppercase tracking-widest text-slate-400">Hoy</span>
                     </div>
                     <div>
-                        <span className="text-xs font-bold text-slate-500 dark:text-slate-400">Transacciones</span>
-                        <div className="flex items-end gap-2 mt-1">
-                            <span className="text-2xl font-black tracking-tight text-slate-900 dark:text-white">
+                        <span className="text-[11px] sm:text-xs font-bold text-slate-500 dark:text-slate-400 block truncate">Transacciones</span>
+                        <div className="flex items-end gap-1.5 mt-0.5 sm:mt-1">
+                            <span className="text-lg sm:text-2xl font-black font-mono tabular-nums tracking-tight text-slate-900 dark:text-white">
                                 {loading ? '...' : stats.txToday}
                             </span>
                         </div>
                     </div>
                 </div>
 
-                <div className="bg-white dark:bg-[#0c111e] p-6 rounded-3xl border border-slate-200/80 dark:border-slate-850 flex flex-col gap-3 shadow-sm hover:shadow-md transition-shadow">
+                <div className="bg-white dark:bg-[#0c111e] p-3.5 sm:p-6 rounded-2xl sm:rounded-3xl border border-slate-200/80 dark:border-slate-850 flex flex-col justify-between gap-2 sm:gap-3 shadow-sm hover:shadow-md transition-shadow">
                     <div className="flex justify-between items-start">
-                        <div className="p-3 bg-violet-500/10 text-violet-600 dark:text-violet-400 rounded-2xl">
-                            <Folder size={22} />
+                        <div className="p-2 sm:p-3 bg-violet-500/10 text-violet-600 dark:text-violet-400 rounded-xl sm:rounded-2xl">
+                            <Folder size={18} className="sm:w-[22px] sm:h-[22px]" />
                         </div>
                     </div>
                     <div>
-                        <span className="text-xs font-bold text-slate-500 dark:text-slate-400">Inventario Total</span>
-                        <div className="flex items-end gap-2 mt-1">
-                            <span className="text-2xl font-black tracking-tight text-slate-900 dark:text-white">
+                        <span className="text-[11px] sm:text-xs font-bold text-slate-500 dark:text-slate-400 block truncate">Inventario Total</span>
+                        <div className="flex items-baseline gap-1 mt-0.5 sm:mt-1 flex-wrap">
+                            <span className="text-lg sm:text-2xl font-black font-mono tabular-nums tracking-tight text-slate-900 dark:text-white">
                                 {totalItemsInStock}
                             </span>
-                            <span className="text-xs font-bold text-slate-400 mb-1 ml-1">unidades</span>
+                            <span className="text-[10px] sm:text-xs font-bold text-slate-400">uds</span>
                         </div>
                     </div>
                 </div>
 
-                <div className="bg-white dark:bg-[#0c111e] p-6 rounded-3xl border border-slate-200/80 dark:border-slate-850 flex flex-col gap-3 shadow-sm hover:shadow-md transition-shadow">
+                <div className="bg-white dark:bg-[#0c111e] p-3.5 sm:p-6 rounded-2xl sm:rounded-3xl border border-slate-200/80 dark:border-slate-850 flex flex-col justify-between gap-2 sm:gap-3 shadow-sm hover:shadow-md transition-shadow">
                     <div className="flex justify-between items-start">
-                        <div className="p-3 bg-orange-500/10 text-orange-600 dark:text-orange-400 rounded-2xl">
-                            <AlertCircle size={22} />
+                        <div className="p-2 sm:p-3 bg-orange-500/10 text-orange-600 dark:text-orange-400 rounded-xl sm:rounded-2xl">
+                            <AlertCircle size={18} className="sm:w-[22px] sm:h-[22px]" />
                         </div>
                         {lowStockCount > 0 && (
                             <span className="flex h-2.5 w-2.5 relative">
@@ -174,12 +174,12 @@ export function InicioView() {
                         )}
                     </div>
                     <div>
-                        <span className="text-xs font-bold text-slate-500 dark:text-slate-400">Alertas de Stock</span>
-                        <div className="flex items-end gap-2 mt-1">
-                            <span className={`text-2xl font-black tracking-tight ${lowStockCount > 0 ? "text-orange-600 dark:text-orange-500" : "text-slate-900 dark:text-white"}`}>
+                        <span className="text-[11px] sm:text-xs font-bold text-slate-500 dark:text-slate-400 block truncate">Alertas de Stock</span>
+                        <div className="flex items-baseline gap-1 mt-0.5 sm:mt-1 flex-wrap">
+                            <span className={`text-lg sm:text-2xl font-black font-mono tabular-nums tracking-tight ${lowStockCount > 0 ? "text-orange-600 dark:text-orange-500" : "text-slate-900 dark:text-white"}`}>
                                 {lowStockCount}
                             </span>
-                            <span className="text-xs font-bold text-slate-400 mb-1 ml-1">productos</span>
+                            <span className="text-[10px] sm:text-xs font-bold text-slate-400">SKUs</span>
                         </div>
                     </div>
                 </div>
@@ -1255,9 +1255,9 @@ export function HistorialVentasView() {
                     
                     {/* FILTROS INTELIGENTES */}
                     <div className="p-3.5 sm:p-4.5 border-b border-slate-100 dark:border-slate-850/80 bg-slate-50/50 dark:bg-slate-900/30 flex flex-col gap-3">
-                        <div className="flex flex-col sm:flex-row gap-2.5">
+                        <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5">
                             {/* Búsqueda */}
-                            <div className="relative flex-1">
+                            <div className={`relative ${!isKioskLocked ? 'sm:col-span-6' : 'sm:col-span-8'}`}>
                                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-500" size={14} />
                                 <input 
                                     type="text"
@@ -1276,34 +1276,36 @@ export function HistorialVentasView() {
                                 )}
                             </div>
                             
-                            {/* Cajero (Hidden in Kiosk Mode) */}
-                            {!isKioskLocked && (
-                                <div className="w-full sm:w-44 shrink-0">
+                            <div className={`grid ${!isKioskLocked ? 'grid-cols-2 sm:col-span-6' : 'grid-cols-1 sm:col-span-4'} gap-2`}>
+                                {/* Cajero (Hidden in Kiosk Mode) */}
+                                {!isKioskLocked && (
+                                    <div className="w-full min-w-0">
+                                        <select
+                                            value={selectedCashier}
+                                            onChange={(e) => setSelectedCashier(e.target.value)}
+                                            className="w-full px-2.5 py-2 text-xs bg-white dark:bg-[#070c14] border border-slate-200 dark:border-slate-800 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500 text-slate-750 dark:text-slate-200 font-bold cursor-pointer truncate"
+                                        >
+                                            <option value="all">👤 Todos cajeros</option>
+                                            {cashiers.map(c => (
+                                                <option key={c} value={c}>👤 @{c}</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                )}
+
+                                {/* Método de pago */}
+                                <div className="w-full min-w-0">
                                     <select
-                                        value={selectedCashier}
-                                        onChange={(e) => setSelectedCashier(e.target.value)}
-                                        className="w-full px-3 py-2 text-xs bg-white dark:bg-[#070c14] border border-slate-200 dark:border-slate-800 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500 text-slate-750 dark:text-slate-200 font-bold cursor-pointer"
+                                        value={selectedPaymentMethod}
+                                        onChange={(e) => setSelectedPaymentMethod(e.target.value)}
+                                        className="w-full px-2.5 py-2 text-xs bg-white dark:bg-[#070c14] border border-slate-200 dark:border-slate-800 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500 text-slate-750 dark:text-slate-200 font-bold cursor-pointer truncate"
                                     >
-                                        <option value="all">👤 Todos los cajeros</option>
-                                        {cashiers.map(c => (
-                                            <option key={c} value={c}>👤 @{c}</option>
+                                        <option value="all">💳 Todo método</option>
+                                        {paymentMethods.map(m => (
+                                            <option key={m} value={m}>💰 {m}</option>
                                         ))}
                                     </select>
                                 </div>
-                            )}
-
-                            {/* Método de pago */}
-                            <div className="w-full sm:w-44 shrink-0">
-                                <select
-                                    value={selectedPaymentMethod}
-                                    onChange={(e) => setSelectedPaymentMethod(e.target.value)}
-                                    className="w-full px-3 py-2 text-xs bg-white dark:bg-[#070c14] border border-slate-200 dark:border-slate-800 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500 text-slate-750 dark:text-slate-200 font-bold cursor-pointer"
-                                >
-                                    <option value="all">💳 Todos los métodos</option>
-                                    {paymentMethods.map(m => (
-                                        <option key={m} value={m}>💰 {m}</option>
-                                    ))}
-                                </select>
                             </div>
                         </div>
 

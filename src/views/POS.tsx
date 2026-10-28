@@ -2736,7 +2736,7 @@ export default function POS() {
     };
 
     return (
-        <div className="flex flex-col lg:flex-row h-full relative overflow-hidden bg-neutral-50/50 dark:bg-[#070a10]">
+        <div className="flex flex-col lg:flex-row pos-landscape-split h-full relative overflow-hidden bg-neutral-50/50 dark:bg-[#070a10]">
             
             <AnimatePresence>
                 {receiptConfirmation && (
@@ -2854,7 +2854,7 @@ export default function POS() {
             <div className="flex-grow flex-1 flex flex-col h-full overflow-hidden">
                 
                 {/* FIXED STICKY HEADER PANEL FOR MOBILE AND DESKTOP */}
-                <div className="px-3.5 pt-3.5 pb-2.5 md:px-5 md:pt-5 bg-neutral-50/95 dark:bg-[#070a10]/95 backdrop-blur-md border-b border-slate-200/50 dark:border-slate-850/30 flex flex-col gap-3 shrink-0 z-10 select-none">
+                <div className="px-3 pt-2.5 pb-2 sm:px-3.5 sm:pt-3.5 sm:pb-2.5 md:px-5 md:pt-4 bg-neutral-50/95 dark:bg-[#070a10]/95 backdrop-blur-md border-b border-slate-200/50 dark:border-slate-850/30 flex flex-col gap-2 sm:gap-3 pos-landscape-header shrink-0 z-10 select-none">
                     
                     {/* Upper active ticket tabs matching Image 2 */}
                     <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between shrink-0">
@@ -3036,7 +3036,7 @@ export default function POS() {
 
                 {/* SCROLLABLE PRODUCT LIST */}
                 <div 
-                    className="flex-1 p-3 sm:p-4 md:p-6 overflow-y-auto flex flex-col gap-4 pb-28 lg:pb-6 touch-momentum"
+                    className="flex-1 p-3 sm:p-4 md:p-6 overflow-y-auto flex flex-col gap-4 pb-32 md:pb-20 lg:pb-6 touch-momentum"
                     style={catalogScroll.style}
                     {...catalogScroll.touchHandlers}
                 >
@@ -3542,13 +3542,13 @@ export default function POS() {
             </div>
         </div>
 
-            {/* Desktop persistent Sidebar checkouts pane */}
-            <div className="hidden lg:flex w-[330px] xl:w-[370px] 2xl:w-[410px] bg-white dark:bg-[#0a0f1b] border-l border-slate-200/60 dark:border-slate-850 flex-col shrink-0">
+            {/* Desktop & Landscape persistent Sidebar checkouts pane */}
+            <div className="hidden lg:flex pos-landscape-sidebar w-[330px] xl:w-[370px] 2xl:w-[410px] bg-white dark:bg-[#0a0f1b] border-l border-slate-200/60 dark:border-slate-850 flex-col shrink-0">
                 {renderCartPane(false)}
             </div>
 
             {/* Sticky Mobile Bottom Bar */}
-            <div className={`lg:hidden fixed left-0 right-0 z-40 bg-white/95 dark:bg-[#0a0f1b]/95 backdrop-blur-md border-t border-slate-200/60 dark:border-slate-800 p-3.5 flex items-center justify-between shadow-2xl px-5 animate-in fade-in slide-in-from-bottom-6 ${isKioskLocked ? "bottom-16" : "bottom-0"}`}>
+            <div className={`lg:hidden pos-landscape-hide-bar fixed left-0 right-0 z-40 bg-white/95 dark:bg-[#0a0f1b]/95 backdrop-blur-md border-t border-slate-200/60 dark:border-slate-800 p-2.5 sm:p-3.5 flex items-center justify-between shadow-2xl px-4 sm:px-5 animate-in fade-in slide-in-from-bottom-6 ${isKioskLocked ? "bottom-16" : "bottom-14 md:bottom-0 landscape-bottom-0"}`}>
                 <div 
                     onClick={() => setIsMobileCartOpen(true)}
                     className="flex items-center gap-3 cursor-pointer"
@@ -3758,7 +3758,7 @@ export default function POS() {
                             animate={{ scale: 1, opacity: 1, y: 0 }}
                             exit={{ scale: 0.95, opacity: 0, y: 15 }}
                             transition={{ type: 'spring', stiffness: 350, damping: 25 }}
-                            className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-205 dark:border-slate-850 p-6 max-w-sm w-full relative z-10 flex flex-col gap-4 shadow-2xl max-h-[90vh] overflow-hidden select-none"
+                            className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-205 dark:border-slate-850 p-5 sm:p-6 max-w-sm w-full relative z-10 flex flex-col gap-3.5 shadow-2xl max-h-[92dvh] modal-landscape-compact overflow-hidden select-none"
                         >
                             {/* Modal Header */}
                             <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-850/60 shrink-0">
@@ -3914,7 +3914,7 @@ export default function POS() {
                             animate={{ scale: 1, opacity: 1, y: 0 }}
                             exit={{ scale: 0.95, opacity: 0, y: 15 }}
                             transition={{ type: 'spring', stiffness: 350, damping: 25 }}
-                            className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-205 dark:border-slate-850 p-5 sm:p-6 max-w-lg w-full relative z-10 flex flex-col gap-3.5 shadow-2xl select-none text-slate-800 dark:text-white my-auto max-h-[94vh] overflow-y-auto"
+                            className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-205 dark:border-slate-850 p-4 sm:p-6 max-w-lg w-full relative z-10 flex flex-col gap-3 shadow-2xl select-none text-slate-800 dark:text-white my-auto max-h-[92dvh] modal-landscape-compact overflow-y-auto touch-momentum"
                         >
                             <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-850/60 shrink-0">
                                 <div className="flex items-center gap-2 text-amber-500">
@@ -4145,7 +4145,7 @@ export default function POS() {
                             animate={{ scale: 1, opacity: 1, y: 0 }}
                             exit={{ scale: 0.95, opacity: 0, y: 15 }}
                             transition={{ type: 'spring', stiffness: 350, damping: 25 }}
-                            className="bg-white dark:bg-[#0c111e] rounded-2xl border border-slate-205 dark:border-slate-850 p-4 sm:p-5 max-w-3xl w-full relative z-10 flex flex-col gap-3 shadow-2xl max-h-[95vh] overflow-y-auto select-none"
+                            className="bg-white dark:bg-[#0c111e] rounded-2xl border border-slate-205 dark:border-slate-850 p-4 sm:p-5 max-w-3xl w-full relative z-10 flex flex-col gap-3 shadow-2xl max-h-[92dvh] modal-landscape-compact overflow-y-auto touch-momentum select-none my-auto"
                         >
                             {/* Modal Header */}
                             <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-850/60 shrink-0">

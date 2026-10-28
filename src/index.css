@@ -189,7 +189,7 @@
 }
 
 /* Mobile landscape compact utilities for short height screens */
-@media (max-height: 520px) and (orientation: landscape) {
+@media (max-height: 540px) and (orientation: landscape) {
   .landscape-compact-header {
     height: 2.75rem !important;
   }
@@ -199,6 +199,51 @@
   }
   .landscape-hide {
     display: none !important;
+  }
+  .landscape-pb-0 {
+    padding-bottom: 0 !important;
+  }
+  .landscape-bottom-0 {
+    bottom: 0 !important;
+  }
+  .pos-landscape-header {
+    padding-top: 0.35rem !important;
+    padding-bottom: 0.35rem !important;
+    gap: 0.35rem !important;
+  }
+  .modal-landscape-compact {
+    max-height: 94dvh !important;
+    padding: 0.85rem !important;
+    gap: 0.5rem !important;
+  }
+}
+
+/* Side-by-side POS split view on landscape phones/tablets >= 700px wide */
+@media (min-width: 700px) and (orientation: landscape) {
+  .pos-landscape-split {
+    flex-direction: row !important;
+  }
+  .pos-landscape-sidebar {
+    display: flex !important;
+    width: 290px;
+  }
+  .pos-landscape-hide-bar {
+    display: none !important;
+  }
+}
+@media (min-width: 1024px) {
+  .pos-landscape-sidebar {
+    width: 330px;
+  }
+}
+@media (min-width: 1280px) {
+  .pos-landscape-sidebar {
+    width: 370px;
+  }
+}
+@media (min-width: 1536px) {
+  .pos-landscape-sidebar {
+    width: 410px;
   }
 }
 

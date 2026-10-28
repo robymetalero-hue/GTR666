@@ -385,20 +385,20 @@ export default function Dashboard() {
             </div>
 
             {/* Sub-Filters Bar (Caja/Vendedor & Método de Pago) */}
-            <div className="bg-white/60 dark:bg-[#0c111e]/80 p-3 rounded-2xl border border-slate-200/60 dark:border-slate-850/60 flex flex-wrap items-center justify-between gap-3 text-xs">
-                <div className="flex flex-wrap items-center gap-3">
-                    <span className="text-[10px] font-black uppercase text-slate-400 flex items-center gap-1.5 shrink-0">
+            <div className="bg-white/60 dark:bg-[#0c111e]/80 p-2.5 sm:p-3 rounded-2xl border border-slate-200/60 dark:border-slate-850/60 flex flex-wrap items-center justify-between gap-2.5 sm:gap-3 text-xs">
+                <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2 sm:gap-3 w-full sm:w-auto">
+                    <span className="col-span-2 sm:col-span-1 text-[10px] font-black uppercase text-slate-400 flex items-center gap-1.5 shrink-0">
                         <Filter size={12} className="text-blue-500" />
                         Filtros de Caja:
                     </span>
 
                     {/* Seller / Caja Dropdown */}
-                    <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 px-3 py-1.5 rounded-xl">
-                        <Users size={13} className="text-slate-400" />
+                    <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 px-2.5 sm:px-3 py-1.5 rounded-xl min-w-0">
+                        <Users size={13} className="text-slate-400 shrink-0" />
                         <select
                             value={sellerId}
                             onChange={(e) => setSellerId(e.target.value)}
-                            className="bg-transparent text-xs font-extrabold text-slate-800 dark:text-slate-200 outline-none cursor-pointer"
+                            className="bg-transparent text-[11px] sm:text-xs font-extrabold text-slate-800 dark:text-slate-200 outline-none cursor-pointer w-full truncate"
                         >
                             <option value="all">Todas las Cajas / Vendedores</option>
                             {stats.sellers?.map(s => (
@@ -410,12 +410,12 @@ export default function Dashboard() {
                     </div>
 
                     {/* Period Selector */}
-                    <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 px-3 py-1.5 rounded-xl">
-                        <CreditCard size={13} className="text-slate-400" />
+                    <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 px-2.5 sm:px-3 py-1.5 rounded-xl min-w-0">
+                        <CreditCard size={13} className="text-slate-400 shrink-0" />
                         <select
                             value={paymentMethodFilter}
                             onChange={(e) => setPaymentMethodFilter(e.target.value)}
-                            className="bg-transparent text-xs font-extrabold text-slate-800 dark:text-slate-200 outline-none cursor-pointer"
+                            className="bg-transparent text-[11px] sm:text-xs font-extrabold text-slate-800 dark:text-slate-200 outline-none cursor-pointer w-full truncate"
                         >
                             <option value="all">Todos los Métodos de Pago</option>
                             <option value="Efectivo">Efectivo</option>
@@ -438,38 +438,38 @@ export default function Dashboard() {
             </div>
 
             {/* KPIs Pro Cards Grid */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-4">
                 
                 {/* 1. Total Sales Period */}
-                <div className="bg-white dark:bg-[#0c111e] p-5 rounded-3xl border border-slate-200/70 dark:border-slate-850 shadow-xs relative overflow-hidden group hover:border-emerald-500/40 transition-all">
-                    <div className="flex items-center justify-between mb-2">
-                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Venta Total Periodo</span>
-                        <div className="w-10 h-10 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 rounded-2xl flex items-center justify-center border border-emerald-500/10">
-                            <TrendingUp size={18} />
+                <div className="bg-white dark:bg-[#0c111e] p-3.5 sm:p-5 rounded-2xl sm:rounded-3xl border border-slate-200/70 dark:border-slate-850 shadow-xs relative overflow-hidden group hover:border-emerald-500/40 transition-all">
+                    <div className="flex items-center justify-between mb-1.5 sm:mb-2 gap-1">
+                        <span className="text-[9px] sm:text-[10px] font-black text-slate-400 uppercase tracking-wider sm:tracking-widest leading-tight">Venta Total Periodo</span>
+                        <div className="w-7 h-7 sm:w-10 sm:h-10 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 rounded-xl sm:rounded-2xl flex items-center justify-center border border-emerald-500/10 shrink-0">
+                            <TrendingUp size={15} className="sm:w-[18px] sm:h-[18px]" />
                         </div>
                     </div>
                     {loading ? (
-                        <div className="h-8 w-28 bg-slate-100 dark:bg-slate-800 rounded-xl animate-pulse mt-2"></div>
+                        <div className="h-7 sm:h-8 w-24 sm:w-28 bg-slate-100 dark:bg-slate-800 rounded-xl animate-pulse mt-2"></div>
                     ) : (
                         <>
-                            <span className="text-2xl font-black font-mono text-emerald-600 dark:text-emerald-400 tracking-tight block">
+                            <span className="text-base sm:text-2xl font-black font-mono tabular-nums text-emerald-600 dark:text-emerald-400 tracking-tight block truncate">
                                 Bs. {(stats.periodSummary?.totalSales || 0).toFixed(2)}
                             </span>
-                            <div className="flex items-center justify-between mt-2.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400">
-                                <span className="flex items-center gap-1 font-bold">
+                            <div className="flex flex-wrap items-center justify-between gap-1 mt-1.5 sm:mt-2.5 text-[10px] sm:text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                                <span className="flex items-center gap-0.5 font-bold">
                                     {stats.periodSummary?.growthSalesPct >= 0 ? (
-                                        <span className="text-emerald-600 dark:text-emerald-400 flex items-center font-extrabold">
-                                            <ArrowUpRight size={14} /> +{(stats.periodSummary?.growthSalesPct || 0).toFixed(1)}%
+                                        <span className="text-emerald-600 dark:text-emerald-400 flex items-center font-extrabold tabular-nums">
+                                            <ArrowUpRight size={12} /> +{(stats.periodSummary?.growthSalesPct || 0).toFixed(1)}%
                                         </span>
                                     ) : (
-                                        <span className="text-rose-500 flex items-center font-extrabold">
-                                            <ArrowDownRight size={14} /> {(stats.periodSummary?.growthSalesPct || 0).toFixed(1)}%
+                                        <span className="text-rose-500 flex items-center font-extrabold tabular-nums">
+                                            <ArrowDownRight size={12} /> {(stats.periodSummary?.growthSalesPct || 0).toFixed(1)}%
                                         </span>
                                     )}
-                                    <span className="text-[10px] text-slate-400 font-normal">vs periodo prev.</span>
+                                    <span className="text-[9px] text-slate-400 font-normal hidden sm:inline">vs prev.</span>
                                 </span>
-                                <span className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 px-2 py-0.5 rounded-lg text-[10px] font-extrabold">
-                                    {stats.periodSummary?.totalTx || 0} ventas
+                                <span className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 px-1.5 sm:px-2 py-0.5 rounded-lg text-[9px] sm:text-[10px] font-extrabold tabular-nums">
+                                    {stats.periodSummary?.totalTx || 0} vent.
                                 </span>
                             </div>
                         </>
@@ -478,25 +478,25 @@ export default function Dashboard() {
 
                 {/* 2. Total Net Profit & Margin */}
                 {user?.role === 'admin' ? (
-                    <div className="bg-white dark:bg-[#0c111e] p-5 rounded-3xl border border-slate-200/70 dark:border-slate-850 shadow-xs relative overflow-hidden group hover:border-blue-500/40 transition-all">
-                        <div className="flex items-center justify-between mb-2">
-                            <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Utilidad Estimada</span>
-                            <div className="w-10 h-10 bg-blue-500/10 text-blue-600 dark:text-blue-400 rounded-2xl flex items-center justify-center border border-blue-500/10">
-                                <DollarSign size={18} />
+                    <div className="bg-white dark:bg-[#0c111e] p-3.5 sm:p-5 rounded-2xl sm:rounded-3xl border border-slate-200/70 dark:border-slate-850 shadow-xs relative overflow-hidden group hover:border-blue-500/40 transition-all">
+                        <div className="flex items-center justify-between mb-1.5 sm:mb-2 gap-1">
+                            <span className="text-[9px] sm:text-[10px] font-black text-slate-400 uppercase tracking-wider sm:tracking-widest leading-tight">Utilidad Estimada</span>
+                            <div className="w-7 h-7 sm:w-10 sm:h-10 bg-blue-500/10 text-blue-600 dark:text-blue-400 rounded-xl sm:rounded-2xl flex items-center justify-center border border-blue-500/10 shrink-0">
+                                <DollarSign size={15} className="sm:w-[18px] sm:h-[18px]" />
                             </div>
                         </div>
                         {loading ? (
-                            <div className="h-8 w-28 bg-slate-100 dark:bg-slate-800 rounded-xl animate-pulse mt-2"></div>
+                            <div className="h-7 sm:h-8 w-24 sm:w-28 bg-slate-100 dark:bg-slate-800 rounded-xl animate-pulse mt-2"></div>
                         ) : (
                             <>
-                                <span className="text-2xl font-black font-mono text-blue-600 dark:text-blue-400 tracking-tight block">
+                                <span className="text-base sm:text-2xl font-black font-mono tabular-nums text-blue-600 dark:text-blue-400 tracking-tight block truncate">
                                     Bs. {(stats.periodSummary?.totalProfit || 0).toFixed(2)}
                                 </span>
-                                <div className="flex items-center justify-between mt-2.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400">
-                                    <span className="bg-blue-500/10 text-blue-700 dark:text-blue-300 px-2 py-0.5 rounded-lg text-[10px] font-extrabold flex items-center gap-1">
-                                        <Percent size={11} /> {(stats.periodSummary?.profitMarginPct || 0).toFixed(1)}% Margen
+                                <div className="flex flex-wrap items-center justify-between gap-1 mt-1.5 sm:mt-2.5 text-[10px] sm:text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                                    <span className="bg-blue-500/10 text-blue-700 dark:text-blue-300 px-1.5 sm:px-2 py-0.5 rounded-lg text-[9px] sm:text-[10px] font-extrabold flex items-center gap-0.5 tabular-nums">
+                                        <Percent size={10} /> {(stats.periodSummary?.profitMarginPct || 0).toFixed(1)}%
                                     </span>
-                                    <span className="text-[10px] font-extrabold text-slate-400">
+                                    <span className="text-[9px] sm:text-[10px] font-extrabold text-slate-400 tabular-nums">
                                         {(stats.periodSummary?.growthProfitPct || 0) >= 0 ? '+' : ''}{(stats.periodSummary?.growthProfitPct || 0).toFixed(1)}% util.
                                     </span>
                                 </div>
@@ -504,33 +504,33 @@ export default function Dashboard() {
                         )}
                     </div>
                 ) : (
-                    <div className="bg-white dark:bg-[#0c111e] p-5 rounded-3xl border border-slate-200/70 dark:border-slate-850 shadow-xs relative opacity-70">
-                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest block mb-2">Utilidad Estimada</span>
-                        <div className="text-xs text-slate-400 italic">Restringido a administradores</div>
+                    <div className="bg-white dark:bg-[#0c111e] p-3.5 sm:p-5 rounded-2xl sm:rounded-3xl border border-slate-200/70 dark:border-slate-850 shadow-xs relative opacity-70">
+                        <span className="text-[9px] sm:text-[10px] font-black text-slate-400 uppercase tracking-wider sm:tracking-widest block mb-1.5 sm:mb-2">Utilidad Estimada</span>
+                        <div className="text-[11px] sm:text-xs text-slate-400 italic">Restringido a administradores</div>
                     </div>
                 )}
 
                 {/* 3. Average Ticket */}
-                <div className="bg-white dark:bg-[#0c111e] p-5 rounded-3xl border border-slate-200/70 dark:border-slate-850 shadow-xs relative overflow-hidden group hover:border-violet-500/40 transition-all">
-                    <div className="flex items-center justify-between mb-2">
-                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Ticket Promedio</span>
-                        <div className="w-10 h-10 bg-violet-500/10 text-violet-600 dark:text-violet-400 rounded-2xl flex items-center justify-center border border-violet-500/10">
-                            <Wallet size={18} />
+                <div className="bg-white dark:bg-[#0c111e] p-3.5 sm:p-5 rounded-2xl sm:rounded-3xl border border-slate-200/70 dark:border-slate-850 shadow-xs relative overflow-hidden group hover:border-violet-500/40 transition-all">
+                    <div className="flex items-center justify-between mb-1.5 sm:mb-2 gap-1">
+                        <span className="text-[9px] sm:text-[10px] font-black text-slate-400 uppercase tracking-wider sm:tracking-widest leading-tight">Ticket Promedio</span>
+                        <div className="w-7 h-7 sm:w-10 sm:h-10 bg-violet-500/10 text-violet-600 dark:text-violet-400 rounded-xl sm:rounded-2xl flex items-center justify-center border border-violet-500/10 shrink-0">
+                            <Wallet size={15} className="sm:w-[18px] sm:h-[18px]" />
                         </div>
                     </div>
                     {loading ? (
-                        <div className="h-8 w-28 bg-slate-100 dark:bg-slate-800 rounded-xl animate-pulse mt-2"></div>
+                        <div className="h-7 sm:h-8 w-24 sm:w-28 bg-slate-100 dark:bg-slate-800 rounded-xl animate-pulse mt-2"></div>
                     ) : (
                         <>
-                            <span className="text-2xl font-black font-mono text-violet-600 dark:text-violet-400 tracking-tight block">
+                            <span className="text-base sm:text-2xl font-black font-mono tabular-nums text-violet-600 dark:text-violet-400 tracking-tight block truncate">
                                 Bs. {(stats.periodSummary?.avgTicket || 0).toFixed(2)}
                             </span>
-                            <div className="flex items-center justify-between mt-2.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400">
-                                <span className="text-[10px] font-bold text-slate-400">
-                                    {(stats.periodSummary?.avgItemsPerTicket || 0).toFixed(1)} ítems / ticket
+                            <div className="flex flex-wrap items-center justify-between gap-1 mt-1.5 sm:mt-2.5 text-[10px] sm:text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                                <span className="text-[9px] sm:text-[10px] font-bold text-slate-400 tabular-nums">
+                                    {(stats.periodSummary?.avgItemsPerTicket || 0).toFixed(1)} ít./tkt
                                 </span>
-                                <span className="bg-violet-500/10 text-violet-700 dark:text-violet-300 px-2 py-0.5 rounded-lg text-[10px] font-extrabold">
-                                    {stats.periodSummary?.totalItems || 0} uds. totales
+                                <span className="bg-violet-500/10 text-violet-700 dark:text-violet-300 px-1.5 sm:px-2 py-0.5 rounded-lg text-[9px] sm:text-[10px] font-extrabold tabular-nums">
+                                    {stats.periodSummary?.totalItems || 0} uds.
                                 </span>
                             </div>
                         </>
@@ -538,26 +538,26 @@ export default function Dashboard() {
                 </div>
 
                 {/* 4. Peak Sales Hour */}
-                <div className="bg-white dark:bg-[#0c111e] p-5 rounded-3xl border border-slate-200/70 dark:border-slate-850 shadow-xs relative overflow-hidden group hover:border-amber-500/40 transition-all">
-                    <div className="flex items-center justify-between mb-2">
-                        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Hora Pico de Ventas</span>
-                        <div className="w-10 h-10 bg-amber-500/10 text-amber-600 dark:text-amber-400 rounded-2xl flex items-center justify-center border border-amber-500/10">
-                            <Clock size={18} />
+                <div className="bg-white dark:bg-[#0c111e] p-3.5 sm:p-5 rounded-2xl sm:rounded-3xl border border-slate-200/70 dark:border-slate-850 shadow-xs relative overflow-hidden group hover:border-amber-500/40 transition-all">
+                    <div className="flex items-center justify-between mb-1.5 sm:mb-2 gap-1">
+                        <span className="text-[9px] sm:text-[10px] font-black text-slate-400 uppercase tracking-wider sm:tracking-widest leading-tight">Hora Pico Ventas</span>
+                        <div className="w-7 h-7 sm:w-10 sm:h-10 bg-amber-500/10 text-amber-600 dark:text-amber-400 rounded-xl sm:rounded-2xl flex items-center justify-center border border-amber-500/10 shrink-0">
+                            <Clock size={15} className="sm:w-[18px] sm:h-[18px]" />
                         </div>
                     </div>
                     {loading ? (
-                        <div className="h-8 w-28 bg-slate-100 dark:bg-slate-800 rounded-xl animate-pulse mt-2"></div>
+                        <div className="h-7 sm:h-8 w-24 sm:w-28 bg-slate-100 dark:bg-slate-800 rounded-xl animate-pulse mt-2"></div>
                     ) : (
                         <>
-                            <span className="text-2xl font-black font-mono text-amber-600 dark:text-amber-400 tracking-tight block">
+                            <span className="text-base sm:text-2xl font-black font-mono tabular-nums text-amber-600 dark:text-amber-400 tracking-tight block truncate">
                                 {peakHour ? `${peakHour.hour}:00 - ${Number(peakHour.hour) + 1}:00` : 'Sin datos'}
                             </span>
-                            <div className="flex items-center justify-between mt-2.5 text-[11px] font-semibold text-slate-500 dark:text-slate-400">
-                                <span className="text-[10px] font-bold text-slate-400">
-                                    Venta Máxima en Hora
+                            <div className="flex flex-wrap items-center justify-between gap-1 mt-1.5 sm:mt-2.5 text-[10px] sm:text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                                <span className="text-[9px] sm:text-[10px] font-bold text-slate-400 hidden sm:inline">
+                                    Venta Máx.
                                 </span>
-                                <span className="bg-amber-500/10 text-amber-700 dark:text-amber-300 px-2 py-0.5 rounded-lg text-[10px] font-extrabold">
-                                    Bs. {(peakHour?.total || 0).toFixed(0)} ({peakHour?.count || 0} vent.)
+                                <span className="bg-amber-500/10 text-amber-700 dark:text-amber-300 px-1.5 sm:px-2 py-0.5 rounded-lg text-[9px] sm:text-[10px] font-extrabold tabular-nums">
+                                    Bs. {(peakHour?.total || 0).toFixed(0)} ({peakHour?.count || 0} v.)
                                 </span>
                             </div>
                         </>

@@ -1835,12 +1835,12 @@ export default function Inventory() {
                     </p>
                 </div>
                 {hasPermission(user, 'view_inventory') ? (
-                    <div className="flex gap-2.5 flex-wrap">
+                    <div className="grid grid-cols-2 sm:flex gap-2 sm:gap-2.5 flex-wrap w-full sm:w-auto">
                         {view === 'productos' ? (
                             <>
                                 <button 
                                     onClick={openCreateForm}
-                                    className="py-2.5 px-4.5 bg-blue-600 hover:bg-blue-500 hover:scale-[1.01] active:scale-95 text-white font-extrabold text-xs rounded-2xl shadow-md shadow-blue-500/10 border border-blue-550 transition-all cursor-pointer"
+                                    className="py-2.5 px-3.5 sm:px-4.5 bg-blue-600 hover:bg-blue-500 hover:scale-[1.01] active:scale-95 text-white font-extrabold text-xs rounded-2xl shadow-md shadow-blue-500/10 border border-blue-550 transition-all cursor-pointer flex items-center justify-center"
                                 >
                                     + Registrar Artículo
                                 </button>
@@ -2138,8 +2138,8 @@ export default function Inventory() {
 
             {/* Quick Stock Replenishment Modal */}
             {isStockInModalOpen && (
-                <div className="fixed inset-0 bg-black/65 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-in fade-in duration-150">
-                    <div className="bg-white dark:bg-[#0f1424] rounded-3xl w-full max-w-2xl p-6 shadow-2xl border border-slate-150 dark:border-slate-850 flex flex-[#0f1424] flex-col gap-4 animate-in zoom-in-95 duration-150 max-h-[90vh] overflow-hidden">
+                <div className="fixed inset-0 bg-black/65 backdrop-blur-xs flex items-center justify-center p-2.5 sm:p-4 z-50 animate-in fade-in duration-150">
+                    <div className="bg-white dark:bg-[#0f1424] rounded-3xl w-full max-w-2xl p-4 sm:p-6 shadow-2xl border border-slate-150 dark:border-slate-850 flex flex-[#0f1424] flex-col gap-4 animate-in zoom-in-95 duration-150 max-h-[92dvh] modal-landscape-compact overflow-hidden">
                         
                         {/* Header */}
                         <div className="flex justify-between items-center border-b border-slate-100 dark:border-[#1a233a] pb-3">
@@ -2443,9 +2443,9 @@ export default function Inventory() {
 
             {/* Form Glass Overlay Modal */}
             {isFormOpen && (
-                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-in fade-in duration-200">
-                    <div className="bg-white dark:bg-[#0f1424] rounded-3xl w-full max-w-lg p-6 shadow-2xl border border-slate-150 dark:border-slate-850 flex flex-col gap-4 animate-in zoom-in-95 duration-200">
-                        <div className="flex justify-between items-center border-b border-slate-100 dark:border-slate-850 pb-3">
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-2.5 sm:p-4 z-50 animate-in fade-in duration-200">
+                    <div className="bg-white dark:bg-[#0f1424] rounded-3xl w-full max-w-lg p-4 sm:p-6 shadow-2xl border border-slate-150 dark:border-slate-850 flex flex-col gap-4 animate-in zoom-in-95 duration-200 max-h-[92dvh] modal-landscape-compact overflow-y-auto touch-momentum">
+                        <div className="flex justify-between items-center border-b border-slate-100 dark:border-slate-850 pb-3 shrink-0">
                             <h2 className="font-extrabold text-xs uppercase tracking-widest text-[#2c3e50] dark:text-[#a5b4fc]">
                                 {editingProduct ? 'Modificar Artículo del Inventario' : 'Dar de alta nuevo Artículo'}
                             </h2>
@@ -3536,8 +3536,8 @@ export default function Inventory() {
 
             {/* Modal de Importación Masiva (CSV) */}
             {isImportModalOpen && (
-                <div className="fixed inset-0 bg-slate-900/60 dark:bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-[65] overflow-y-auto animate-in fade-in duration-200">
-                    <div className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-200/80 dark:border-slate-850 max-w-3xl w-full p-6 shadow-2xl animate-in zoom-in-95 duration-200 flex flex-col max-h-[90vh]">
+                <div className="fixed inset-0 bg-slate-900/60 dark:bg-black/80 backdrop-blur-sm flex items-center justify-center p-2.5 sm:p-4 z-[65] overflow-y-auto animate-in fade-in duration-200">
+                    <div className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-200/80 dark:border-slate-850 max-w-3xl w-full p-4 sm:p-6 shadow-2xl animate-in zoom-in-95 duration-200 flex flex-col max-h-[92dvh] modal-landscape-compact">
                         
                         {/* Modal Header */}
                         <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-850 pb-4 shrink-0">
@@ -3701,8 +3701,8 @@ export default function Inventory() {
 
             {/* TRACE TICKET DETAILS MODAL */}
             {showTraceTicketModal && (
-                <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4 overflow-y-auto">
-                    <div className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-200 dark:border-slate-850 w-full max-w-2xl overflow-hidden shadow-2xl animate-in zoom-in-95 duration-200 flex flex-col max-h-[90vh]">
+                <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-2.5 sm:p-4 overflow-y-auto">
+                    <div className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-200 dark:border-slate-850 w-full max-w-2xl overflow-hidden shadow-2xl animate-in zoom-in-95 duration-200 flex flex-col max-h-[92dvh] modal-landscape-compact">
                         {/* Header */}
                         <div className="px-6 py-4 border-b border-slate-100 dark:border-slate-850 flex items-center justify-between bg-slate-50 dark:bg-[#070c14]/30">
                             <div className="flex items-center gap-2">
@@ -3863,8 +3863,8 @@ export default function Inventory() {
 
             {/* DEDICATED STOCK HISTORY MODAL */}
             {showStockHistoryModal && stockHistoryProduct && (
-                <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4 overflow-y-auto">
-                    <div className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-200 dark:border-slate-850 w-full max-w-3xl overflow-hidden shadow-2xl animate-in zoom-in-95 duration-200 flex flex-col max-h-[90vh]">
+                <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-2.5 sm:p-4 overflow-y-auto">
+                    <div className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-200 dark:border-slate-850 w-full max-w-3xl overflow-hidden shadow-2xl animate-in zoom-in-95 duration-200 flex flex-col max-h-[92dvh] modal-landscape-compact">
                         {/* Header */}
                         <div className="px-6 py-4 border-b border-slate-100 dark:border-slate-850 flex items-center justify-between bg-slate-50 dark:bg-[#070c14]/30">
                             <div className="flex items-center gap-2">
