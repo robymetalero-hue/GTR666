@@ -41,15 +41,16 @@ export interface DbContext {
 export const dbAsyncLocalStorage = new AsyncLocalStorage<DbContext>();
 
 export function isCurrentContextSandbox(): boolean {
-  if (process.env.APP_ENV === 'test') {
+  if (
+    process.env.APP_ENV === 'test' ||
+    process.env.APP_ENV === 'sandbox' ||
+    process.env.NODE_ENV === 'test'
+  ) {
     return true;
   }
   const store = dbAsyncLocalStorage.getStore();
   if (store !== undefined) {
     return store.isSandbox;
-  }
-  if (process.env.APP_ENV === 'sandbox') {
-    return true;
   }
   if (process.env.APP_ENV === 'production') {
     return false;
@@ -74,6 +75,14 @@ export function ensureProdDbExists(): void {
     const backupPath = path.resolve(process.cwd(), 'gtr_pos.db.bak');
     if (fs.existsSync(backupPath)) {
       try {
+        const tempCheckDb = new Database(backupPath, { readonly: true });
+        const integrity = tempCheckDb.pragma('integrity_check(1)') as any[];
+        tempCheckDb.close();
+        const isOk = Array.isArray(integrity) && integrity[0]?.integrity_check === 'ok';
+        if (!isOk) {
+          console.warn('[Database Integrity Guard] Backup gtr_pos.db.bak failed integrity_check. Skipping automatic restore.');
+          return;
+        }
         fs.copyFileSync(backupPath, prodDbPath);
         console.log('[Database Integrity Guard] Restored production gtr_pos.db from verified backup copy.');
       } catch (err: any) {

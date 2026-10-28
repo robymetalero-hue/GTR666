@@ -1382,6 +1382,7 @@ export default function Inventory() {
         setPriceCost(p.price_cost || 0);
         setStockAlarm(p.stock_alarm);
         setImage(p.image || null);
+        setClientOpId(typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : 'prod-edit-' + Date.now() + '-' + Math.random().toString(36).substring(2));
         setIsFormOpen(true);
     };
 
@@ -1398,11 +1399,10 @@ export default function Inventory() {
 
         const activeOpId = clientOpId || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : 'prod-op-' + Date.now() + '-' + Math.random().toString(36).substring(2));
 
-        const payload = {
+        const payload: Record<string, any> = {
             name: name.trim(),
             category: category.trim(),
             sku: sku.trim(),
-            stock: Number(stock),
             price_unit: Number(priceUnit),
             price_bulk: Number(priceBulk),
             price_cost: Number(priceCost),
@@ -1411,6 +1411,10 @@ export default function Inventory() {
             clientOperationId: activeOpId,
             forceCreate: forceCreateOverride
         };
+
+        if (!editingProduct) {
+            payload.stock = Number(stock);
+        }
 
         try {
             let res;
@@ -2516,16 +2520,25 @@ export default function Inventory() {
                                 </div>
 
                                 <div className="flex flex-col gap-1.5">
-                                    <label className="text-[9px] font-extrabold uppercase tracking-widest text-slate-400">Unidades Disponibles</label>
+                                    <label className="text-[9px] font-extrabold uppercase tracking-widest text-slate-400">
+                                        {editingProduct ? 'Stock Físico Actual (Protegido)' : 'Unidades Disponibles'}
+                                    </label>
                                     <input 
                                         type="number" 
                                         min="0"
-                                        className="p-2.5 border border-slate-200 dark:border-slate-850 rounded-xl dark:bg-[#070b13] text-xs font-mono font-black text-slate-700 dark:text-grey-100 focus:outline-none focus:border-blue-550 dark:text-white"
+                                        disabled={Boolean(editingProduct)}
+                                        className={`p-2.5 border border-slate-200 dark:border-slate-850 rounded-xl dark:bg-[#070b13] text-xs font-mono font-black text-slate-700 dark:text-grey-100 focus:outline-none focus:border-blue-550 dark:text-white ${editingProduct ? 'opacity-60 cursor-not-allowed bg-slate-100 dark:bg-slate-900' : ''}`}
                                         value={stock}
-                                        onFocus={e => e.target.select()}
-                                        onClick={e => (e.target as HTMLInputElement).select()}
-                                        onChange={e => setStock(e.target.value === "" ? "" : Number(e.target.value))}
+                                        onFocus={e => !editingProduct && e.target.select()}
+                                        onClick={e => !editingProduct && (e.target as HTMLInputElement).select()}
+                                        onChange={e => !editingProduct && setStock(e.target.value === "" ? "" : Number(e.target.value))}
+                                        title={editingProduct ? "Para modificar existencias usa el botón de Ajuste de Inventario o Entrada de Mercadería" : ""}
                                     />
+                                    {editingProduct && (
+                                        <span className="text-[8.5px] font-semibold text-amber-600 dark:text-amber-400 leading-tight">
+                                            Usa Ajuste de Stock en la tabla para modificar unidades sin afectar ventas en curso.
+                                        </span>
+                                    )}
                                 </div>
 
                                 <div className="flex flex-col gap-1.5">

@@ -2,7 +2,14 @@ const Database = require('better-sqlite3');
 const fs = require('fs');
 const path = require('path');
 
+const isExecuteMode = process.argv.includes('--execute');
 console.log("=== INICIANDO EJECUCIÓN DE REMEDIACIÓN INCIDENTE #399 ===");
+console.log(`Modo de ejecución: ${isExecuteMode ? 'EJECUCIÓN REAL (--execute)' : 'SIMULACIÓN SEGURA (--dry-run por defecto)'}`);
+
+if (!isExecuteMode) {
+  console.log("AVISO: Ejecutando en modo --dry-run. Ningún dato será modificado. Para ejecutar la remediación real, use: node scripts/execute_remediation.cjs --execute");
+  process.exit(0);
+}
 
 // 1. Checkpoint WAL and create verified backup
 const dbPath = path.resolve(process.cwd(), 'gtr_pos.db');

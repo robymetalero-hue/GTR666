@@ -685,6 +685,63 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
       })
     );
 
+    const hydrateRemediationStateFromRawJson = (rawJsonStr: string) => {
+      try {
+        const remState = JSON.parse(rawJsonStr);
+        if (Array.isArray(remState.deleted_records)) {
+          const insDel = db.prepare("INSERT OR IGNORE INTO deleted_records (table_name, record_id, deleted_at) VALUES (?, ?, ?)");
+          for (const d of remState.deleted_records) {
+            insDel.run(d.table_name, String(d.record_id), d.deleted_at || new Date().toISOString());
+          }
+        }
+        const qCount = (db.prepare("SELECT COUNT(*) as c FROM incident_quarantine_records WHERE incident_id = 'INCIDENT_399_20261027'").get() as any)?.c || 0;
+        if (qCount === 0 && Array.isArray(remState.quarantine_records)) {
+          const insQ = db.prepare("INSERT INTO incident_quarantine_records (incident_id, table_name, record_id, payload_json, reason, backup_path, quarantined_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
+          for (const q of remState.quarantine_records) {
+            insQ.run(q.incident_id, q.table_name, q.record_id, q.payload_json, q.reason, q.backup_path, q.quarantined_at);
+          }
+        }
+        if (Array.isArray(remState.processed_operations)) {
+          const insOp = db.prepare(`
+            INSERT INTO processed_operations (client_operation_id, operation_type, payload_hash, response_body, status)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(client_operation_id) DO UPDATE SET
+              operation_type = COALESCE(excluded.operation_type, processed_operations.operation_type),
+              payload_hash = COALESCE(excluded.payload_hash, processed_operations.payload_hash),
+              response_body = COALESCE(excluded.response_body, processed_operations.response_body),
+              status = COALESCE(excluded.status, processed_operations.status)
+          `);
+          for (const op of remState.processed_operations) {
+            insOp.run(
+              op.client_operation_id,
+              op.operation_type || 'sale',
+              op.payload_hash || null,
+              op.response_body,
+              op.status || 'completed'
+            );
+          }
+        }
+      } catch (_) {}
+    };
+
+    // Pre-hydrate tombstones from incoming settings snapshot BEFORE importing sales, sale_items, or cash_movements
+    try {
+      const settingsSnapObj = collectionResults.find(r => r.table === 'settings' && r.snapshot && !r.error);
+      if (settingsSnapObj && settingsSnapObj.snapshot) {
+        for (const docSnap of settingsSnapObj.snapshot.docs) {
+          const d = docSnap.data();
+          const k = d.key || docSnap.id;
+          if (k === 'incident_399_remediation_state' && d.value) {
+            hydrateRemediationStateFromRawJson(String(d.value));
+          }
+        }
+      }
+      const localRemRow = db.prepare("SELECT value FROM settings WHERE key = 'incident_399_remediation_state'").get() as any;
+      if (localRemRow && localRemRow.value) {
+        hydrateRemediationStateFromRawJson(String(localRemRow.value));
+      }
+    } catch (_) {}
+
     // Pull each collection and upsert data into SQLite inside a single high-performance transaction
     const globalSyncTx = db.transaction(() => {
       for (const { table, snapshot, error } of collectionResults) {
@@ -783,6 +840,13 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
             // Never re-insert records that have been legitimately deleted, unless forceOverwrite is requested
             if (!forceOverwrite && deletedIdsSet.has(docId)) {
               continue;
+            }
+
+            // Also check parent sale deletion for child tables (sale_items, cash_movements)
+            if (!forceOverwrite && (table === 'sale_items' || table === 'cash_movements') && data.sale_id !== undefined && data.sale_id !== null) {
+              if (isRecordDeleted('sales', data.sale_id)) {
+                continue;
+              }
             }
 
             // ANTI-GHOST RECORD VALIDATION: Verify incoming Firestore document structure
@@ -929,26 +993,7 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
     try {
       const remRow = db.prepare("SELECT value FROM settings WHERE key = 'incident_399_remediation_state'").get() as any;
       if (remRow && remRow.value) {
-        const remState = JSON.parse(remRow.value);
-        if (Array.isArray(remState.deleted_records)) {
-          const insDel = db.prepare("INSERT OR IGNORE INTO deleted_records (table_name, record_id, deleted_at) VALUES (?, ?, ?)");
-          for (const d of remState.deleted_records) {
-            insDel.run(d.table_name, d.record_id, d.deleted_at);
-          }
-        }
-        const qCount = (db.prepare("SELECT COUNT(*) as c FROM incident_quarantine_records WHERE incident_id = 'INCIDENT_399_20261027'").get() as any)?.c || 0;
-        if (qCount === 0 && Array.isArray(remState.quarantine_records)) {
-          const insQ = db.prepare("INSERT INTO incident_quarantine_records (incident_id, table_name, record_id, payload_json, reason, backup_path, quarantined_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
-          for (const q of remState.quarantine_records) {
-            insQ.run(q.incident_id, q.table_name, q.record_id, q.payload_json, q.reason, q.backup_path, q.quarantined_at);
-          }
-        }
-        if (Array.isArray(remState.processed_operations)) {
-          const insOp = db.prepare("INSERT OR REPLACE INTO processed_operations (client_operation_id, operation_type, response_body, status) VALUES (?, ?, ?, ?)");
-          for (const op of remState.processed_operations) {
-            insOp.run(op.client_operation_id, op.operation_type || 'sale', op.response_body, op.status || 'completed');
-          }
-        }
+        hydrateRemediationStateFromRawJson(String(remRow.value));
       }
     } catch (_) {}
 

@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan de blindaje integral del Modo Kiosco actualizado con garantía de integración quirúrgica sin conflictos, preservando intactos los flujos actuales, contratos de API y componentes existentes cuando el Modo Kiosco no está activo.",
-  "updatedAt":  "2026-10-27T21:13:56.173904305Z",
+  "summary":  "Plan de implementacion integral y quirurgico basado en la auditoria tecnica (Revision_integral_GTR666_ff17b7d): Bloque 1 (Permisos de rutas, aislamiento de entorno, respeto de reservas de stock y edicion segura de productos sin pisar stock), Bloque 2 (Sincronizacion de tombstones, conservacion de payload_hash, limpieza de pending_sale_items, bloqueo de incidentes #399 y guarda forense), Bloque 3 (Idempotencia extremo a extremo, multimoneda USD/BOB en abonos y devoluciones, respaldos separados por entorno) y Bloque 4 (Saneamiento de scripts externos en carpeta scripts/).",
+  "updatedAt":  "2026-10-28T00:42:27.596199422Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

@@ -23,14 +23,26 @@ const testSaleIds = [
 ];
 const testSaleIdSet = new Set(testSaleIds);
 
+const isExecuteMode = process.argv.includes('--execute');
+
 async function runFirestoreCleanup() {
   console.log("=== INICIANDO PURGA Y CONCILIACIÓN EN FIRESTORE REMOTO ===");
   console.log(`Target Firestore DB: ${config.firestoreDatabaseId}`);
+  console.log(`Modo de ejecución: ${isExecuteMode ? 'EJECUCIÓN REAL (--execute)' : 'SIMULACIÓN SEGURA (--dry-run por defecto)'}`);
 
-  try {
-    const auth = getAuth(app);
-    await signInWithEmailAndPassword(auth, "server_sync@dstore.app", "ServerSync_SecretPassword!123");
-  } catch (_) {}
+  if (!isExecuteMode) {
+    console.log("AVISO: Ejecutando en modo --dry-run. Para aplicar cambios en Firestore, pase el flag explícito: node scripts/execute_firestore_cleanup.cjs --execute");
+    process.exit(0);
+  }
+
+  const syncEmail = process.env.FIREBASE_SYNC_EMAIL;
+  const syncPassword = process.env.FIREBASE_SYNC_PASSWORD;
+  if (syncEmail && syncPassword) {
+    try {
+      const auth = getAuth(app);
+      await signInWithEmailAndPassword(auth, syncEmail, syncPassword);
+    } catch (_) {}
+  }
 
   // 1. Purge test sales
   let deletedSalesCount = 0;

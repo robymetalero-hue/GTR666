@@ -271,16 +271,22 @@ export default function POS() {
         const existingInCart = cart.find((item: any) => item.id === product.id);
         const currentQty = existingInCart ? existingInCart.cartQuantity : 0;
         const targetQty = currentQty + quantity;
+        const availableStock = product.stock_available !== undefined && product.stock_available !== null
+            ? Number(product.stock_available)
+            : Number(product.stock || 0);
+        const reservedStock = Number(product.stock_reserved || 0);
 
         if (quantity > 0) {
-            if (product.stock <= 0) {
+            if (availableStock <= 0) {
                 triggerVibrate([50, 50, 50]);
-                showNotification(`⚠️ El artículo "${product.name}" no tiene stock disponible (0 unidades).`, 'error');
+                const reserveHint = reservedStock > 0 ? ` (${reservedStock} reservadas en pedidos activos)` : '';
+                showNotification(`⚠️ El artículo "${product.name}" no tiene stock disponible (0 unidades libres${reserveHint}).`, 'error');
                 return false;
             }
-            if (targetQty > product.stock) {
+            if (targetQty > availableStock) {
                 triggerVibrate([50, 50, 50]);
-                showNotification(`⚠️ No es posible agregar más unidades. El stock disponible de "${product.name}" es de ${product.stock} unidades (ya tienes ${currentQty} en el carrito).`, 'error');
+                const reserveHint = reservedStock > 0 ? ` (${reservedStock} reservadas)` : '';
+                showNotification(`⚠️ No es posible agregar más unidades. El stock disponible de "${product.name}" es de ${availableStock} unidades libres${reserveHint} (ya tienes ${currentQty} en el carrito).`, 'error');
                 return false;
             }
         }
@@ -292,16 +298,19 @@ export default function POS() {
     const updateCartItemQuantity = (productId: number, qty: number) => {
         const product = products.find((p: any) => p.id === productId);
         if (product && qty > 0) {
-            if (product.stock <= 0) {
+            const availableStock = product.stock_available !== undefined && product.stock_available !== null
+                ? Number(product.stock_available)
+                : Number(product.stock || 0);
+            if (availableStock <= 0) {
                 triggerVibrate([50, 50, 50]);
-                showNotification(`⚠️ El artículo "${product.name}" no tiene stock disponible (0 unidades).`, 'error');
+                showNotification(`⚠️ El artículo "${product.name}" no tiene stock disponible (0 unidades libres).`, 'error');
                 rawUpdateCartItemQuantity(productId, 0);
                 return;
             }
-            if (qty > product.stock) {
+            if (qty > availableStock) {
                 triggerVibrate([50, 50, 50]);
-                showNotification(`⚠️ No es posible establecer esa cantidad. El stock disponible de "${product.name}" es de ${product.stock} unidades.`, 'error');
-                rawUpdateCartItemQuantity(productId, product.stock);
+                showNotification(`⚠️ No es posible establecer esa cantidad. El stock disponible de "${product.name}" es de ${availableStock} unidades libres.`, 'error');
+                rawUpdateCartItemQuantity(productId, availableStock);
                 return;
             }
         }
@@ -890,6 +899,13 @@ export default function POS() {
     const [pendingTransportCompany, setPendingTransportCompany] = useState("");
     const [isSavingPending, setIsSavingPending] = useState(false);
     const isSavingPendingRef = useRef(false);
+    const [pendingClientOpId, setPendingClientOpId] = useState<string>("");
+
+    useEffect(() => {
+        if (isPendingSaleModalOpen) {
+            setPendingClientOpId("pending_" + Date.now() + "_" + Math.random().toString(36).substring(2, 9));
+        }
+    }, [isPendingSaleModalOpen, pendingOrderType, pendingReserveStock, pendingClientName, pendingDestination, cart]);
 
     const handleChangePendingOrderType = (type: 'cotizacion' | 'reserva' | 'envio') => {
         setPendingOrderType(type);
@@ -948,7 +964,8 @@ export default function POS() {
                 ? 'Reserva en Tienda'
                 : 'Envío por definir';
 
-            const opId = "pending_" + Date.now() + "_" + Math.random().toString(36).substring(2, 9);
+            const opId = pendingClientOpId || ("pending_" + Date.now() + "_" + Math.random().toString(36).substring(2, 9));
+            if (!pendingClientOpId) setPendingClientOpId(opId);
             const payload = {
                 client_name: pendingClientName.trim(),
                 destination: pendingDestination.trim() || defaultDest,
@@ -976,6 +993,7 @@ export default function POS() {
                 setPendingClientPhone("");
                 setPendingTransportCompany("");
                 setPendingNotes("");
+                setPendingClientOpId("");
                 setIsPendingSaleModalOpen(false);
                 showNotification("📦 Registro guardado offline. Se sincronizará automáticamente al recuperar internet.", "success");
                 return;
@@ -1001,6 +1019,7 @@ export default function POS() {
                 setPendingClientPhone("");
                 setPendingTransportCompany("");
                 setPendingNotes("");
+                setPendingClientOpId("");
                 setIsPendingSaleModalOpen(false);
                 fetchProducts(undefined, true);
                 const modeLabel = pendingOrderType === 'cotizacion' ? 'Cotización / Proforma' : pendingOrderType === 'reserva' ? 'Reserva en Mostrador' : 'Pedido para Envío';

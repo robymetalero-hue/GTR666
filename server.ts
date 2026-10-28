@@ -212,7 +212,7 @@ async function startServer() {
   app.use(express.urlencoded({ limit: "100mb", extended: true }));
 
   // Sandbox vs Production Environment Isolation Gate
-  // Accede inequívocamente a producción para dspos.app, ais-pre o cabecera explícita 'production' (salvo en modo test)
+  // Accede inequívocamente a producción para dspos.app, ais-pre o cabecera explícita 'production' (salvo cuando el proceso es sandbox o test)
   app.use((req, res, next) => {
     const rawHost = String(req.headers['x-forwarded-host'] || req.headers['host'] || req.hostname || '').toLowerCase();
     const explicitEnv = String(req.headers['x-app-environment'] || '').toLowerCase();
@@ -220,13 +220,17 @@ async function startServer() {
     const isDevDomain = rawHost.includes('ais-dev');
 
     let isSandbox = false;
-    if (process.env.APP_ENV === 'test') {
+    if (
+      process.env.APP_ENV === 'test' ||
+      process.env.APP_ENV === 'sandbox' ||
+      process.env.NODE_ENV === 'test'
+    ) {
       isSandbox = true;
     } else if (explicitEnv === 'sandbox') {
       isSandbox = true;
     } else if (isProdDomain || explicitEnv === 'production') {
       isSandbox = false;
-    } else if (isDevDomain || process.env.APP_ENV === 'sandbox') {
+    } else if (isDevDomain) {
       isSandbox = true;
     } else {
       // Fail-closed: any untagged request without explicit environment header defaults to sandbox
@@ -3154,16 +3158,12 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         return res.status(404).json({ error: "Producto no encontrado." });
       }
 
-      const safeStock = (stock !== undefined && stock !== null) ? Math.max(0, Number(stock)) : Number(oldProd.stock || 0);
+      // Preserve current server stock on metadata/price edits; stock changes must use dedicated inventory adjustment endpoints
+      const safeStock = Number(oldProd.stock || 0);
       const safePriceUnit = Math.max(0, Number(price_unit !== undefined && price_unit !== null ? price_unit : oldProd.price_unit || 0));
       const safePriceBulk = Math.max(0, Number(price_bulk !== undefined && price_bulk !== null ? price_bulk : oldProd.price_bulk || 0));
       const safePriceCost = Math.max(0, Number(price_cost !== undefined ? price_cost : (oldProd.price_cost || (price_unit ? price_unit * 0.6 : 0))));
       const safeStockAlarm = Math.max(0, Number(stock_alarm !== undefined ? stock_alarm : oldProd.stock_alarm || 0));
-
-      // Si se intenta modificar el stock del producto mientras hay un conteo activo, bloquear
-      if (stock !== undefined && safeStock !== Number(oldProd.stock)) {
-        if (checkInventoryLock(res)) return;
-      }
 
       const trimmedName = name.trim();
       const trimmedSku = sku.trim();
@@ -5094,7 +5094,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
       // T10: Use native SQLite online backup API to cleanly capture active database and WAL pages
       try {
-        db.pragma('wal_checkpoint(PASSIVE)');
+        db.pragma('wal_checkpoint(TRUNCATE)');
       } catch (_) {}
 
       try {
@@ -5103,11 +5103,14 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         fs.copyFileSync(dbPath, destPath);
       }
 
-      // Only update root backup copy if current DB has a verified healthy catalog
+      // Only update environment-specific root backup copy if current DB has a verified healthy catalog and passes integrity check
       try {
         const prodCount = db.prepare("SELECT count(*) as c FROM products").get() as any;
-        if (prodCount && prodCount.c >= 50) {
-          const rootBak = path.resolve(process.cwd(), 'gtr_pos.db.bak');
+        const integrity = db.pragma('integrity_check(1)') as any[];
+        const isOk = Array.isArray(integrity) && integrity[0]?.integrity_check === 'ok';
+        if (isOk && prodCount && prodCount.c >= 50) {
+          const bakFileName = isCurrentContextSandbox() ? 'gtr_pos_sandbox.db.bak' : 'gtr_pos.db.bak';
+          const rootBak = path.resolve(process.cwd(), bakFileName);
           try {
             await (db as any).backup(rootBak);
           } catch (_) {
@@ -6614,15 +6617,32 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           });
         }
 
+        // Reconcile ±0.01 BOB rounding discrepancy when 100% of remaining units of the sale have been returned
+        try {
+          const totalSoldUnitsRow = db.prepare('SELECT COALESCE(SUM(quantity), 0) as total_qty FROM sale_items WHERE sale_id = ?').get(sale_id) as any;
+          const totalReturnedUnitsRow = db.prepare('SELECT COALESCE(SUM(quantity), 0) as returned_qty FROM sale_returns WHERE sale_id = ?').get(sale_id) as any;
+          const totalSoldUnits = Number(totalSoldUnitsRow?.total_qty || 0);
+          const totalReturnedUnits = Number(totalReturnedUnitsRow?.returned_qty || 0);
+          if (totalSoldUnits > 0 && totalReturnedUnits >= totalSoldUnits && returnRecords.length > 0) {
+            const residual = Math.round((maxPossibleRefund - totalRefundAmount) * 100) / 100;
+            if (Math.abs(residual) > 0 && Math.abs(residual) <= 0.05) {
+              totalRefundAmount = Math.round((totalRefundAmount + residual) * 100) / 100;
+              const lastReturnId = returnRecords[returnRecords.length - 1];
+              db.prepare('UPDATE sale_returns SET refund_amount = ROUND(refund_amount + ?, 2) WHERE id = ?').run(residual, lastReturnId);
+            }
+          }
+        } catch (_) {}
+
         // F04: Deducir de cuenta por cobrar si la venta original fue a crédito
         let cashRefundAmount = totalRefundAmount;
+        let updatedArId: any = null;
         if (originalSale.payment_method === 'Crédito') {
           const arRecord = db.prepare('SELECT id, total_amount, paid_amount, remaining_amount, status FROM accounts_receivable WHERE sale_id = ?').get(sale_id) as any;
           if (arRecord) {
             const oldRemaining = Number(arRecord.remaining_amount) || 0;
             const debtDeduction = Math.min(totalRefundAmount, oldRemaining);
-            const newRemaining = Math.max(0, oldRemaining - debtDeduction);
-            const excessCash = Math.max(0, totalRefundAmount - debtDeduction);
+            const newRemaining = Math.max(0, Math.round((oldRemaining - debtDeduction) * 100) / 100);
+            const excessCash = Math.max(0, Math.round((totalRefundAmount - debtDeduction) * 100) / 100);
 
             const newStatus = (newRemaining <= 0 && Number(arRecord.paid_amount) <= 0) ? 'anulado' : (newRemaining <= 0 ? 'pagado' : 'pendiente');
             db.prepare(`
@@ -6630,6 +6650,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
               SET remaining_amount = ?, status = ?
               WHERE id = ?
             `).run(newRemaining, newStatus, arRecord.id);
+            updatedArId = arRecord.id;
 
             // Solo reintegrar efectivo por la porción que el cliente ya había pagado en exceso de la deuda restante
             cashRefundAmount = excessCash;
@@ -6685,14 +6706,14 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           } catch (_) {}
         }
 
-        return { refAccId, refMovId, totalRefundAmount, reconciledItems, refundedProductIds, refundedSaleItemIds, invLogIds, returnRecords, isDuplicate: false };
+        return { refAccId, refMovId, updatedArId, totalRefundAmount, reconciledItems, refundedProductIds, refundedSaleItemIds, invLogIds, returnRecords, isDuplicate: false };
       });
 
       const txRefund = refundTrx() as any;
       if (txRefund.isDuplicate) {
         return res.json(txRefund);
       }
-      const { refAccId, refMovId, totalRefundAmount, reconciledItems, refundedProductIds, refundedSaleItemIds, invLogIds, returnRecords } = txRefund;
+      const { refAccId, refMovId, updatedArId, totalRefundAmount, reconciledItems, refundedProductIds, refundedSaleItemIds, invLogIds, returnRecords } = txRefund;
 
       // Write advanced audit logs for each refunded product item
       const auditUser = (req as any).auditUser || {};
@@ -6736,6 +6757,9 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         cash_accounts: refAccId ? [refAccId] : [],
         cash_movements: refMovId ? [refMovId] : []
       };
+      if (updatedArId) {
+        syncMap.accounts_receivable = [updatedArId];
+      }
       // F05: Include sale_returns in explicit replication map
       if (returnRecords && returnRecords.length > 0) {
         syncMap.sale_returns = returnRecords;
@@ -6778,10 +6802,16 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const safeDiscount = numDiscount;
       const safeCurrency = currency || 'BOB';
       try {
+        if (exchange_rate !== undefined && exchange_rate !== null) {
+          const clientRate = Number(exchange_rate);
+          if (!Number.isFinite(clientRate) || clientRate <= 0) {
+            return res.status(400).json({ error: "Tipo de cambio inválido. Debe ser un valor positivo mayor a cero." });
+          }
+        }
         const rateRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('exchange_rate') as any;
         const officialRate = rateRow ? parseFloat(rateRow.value) : 6.96;
         // Punto 2: Tasa oficial del servidor validada y guardada como snapshot inmutable
-        const currentRate = officialRate;
+        const currentRate = (Number.isFinite(officialRate) && officialRate > 0) ? officialRate : 6.96;
 
         const verifiedUser = (req as any).verifiedUser;
         const userRow = verifiedUser 
@@ -6909,6 +6939,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         const itemInsert = db.prepare('INSERT INTO sale_items (sale_id, product_id, quantity, price, cost, product_name_snapshot, product_sku_snapshot, subtotal_minor) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
         const stockUpdate = db.prepare('UPDATE products SET stock = stock - ?, updated_at = ? WHERE id = ?');
 
+        const normalizedInitialAbono = payment_method === 'Crédito' ? Math.min(safeTotal, Math.max(0, Number(initial_abono || 0))) : 0;
         const canonicalSalePayload = {
           items: items.map((it: any) => ({
             product_id: Number(it.product_id),
@@ -6919,6 +6950,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           discount: safeDiscount,
           client_id: client_id || null,
           payment_method: payment_method || 'Efectivo',
+          initial_abono: normalizedInitialAbono,
           currency: safeCurrency,
           exchange_rate: currentRate,
           user_id: effectiveUserId
@@ -6929,8 +6961,14 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         const transaction = db.transaction(() => {
           // C02 & S06 & K07 & B04: Atomic transactional check in processed_operations
           if (clientOpId) {
-            const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
+            const existingOp = db.prepare('SELECT payload_hash, response_body, status FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
             if (existingOp) {
+              const rawBody = String(existingOp.response_body || '');
+              if (existingOp.status === 'blocked_incident_399' || rawBody.includes('blocked_incident_399')) {
+                const blockedErr = new Error("BLOCKED_INCIDENT_399");
+                (blockedErr as any).statusCode = 409;
+                throw blockedErr;
+              }
               if (existingOp.payload_hash && existingOp.payload_hash !== canonicalSaleHash) {
                 const conflictErr = new Error("CONFLICT_409");
                 (conflictErr as any).statusCode = 409;
@@ -7205,6 +7243,9 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         res.json({ success: true, saleId });
     } catch (e: any) {
       console.error("[Sales API Failure]:", e);
+      if (e.message === 'BLOCKED_INCIDENT_399') {
+        return res.status(409).json({ error: "Operación rechazada: clave de operación bloqueada por política de integridad (#399).", client_operation_id: clientOpId });
+      }
       if (e.message === 'CONFLICT_409' || e.statusCode === 409) {
         return res.status(409).json({ error: "Conflicto: la clave de operación ya fue utilizada con datos comerciales diferentes.", client_operation_id: clientOpId });
       }
@@ -7306,8 +7347,11 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
       const saleRow = db.prepare('SELECT currency, exchange_rate FROM sales WHERE id = ?').get(record.sale_id) as any;
       const saleCurrency = saleRow?.currency || 'BOB';
-      const payCurrency = req.body.currency || saleCurrency;
-      const payRate = Number(req.body.exchange_rate || saleRow?.exchange_rate || 6.96);
+      const payCurrency = (req.body.currency === 'USD' || req.body.currency === 'BOB') ? req.body.currency : saleCurrency;
+      const payRate = Number(req.body.exchange_rate !== undefined && req.body.exchange_rate !== null ? req.body.exchange_rate : (saleRow?.exchange_rate || 6.96));
+      if (!Number.isFinite(payRate) || payRate <= 0) {
+        return res.status(400).json({ error: "El tipo de cambio del abono debe ser un valor numérico positivo mayor a cero." });
+      }
 
       // T24: Multi-currency conversion between payment and accounts_receivable debt currency
       let debtReduction = payAmount;
@@ -7318,8 +7362,14 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       }
 
       const remaining = Number(record.remaining_amount) || 0;
+      if (debtReduction > remaining + 0.05) {
+        return res.status(400).json({
+          error: `El abono equivalente (${debtReduction.toFixed(2)} ${saleCurrency}) excede el saldo pendiente de ${remaining.toFixed(2)} ${saleCurrency}.`
+        });
+      }
       const actualDebtReduction = Math.min(debtReduction, remaining);
-      const newPaidAmount = Math.round((Number(record.paid_amount || 0) + actualDebtReduction) * 100) / 100;
+      const totalDebtCap = Number(record.total_amount || 0);
+      const newPaidAmount = Math.min(totalDebtCap, Math.round((Number(record.paid_amount || 0) + actualDebtReduction) * 100) / 100);
       const newRemainingAmount = Math.max(0, Math.round((remaining - actualDebtReduction) * 100) / 100);
       const newStatus = newRemainingAmount <= 0 ? 'pagado' : 'pendiente';
 
@@ -7335,7 +7385,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         }
       }
 
-      const amountInBs = payCurrency === 'USD' ? (actualPayReceived * payRate) : actualPayReceived;
+      const amountInBs = payCurrency === 'USD' ? Math.round(actualPayReceived * payRate * 100) / 100 : actualPayReceived;
 
       const txPay = db.transaction(() => {
         // F07: Atomic check in processed_operations
@@ -7531,7 +7581,10 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     
     try {
       const rateRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('exchange_rate') as any;
-      const currentRate = exchange_rate ? Number(exchange_rate) : (rateRow ? parseFloat(rateRow.value) : 6.96);
+      const currentRate = exchange_rate !== undefined && exchange_rate !== null ? Number(exchange_rate) : (rateRow ? parseFloat(rateRow.value) : 6.96);
+      if (!Number.isFinite(currentRate) || currentRate <= 0) {
+        return res.status(400).json({ error: "Tipo de cambio inválido. Debe ser un valor numérico positivo mayor a cero." });
+      }
       const safeCurrency = currency || 'BOB';
       const safeDiscount = Math.max(0, Number(discount || 0));
       
@@ -7549,6 +7602,8 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         client_name: String(client_name).trim(),
         destination: effectiveDestination,
         order_type: normalizedOrderType,
+        reserve_stock: shouldReserveStock,
+        paid_amount: safePaid,
         items: items.map((it: any) => ({
           product_id: Number(it.product_id),
           quantity: Number(it.quantity),
@@ -7737,8 +7792,11 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         : true;
 
       const verifiedUser = (req as any).verifiedUser;
-      const userPerms = verifiedUser?.permissions || {};
+      const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
       const isAdmin = verifiedUser && (['admin', 'administrador', 'propietario'].includes(String(verifiedUser?.role || '').toLowerCase()) || isMainAdmin(verifiedUser));
+      if (!isAdmin && userPerms.edit_pending_sales === false && userPerms.create_pending_sales === false) {
+        return res.status(403).json({ error: "No tienes autorización para editar pedidos o ventas pendientes." });
+      }
       const canModifyPrices = isAdmin || !!userPerms.modify_prices || !!userPerms.edit_prices;
       const currentRate = Number(existing.exchange_rate || 6.96);
       const safeCurrency = existing.currency || 'BOB';
@@ -7800,6 +7858,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         }
       }
 
+      const oldItems = db.prepare('SELECT id FROM pending_sale_items WHERE pending_sale_id = ?').all(id) as any[];
       const itemIds: any[] = [];
       db.transaction(() => {
         db.prepare(`
@@ -7833,6 +7892,17 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           itemIds.push(iRes.lastInsertRowid);
         }
       })();
+
+      // Clean up replaced pending_sale_items in Firestore so removed lines do not resurrect
+      try {
+        const newIdsSet = new Set(itemIds.map(x => String(x)));
+        for (const oldIt of oldItems) {
+          if (!newIdsSet.has(String(oldIt.id))) {
+            recordDeletion('pending_sale_items', oldIt.id);
+            deleteFromFirestore('pending_sale_items', oldIt.id).catch(() => {});
+          }
+        }
+      } catch (_) {}
       
       syncAfterWrite({
         pending_sales: [id],
@@ -7849,6 +7919,16 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   app.post("/api/pending-sales/:id/toggle-reserve", (req, res) => {
     const { id } = req.params;
     const { reserve_stock, order_type } = req.body;
+    const verifiedUser = (req as any).verifiedUser;
+    if (!verifiedUser) {
+      return res.status(401).json({ error: "Sesión requerida." });
+    }
+    const uRole = String(verifiedUser.role || '').toLowerCase();
+    const isAdmin = ['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser);
+    const userPerms = (typeof verifiedUser.permissions === 'string' ? JSON.parse(verifiedUser.permissions || '{}') : verifiedUser.permissions) || {};
+    if (!isAdmin && userPerms.edit_pending_sales === false && userPerms.create_pending_sales === false) {
+      return res.status(403).json({ error: "No tienes autorización para modificar reservas de stock en ventas pendientes." });
+    }
     try {
       const existing = db.prepare('SELECT * FROM pending_sales WHERE id = ?').get(id) as any;
       if (!existing) {
@@ -7889,6 +7969,16 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
   app.delete("/api/pending-sales/:id", (req, res) => {
     const { id } = req.params;
+    const verifiedUser = (req as any).verifiedUser;
+    if (!verifiedUser) {
+      return res.status(401).json({ error: "Sesión requerida." });
+    }
+    const uRole = String(verifiedUser.role || '').toLowerCase();
+    const isAdmin = ['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser);
+    const userPerms = (typeof verifiedUser.permissions === 'string' ? JSON.parse(verifiedUser.permissions || '{}') : verifiedUser.permissions) || {};
+    if (!isAdmin && userPerms.cancel_pending_sales === false && userPerms.delete_pending_sales === false && userPerms.edit_pending_sales === false) {
+      return res.status(403).json({ error: "No tienes autorización para eliminar pedidos o ventas pendientes." });
+    }
     try {
       const existing = db.prepare('SELECT status FROM pending_sales WHERE id = ?').get(id) as any;
       if (!existing) {
@@ -7917,6 +8007,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       } catch (_) {}
 
       syncAfterWrite(['pending_sales', 'pending_sale_items']);
+      incrementInventoryVersion();
       res.json({ success: true });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
@@ -7926,6 +8017,17 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   app.post("/api/pending-sales/:id/pay", (req, res) => {
     const { id } = req.params;
     const { amount, payment_method, user_id, notes } = req.body;
+    const verifiedUser = (req as any).verifiedUser;
+    if (!verifiedUser) {
+      return res.status(401).json({ error: "Sesión requerida." });
+    }
+    const uRole = String(verifiedUser.role || '').toLowerCase();
+    const isAdmin = ['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser);
+    const userPerms = (typeof verifiedUser.permissions === 'string' ? JSON.parse(verifiedUser.permissions || '{}') : verifiedUser.permissions) || {};
+    if (!isAdmin && userPerms.edit_pending_sales === false && userPerms.create_pending_sales === false) {
+      return res.status(403).json({ error: "No tienes autorización para registrar abonos en ventas pendientes." });
+    }
+    const effectiveOperatorId = Number(verifiedUser.id || user_id || 1);
     try {
       const sale = db.prepare(`SELECT * FROM pending_sales WHERE id = ?`).get(id) as any;
       if (!sale) {
@@ -7936,31 +8038,32 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         return res.status(400).json({ error: `El pedido pendiente #${id} ya fue ${sale.status} y no admite nuevos abonos.` });
       }
       const parsedAmount = Number(amount);
-      if (isNaN(parsedAmount) || parsedAmount <= 0) {
+      if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
         return res.status(400).json({ error: "Monto de pago no válido." });
       }
       
       const totalAmount = Number(sale.total || 0);
       const paidAmount = Number(sale.paid_amount || 0);
-      const remainingAmount = Math.max(0, totalAmount - paidAmount);
+      const remainingAmount = Math.max(0, Math.round((totalAmount - paidAmount) * 100) / 100);
       
-      if (parsedAmount > remainingAmount) {
+      if (parsedAmount > remainingAmount + 0.01) {
         return res.status(400).json({ error: `El abono de Bs. ${parsedAmount.toFixed(2)} excede el saldo restante de Bs. ${remainingAmount.toFixed(2)}` });
       }
       
-      const newPaidAmount = paidAmount + parsedAmount;
-      const newRemainingAmount = Math.max(0, totalAmount - newPaidAmount);
+      const actualAccepted = Math.min(parsedAmount, remainingAmount);
+      const newPaidAmount = Math.min(totalAmount, Math.round((paidAmount + actualAccepted) * 100) / 100);
+      const newRemainingAmount = Math.max(0, Math.round((totalAmount - newPaidAmount) * 100) / 100);
       
       db.transaction(() => {
         db.prepare(`UPDATE pending_sales SET paid_amount = ? WHERE id = ?`).run(newPaidAmount, id);
         db.prepare(`
           INSERT INTO pending_sale_payments (pending_sale_id, amount, payment_method, user_id, notes)
           VALUES (?, ?, ?, ?, ?)
-        `).run(id, parsedAmount, payment_method || 'Efectivo', user_id || 1, notes || 'Abono registrado');
+        `).run(id, actualAccepted, payment_method || 'Efectivo', effectiveOperatorId, notes || 'Abono registrado');
       })();
       
       syncAfterWrite(['pending_sales', 'pending_sale_payments']);
-      res.json({ success: true, actualPayment: parsedAmount, newPaidAmount, newRemainingAmount });
+      res.json({ success: true, actualPayment: actualAccepted, newPaidAmount, newRemainingAmount });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -7985,6 +8088,17 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   app.post("/api/pending-sales/:id/finalize", (req, res) => {
     const { id } = req.params;
     const { payment_method, user_id, client_id, initial_abono, due_date, redeemed_points } = req.body;
+    const verifiedUser = (req as any).verifiedUser;
+    if (!verifiedUser) {
+      return res.status(401).json({ error: "Sesión requerida." });
+    }
+    const uRole = String(verifiedUser.role || '').toLowerCase();
+    const isAdmin = ['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser);
+    const userPerms = (typeof verifiedUser.permissions === 'string' ? JSON.parse(verifiedUser.permissions || '{}') : verifiedUser.permissions) || {};
+    if (!isAdmin && userPerms.complete_pending_sales === false && userPerms.create_sales === false) {
+      return res.status(403).json({ error: "No tienes autorización para finalizar o cobrar ventas pendientes." });
+    }
+    const effectiveOperatorId = Number(verifiedUser.id || user_id || 1);
     try {
       if (checkInventoryLock(res)) return;
 
@@ -7999,11 +8113,38 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       if (items.length === 0) {
         return res.status(400).json({ error: "El pedido no tiene artículos." });
       }
+
+      const wasReservingStock = sale.reserve_stock !== undefined && sale.reserve_stock !== null
+        ? Number(sale.reserve_stock) === 1
+        : true;
+
+      // Consolidate aggregate demand per product and verify available stock (excluding only this order's own reservation)
+      const demandByProduct = new Map<number, number>();
+      for (const it of items) {
+        const pId = Number(it.product_id);
+        const qty = Number(it.quantity) || 0;
+        demandByProduct.set(pId, (demandByProduct.get(pId) || 0) + qty);
+      }
+      for (const [pId, totalOrderQty] of demandByProduct.entries()) {
+        const prodRow = db.prepare('SELECT id, name, stock FROM products WHERE id = ?').get(pId) as any;
+        if (!prodRow) {
+          return res.status(400).json({ error: `El producto con ID ${pId} no existe en el inventario.` });
+        }
+        const totalReservedAll = getReservedStock(pId);
+        const ownReservedQty = wasReservingStock ? totalOrderQty : 0;
+        const reservedByOthers = Math.max(0, totalReservedAll - ownReservedQty);
+        const netAvailableForThisOrder = Math.max(0, (Number(prodRow.stock) || 0) - reservedByOthers);
+        if (totalOrderQty > netAvailableForThisOrder) {
+          return res.status(400).json({
+            error: `Venta rechazada: Stock disponible insuficiente para "${prodRow.name}". Físico: ${prodRow.stock}, Reservado por otros pedidos: ${reservedByOthers}, Disponible para este cobro: ${netAvailableForThisOrder}, Solicitado: ${totalOrderQty}.`
+          });
+        }
+      }
       
       const safeTotal = Math.max(0, Number(sale.total || 0));
       const safeDiscount = Math.max(0, Number(sale.discount || 0));
       const safeCurrency = sale.currency || 'BOB';
-      const safeRate = sale.exchange_rate || 6.96;
+      const safeRate = Number(sale.exchange_rate || 6.96) > 0 ? Number(sale.exchange_rate || 6.96) : 6.96;
       
       const saleInsert = db.prepare('INSERT INTO sales (total, discount, payment_method, user_id, client_id, exchange_rate, currency, cierre_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)');
       const itemInsert = db.prepare('INSERT INTO sale_items (sale_id, product_id, quantity, price, cost, product_name_snapshot, product_sku_snapshot, subtotal_minor) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
@@ -8019,7 +8160,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       
       db.transaction(() => {
         const nowIso = getBoliviaISOString();
-        const result = saleInsert.run(safeTotal, safeDiscount, payment_method || 'Efectivo', user_id || 1, client_id || null, safeRate, safeCurrency, nowIso);
+        const result = saleInsert.run(safeTotal, safeDiscount, payment_method || 'Efectivo', effectiveOperatorId, client_id || null, safeRate, safeCurrency, nowIso);
         finalSaleId = result.lastInsertRowid;
         
         for (const item of items) {
@@ -8050,13 +8191,13 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           const afterStock = Math.max(0, beforeStock - item.quantity);
 
           // Get username or cashier doing this
-          const userRow = db.prepare('SELECT username, role FROM users WHERE id = ?').get(user_id || 1) as any;
-          const uName = userRow?.username || 'Cajero';
-          const uRole = userRow?.role || 'cajero';
+          const userRow = db.prepare('SELECT username, role FROM users WHERE id = ?').get(effectiveOperatorId) as any;
+          const uName = userRow?.username || verifiedUser?.username || 'Cajero';
+          const uRoleRow = userRow?.role || verifiedUser?.role || 'cajero';
 
           // Log to inventory_audit_logs
           const auditUser = (req as any).auditUser || {};
-          const normUserId = auditUser.userId || user_id || 1;
+          const normUserId = auditUser.userId || effectiveOperatorId;
           const normUsername = auditUser.userName || uName || 'Cajero';
           const invRes = db.prepare(`
             INSERT INTO inventory_audit_logs 
@@ -8074,9 +8215,9 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
             entityType: 'producto',
             entityId: item.product_id,
             entityName: pName,
-            userId: user_id || 1,
+            userId: effectiveOperatorId,
             userName: uName,
-            userRole: uRole,
+            userRole: uRoleRow,
             quantityBefore: beforeStock,
             quantityChanged: -item.quantity,
             quantityAfter: afterStock,
@@ -8103,9 +8244,9 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         }
         
         // P03: Cash movement and seller drawer accounting
-        const activeUserId = Number(req.headers['x-user-id']) || Number(user_id) || 1;
+        const activeUserId = effectiveOperatorId;
         const sellerRow = db.prepare('SELECT username FROM users WHERE id = ?').get(activeUserId) as any;
-        const sName = sellerRow?.username || 'Cajero';
+        const sName = sellerRow?.username || verifiedUser?.username || 'Cajero';
 
         db.prepare(`
           INSERT OR IGNORE INTO cash_accounts (seller_id, seller_username, current_balance)

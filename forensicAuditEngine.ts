@@ -385,7 +385,7 @@ export function getProductForensicTimeline(
     totalAdjustmentsDec,
     totalReturns,
     anomaliesDetected: anomaliesCount + (isBalanced ? 0 : 1),
-    hasSufficientHistory: Boolean(createLog) || arrivals.length > 0,
+    hasSufficientHistory: Boolean(createLog),
     timeline,
     identifiedGaps
   };

@@ -53,9 +53,11 @@ export default function CuentasPorCobrarView() {
     // Accounts Receivable Modals
     const [selectedDebt, setSelectedDebt] = useState<AccountReceivable | null>(null);
     const [paymentAmount, setPaymentAmount] = useState('');
+    const [paymentCurrency, setPaymentCurrency] = useState<'BOB' | 'USD'>('BOB');
     const [paymentMethod, setPaymentMethod] = useState<'Efectivo' | 'Tarjeta' | 'Transferencia'>('Efectivo');
     const [paymentNotes, setPaymentNotes] = useState('');
     const [paying, setPaying] = useState(false);
+    const [creditPaymentOpId, setCreditPaymentOpId] = useState<string>('');
 
     const [historyDebt, setHistoryDebt] = useState<AccountReceivable | null>(null);
     const [paymentHistory, setPaymentHistory] = useState<PaymentHistory[]>([]);
@@ -98,6 +100,7 @@ export default function CuentasPorCobrarView() {
     const [paymentPendingMethod, setPaymentPendingMethod] = useState<'Efectivo' | 'Tarjeta' | 'Transferencia'>('Efectivo');
     const [paymentPendingNotes, setPaymentPendingNotes] = useState('');
     const [registeringPendingPayment, setRegisteringPendingPayment] = useState(false);
+    const [pendingPaymentOpId, setPendingPaymentOpId] = useState<string>('');
 
     const [historyPendingSale, setHistoryPendingSale] = useState<any | null>(null);
     const [pendingPaymentHistory, setPendingPaymentHistory] = useState<any[]>([]);
@@ -198,6 +201,19 @@ export default function CuentasPorCobrarView() {
         loadProducts();
     }, []);
 
+    useEffect(() => {
+        if (selectedDebt) {
+            setPaymentCurrency('BOB');
+            setCreditPaymentOpId(`ar_pay_${selectedDebt.id}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`);
+        }
+    }, [selectedDebt?.id]);
+
+    useEffect(() => {
+        if (payingPendingSale) {
+            setPendingPaymentOpId(`ps_pay_${payingPendingSale.id}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`);
+        }
+    }, [payingPendingSale?.id]);
+
     // --- Actions for Accounts Receivable ---
     const handleApplyPayment = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -209,10 +225,16 @@ export default function CuentasPorCobrarView() {
             return;
         }
 
-        if (amount > selectedDebt.remaining_amount) {
-            showToast(`El pago excede el saldo restante de Bs. ${selectedDebt.remaining_amount.toFixed(2)}`, 'error');
+        const effectiveRate = Number(exchangeRate) > 0 ? Number(exchangeRate) : 9.36;
+        const equivalentBs = paymentCurrency === 'USD' ? Number((amount * effectiveRate).toFixed(2)) : amount;
+
+        if (equivalentBs > selectedDebt.remaining_amount + 0.05) {
+            showToast(`El pago equivalente (Bs. ${equivalentBs.toFixed(2)}) excede el saldo restante de Bs. ${selectedDebt.remaining_amount.toFixed(2)}`, 'error');
             return;
         }
+
+        const opId = creditPaymentOpId || `ar_pay_${selectedDebt.id}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+        if (!creditPaymentOpId) setCreditPaymentOpId(opId);
 
         setPaying(true);
         try {
@@ -221,18 +243,23 @@ export default function CuentasPorCobrarView() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     amount,
+                    currency: paymentCurrency,
+                    exchange_rate: effectiveRate,
                     payment_method: paymentMethod,
                     user_id: user?.id || 1,
-                    notes: paymentNotes.trim() || 'Abono registrado en sistema'
+                    notes: paymentNotes.trim() || (paymentCurrency === 'USD' ? `Abono en USD ($${amount.toFixed(2)} @ ${effectiveRate})` : 'Abono registrado en sistema'),
+                    clientOperationId: opId
                 })
             });
 
             if (res.ok) {
                 const data = await res.json();
-                showToast(`✓ Abono de Bs. ${data.actualPayment.toFixed(2)} registrado correctamente.`);
+                const appliedBs = Number(data.debtReduction ?? data.actualPayment ?? equivalentBs);
+                showToast(`✓ Abono aplicado por Bs. ${appliedBs.toFixed(2)} correctamente.`);
                 setSelectedDebt(null);
                 setPaymentAmount('');
                 setPaymentNotes('');
+                setCreditPaymentOpId('');
                 loadAccountsReceivable();
             } else {
                 const err = await res.json();
@@ -257,10 +284,13 @@ export default function CuentasPorCobrarView() {
         }
         
         const remaining = payingPendingSale.total - (payingPendingSale.paid_amount || 0);
-        if (amount > remaining) {
+        if (amount > remaining + 0.05) {
             showToast(`El monto excede el saldo restante de Bs. ${remaining.toFixed(2)}`, 'error');
             return;
         }
+
+        const opId = pendingPaymentOpId || `ps_pay_${payingPendingSale.id}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+        if (!pendingPaymentOpId) setPendingPaymentOpId(opId);
         
         setRegisteringPendingPayment(true);
         try {
@@ -271,7 +301,8 @@ export default function CuentasPorCobrarView() {
                     amount,
                     payment_method: paymentPendingMethod,
                     user_id: user?.id || 1,
-                    notes: paymentPendingNotes.trim() || 'Abono parcial registrado'
+                    notes: paymentPendingNotes.trim() || 'Abono parcial registrado',
+                    clientOperationId: opId
                 })
             });
             if (res.ok) {
@@ -279,6 +310,7 @@ export default function CuentasPorCobrarView() {
                 setPayingPendingSale(null);
                 setPaymentPendingAmount('');
                 setPaymentPendingNotes('');
+                setPendingPaymentOpId('');
                 loadPendingSales();
             } else {
                 const err = await res.json();
@@ -2587,13 +2619,36 @@ export default function CuentasPorCobrarView() {
                                 </div>
 
                                 <div className="flex flex-col gap-1.5">
-                                    <label className="font-extrabold text-slate-400 uppercase tracking-widest text-[9px] block">Monto del Reintegro (Bs.):</label>
+                                    <div className="flex items-center justify-between">
+                                        <label className="font-extrabold text-slate-400 uppercase tracking-widest text-[9px] block">
+                                            Monto del Reintegro ({paymentCurrency === 'USD' ? '$ USD' : 'Bs.'}):
+                                        </label>
+                                        <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-900 p-0.5 rounded-lg border border-slate-200 dark:border-slate-800">
+                                            {(['BOB', 'USD'] as const).map((curr) => (
+                                                <button
+                                                    key={curr}
+                                                    type="button"
+                                                    onClick={() => {
+                                                        setPaymentCurrency(curr);
+                                                        setPaymentAmount('');
+                                                    }}
+                                                    className={`px-2 py-0.5 rounded-md text-[8.5px] font-black uppercase transition cursor-pointer ${
+                                                        paymentCurrency === curr
+                                                            ? 'bg-indigo-600 text-white shadow-sm'
+                                                            : 'text-slate-500 hover:text-slate-700 dark:text-slate-400'
+                                                    }`}
+                                                >
+                                                    {curr === 'BOB' ? 'Bs (BOB)' : '$ (USD)'}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
                                     <div className="relative">
                                         <input 
                                             type="number" 
                                             step="0.01"
-                                            max={selectedDebt.remaining_amount}
-                                            placeholder="Ingrese monto a cobrar" 
+                                            max={paymentCurrency === 'USD' ? Number((selectedDebt.remaining_amount / (Number(exchangeRate) || 9.36)).toFixed(2)) : selectedDebt.remaining_amount}
+                                            placeholder={paymentCurrency === 'USD' ? "Ingrese monto en dólares ($)" : "Ingrese monto a cobrar (Bs.)"} 
                                             className="px-4 py-2.5 w-full bg-slate-50/50 dark:bg-black/10 border border-slate-250 dark:border-slate-800 rounded-2xl focus:outline-none focus:border-indigo-500 font-mono font-extrabold text-sm dark:text-white"
                                             value={paymentAmount}
                                             onChange={(e) => setPaymentAmount(e.target.value)}
@@ -2601,20 +2656,42 @@ export default function CuentasPorCobrarView() {
                                         />
                                         <button 
                                             type="button"
-                                            onClick={() => setPaymentAmount(selectedDebt.remaining_amount.toFixed(2))}
+                                            onClick={() => {
+                                                const rate = Number(exchangeRate) > 0 ? Number(exchangeRate) : 9.36;
+                                                setPaymentAmount(
+                                                    paymentCurrency === 'USD'
+                                                        ? (selectedDebt.remaining_amount / rate).toFixed(2)
+                                                        : selectedDebt.remaining_amount.toFixed(2)
+                                                );
+                                            }}
                                             className="absolute right-3 top-2.5 px-2 py-0.5 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-500 font-black rounded-lg text-[9px] uppercase tracking-wider transition"
                                         >
                                             Total
                                         </button>
                                     </div>
                                     
-                                    {Number(paymentAmount) > 0 && Number(paymentAmount) <= selectedDebt.remaining_amount && (
-                                        <div className="flex justify-between items-center text-[10px] text-slate-400 font-mono font-bold mt-1.5 bg-slate-50/40 dark:bg-black/10 px-2 py-1 rounded-lg">
-                                            <span>NUEVO SALDO RESTANTE:</span>
-                                            <span className="text-emerald-500 dark:text-emerald-400 font-black">
-                                                Bs. {(selectedDebt.remaining_amount - Number(paymentAmount)).toFixed(2)}
-                                            </span>
-                                        </div>
+                                    {Number(paymentAmount) > 0 && (
+                                        (() => {
+                                            const rate = Number(exchangeRate) > 0 ? Number(exchangeRate) : 9.36;
+                                            const equivBs = paymentCurrency === 'USD' ? Number((Number(paymentAmount) * rate).toFixed(2)) : Number(paymentAmount);
+                                            const newRemaining = Math.max(0, selectedDebt.remaining_amount - equivBs);
+                                            return equivBs <= selectedDebt.remaining_amount + 0.05 ? (
+                                                <div className="flex flex-col gap-1 text-[10px] text-slate-400 font-mono font-bold mt-1.5 bg-slate-50/40 dark:bg-black/10 px-2.5 py-1.5 rounded-lg">
+                                                    {paymentCurrency === 'USD' && (
+                                                        <div className="flex justify-between items-center text-indigo-500 dark:text-indigo-400">
+                                                            <span>EQUIVALENTE (T.C. {rate.toFixed(2)}):</span>
+                                                            <span className="font-black">Bs. {equivBs.toFixed(2)}</span>
+                                                        </div>
+                                                    )}
+                                                    <div className="flex justify-between items-center">
+                                                        <span>NUEVO SALDO RESTANTE:</span>
+                                                        <span className="text-emerald-500 dark:text-emerald-400 font-black">
+                                                            Bs. {newRemaining.toFixed(2)}
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                            ) : null;
+                                        })()
                                     )}
                                 </div>
 

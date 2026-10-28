@@ -1613,8 +1613,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         });
     };
 
-    // STRICT ITEM CONSOLIDATION & QUANTITY ADDITION RULE (WITH STOCK LEVEL LITERALLY BOUNDED)
+    // STRICT ITEM CONSOLIDATION & QUANTITY ADDITION RULE (WITH STOCK LEVEL LITERALLY BOUNDED BY AVAILABLE STOCK)
     const addToCart = (product: Product, quantity: number = 1) => {
+        const availableStock = (product as any).stock_available !== undefined && (product as any).stock_available !== null
+            ? Number((product as any).stock_available)
+            : Number(product.stock || 0);
         setCart(prev => {
             const existing = prev.find(item => item.id === product.id);
             if (existing) {
@@ -1622,11 +1625,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 if (newQuantity <= 0) {
                     return prev.filter(item => item.id !== product.id);
                 }
-                if (newQuantity > product.stock) {
-                    newQuantity = product.stock;
+                if (newQuantity > availableStock) {
+                    newQuantity = availableStock;
                     setTimeout(() => {
                         safeDispatchEvent('stockLimitHit', { 
-                            detail: { name: product.name, stock: product.stock } 
+                            detail: { name: product.name, stock: availableStock } 
                         });
                     }, 0);
                 }
@@ -1638,11 +1641,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             }
             if (quantity <= 0) return prev;
             let finalQty = quantity;
-            if (finalQty > product.stock) {
-                finalQty = product.stock;
+            if (finalQty > availableStock) {
+                finalQty = availableStock;
                 setTimeout(() => {
                     safeDispatchEvent('stockLimitHit', { 
-                        detail: { name: product.name, stock: product.stock } 
+                        detail: { name: product.name, stock: availableStock } 
                     });
                 }, 0);
             }
@@ -1655,12 +1658,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setCart(prev => {
             return prev.map(item => {
                 if (item.id === productId) {
+                    const availableStock = (item as any).stock_available !== undefined && (item as any).stock_available !== null
+                        ? Number((item as any).stock_available)
+                        : Number(item.stock || 0);
                     let finalQty = isNaN(qty) ? 0 : Math.max(0, qty);
-                    if (finalQty > item.stock) {
-                        finalQty = item.stock;
+                    if (finalQty > availableStock) {
+                        finalQty = availableStock;
                         setTimeout(() => {
                             safeDispatchEvent('stockLimitHit', { 
-                                detail: { name: item.name, stock: item.stock } 
+                                detail: { name: item.name, stock: availableStock } 
                             });
                         }, 0);
                     }
