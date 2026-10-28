@@ -864,17 +864,29 @@ export default function Inventory() {
         }
     };
 
+    const stockInOpIdRef = useRef<string>('');
+
+    useEffect(() => {
+        stockInOpIdRef.current = '';
+    }, [selectedProductForStockIn?.id, stockInQuantity, keepSameCost, newCostPrice]);
+
     const handleSaveStockIn = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!selectedProductForStockIn || !stockInQuantity || stockInQuantity <= 0) {
             showNotification("Por favor selecciona un producto y pon una cantidad válida.", "error");
             return;
         }
+        if (isSubmittingStockIn) return;
 
         setIsSubmittingStockIn(true);
         const finalCost = keepSameCost 
             ? (selectedProductForStockIn.price_cost || 0) 
             : Number(newCostPrice || 0);
+
+        if (!stockInOpIdRef.current) {
+            stockInOpIdRef.current = `arrival_${selectedProductForStockIn.id}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+        }
+        const currentOpId = stockInOpIdRef.current;
 
         try {
             const res = await fetch('/api/stock-arrivals', {
@@ -883,11 +895,13 @@ export default function Inventory() {
                 body: JSON.stringify({
                     product_id: selectedProductForStockIn.id,
                     quantity: Number(stockInQuantity),
-                    arrival_price: finalCost
+                    arrival_price: finalCost,
+                    clientOperationId: currentOpId
                 })
             });
 
             if (res.ok) {
+                stockInOpIdRef.current = '';
                 showNotification(`✓ Agregadas ${stockInQuantity} unidades al stock de "${selectedProductForStockIn.name}"`, "success");
                 
                 // Dispatch global inventory operation event

@@ -1,0 +1,503 @@
+GTR666 — VERIFICACIÓN DE LAS CORRECCIONES APLICADAS
+Fecha: 27 de octubre de 2026, Bolivia
+Commit revisado: e8f55b7eba4c3a975998d1d0e2c9d7b9fdfae3ec
+Hora del commit: 27/10/2026, 21:05:29, Bolivia
+Comparación: ff17b7d -> e8f55b7
+Repositorio: https://github.com/robymetalero-hue/GTR666
+
+RESPUESTA PRINCIPAL
+
+Sí se aplicaron correcciones reales y varias resolvieron exactamente los casos
+que fallaban en la revisión anterior. Sin embargo, la corrección es parcial:
+persisten problemas importantes y algunos controles nuevos solo cubren una
+combinación de permisos o un camino normal de sincronización.
+
+No se puede declarar que todos los errores anteriores estén solucionados.
+Este documento distingue las correcciones comprobadas de los casos pendientes.
+
+No se modificaron GitHub, el despliegue ni los datos comerciales. No se
+ejecutaron scripts sobre SQLite o Firestore de producción.
+
+============================================================
+1. CÓMO SE VERIFICÓ
+============================================================
+
+Se comprobó el árbol del último commit y la integridad SHA Git de 152 archivos:
+142 conservan la misma versión y 10 archivos de código/scripts cambiaron.
+Se revisaron los cambios y se ejecutaron sus handlers reales con fixtures,
+SQLite aislado y dobles controlados de Firebase y efectos externos.
+
+Repetición de los controles anteriores:
+- Antes: 150 de 197 cumplían la expectativa.
+- Ahora: 172 de 197 cumplen.
+- 24 casos que fallaban ahora cumplen.
+- Dos casos antiguos cambian de PASS a diferencia de contrato porque la ruta
+  de edición ahora ignora stock; se explican en el apartado 9. No son una
+  demostración de que se pueda volver a alterar stock sin permiso.
+
+Además:
+- 13 escenarios de límites y combinaciones: 2 cumplen y 11 difieren.
+- Total: 210 comprobaciones, 174 cumplen, 36 diferencias, 0 errores pendientes
+  del entorno de pruebas.
+
+Estas diferencias no son 36 vulnerabilidades independientes: hay repeticiones,
+casos de contrato y escenarios condicionados a la topología. El resultado no
+es una puntuación global de seguridad.
+
+Sintaxis:
+- 112 archivos JS/CJS/TS sin JSX: sin errores detectados.
+- 31 TSX: no se ejecutó compilación integral.
+- npm run build y npm run lint: NO EJECUTADOS.
+- No se montó React ni se probaron pantallas o impresoras reales.
+
+Método:
+Se utilizó node:sqlite como adaptador para ejecutar la lógica extraída; no el
+better-sqlite3 del despliegue. La autenticación usó sesiones ficticias válidas
+y la lógica real de autorización, no un proveedor JWT/HTTP real. Firebase fue
+simulado; no se utilizó una cuenta comercial ni la credencial del repositorio.
+
+Adaptaciones del diagnóstico, sin modificar la app:
+- Se añadieron los estados nuevos del formulario a los fixtures, conservando
+  su clave entre reintentos y aplicando sus setters.
+- El caso de abono N09 ahora ejecuta el handler actual de la interfaz; no
+  conserva el JSON antiguo que ya no envía esa interfaz.
+- Se suministró el lector real isRecordDeleted a los dobles de sincronización.
+- Se reprodujo una replicación programada y completada sin errores antes de
+  comprobar la deuda devuelta.
+- Se añadieron el constructor de lectura y la identidad sandbox necesarios
+  para probar el nuevo respaldo.
+- Los scripts de limpieza se ejercitaron con módulos ficticios tanto en su
+  modo por defecto como en la rama que correspondería a --execute.
+No se ejecutó ese modo contra datos reales.
+
+============================================================
+2. CORRECCIONES QUE SÍ CUMPLEN LOS CASOS COMPROBADOS
+============================================================
+
+A. Sandbox ya tiene prioridad en el servidor
+server.ts:223 y database.ts:44.
+W13, T13, E16, V02 y V03 cumplen.
+Con APP_ENV=sandbox/test, Host o x-app-environment=production no seleccionaron
+la base productiva en los casos ejecutados. También se consideró el arranque
+normal cuando APP_ENV no está definido.
+
+B. Editar productos ya no repone el stock antiguo
+server.ts:3162; Inventory.tsx:1399.
+T20 cumple:
+formulario antiguo con stock=15, stock real=8, guardar metadatos -> sigue en 8.
+El frontend omite stock al editar y muestra ese campo protegido. El servidor
+conserva el stock actual y deriva ajustes a los caminos de inventario.
+
+C. Reservas y disponibilidad
+W02 y W14 cumplen:
+- Finalizar una cotización sin reserva ya respeta las reservas de otros pedidos.
+- Con físico=10, reservado=8 y disponible=2, el carrito rechaza agregar 3.
+El POS y AppContext ahora usan stock_available en sus límites.
+
+D. Los bloqueos de permisos más evidentes sí se añadieron
+W01 y W16 cumplen:
+- Si crear y editar pedidos están ambos revocados, no se libera una reserva.
+- Si crear ventas y finalizar pedidos están ambos revocados, no se convierte
+  el pedido en venta.
+Esto no implica que TODAS las combinaciones de permisos estén cerradas:
+el apartado 3 muestra un bypass que todavía existe.
+
+E. Recuperación de limpieza en el camino normal
+firebaseSync.ts:688-741.
+W04, W05, W06 y Y09 cumplen:
+- Se conservan los hashes de operaciones.
+- La ausencia de hash en un snapshot no borra el hash que existe localmente.
+- Una instancia inicialmente limpia carga los marcadores antes de importar
+  una copia remota vieja, en un pull normal.
+- Una operación distinta con la misma clave sigue generando conflicto.
+
+F. Claves invalidadas ya se rechazan en ventas
+server.ts:6967.
+W07 cumple: una clave marcada blocked_incident_399 devuelve 409, sin devolver
+éxito comercial para una venta retirada.
+
+G. Líneas de pendientes y reintentos
+- S01 cumple: se registran eliminaciones de líneas sustituidas y ya no regresan
+  en el caso normal probado de editar y sincronizar un pedido.
+- D01 cumple: perder la respuesta de un pedido confirmado y reintentar desde
+  el mismo formulario abierto ya conserva la clave y produce un solo pedido.
+  No se probó persistencia de esa intención tras recargar el navegador.
+- D02 cumple: cambiar el abono inicial con la misma clave genera conflicto.
+- W08 cumple: cambiar la política de reserva con la misma clave genera conflicto.
+
+H. Créditos y devoluciones
+- N08 cumple: una tasa negativa de abono se rechaza y no aumenta la deuda.
+- N09 cumple para el caso pequeño comprobado: Bs 5 a una deuda USD 10, a tasa
+  10, reduce la deuda en USD 0,50 y registra Bs 5.
+- T07 cumple cuando la replicación programada del crédito se completa antes
+  del pull. La cuenta por cobrar modificada ahora está incluida en el sync.
+- N11 cumple para el caso de seis devoluciones cuyo residuo era Bs 0,02.
+  El límite de esa corrección todavía deja otro caso sin resolver.
+
+I. Historia incompleta y respaldos
+- T12 cumple: una compra aislada ya no se acepta como saldo inicial suficiente
+  para corregir stock de 55 a 5.
+- N04 cumple: un snapshot sandbox ya no reemplaza el respaldo raíz productivo.
+- Se añadió integrity_check antes de restaurar un respaldo productivo.
+- Y12 cumple: el script de remediación SQLite, sin --execute, termina antes
+  de abrir la base comercial.
+
+J. Se conservan mejoras anteriores
+Los 21 casos de búsqueda, precios, redondeo, carrito y escáner vuelven a cumplir.
+También se mantienen los controles comprobados de costos offline, crédito,
+conteo físico e identidad del cajero.
+
+============================================================
+3. PENDIENTE ALTO: PERMISOS GRANULARES NO RESPETADOS
+============================================================
+
+Caso Y01 — eliminar un pedido con el permiso revocado
+server.ts:7979; DELETE /api/pending-sales/:id.
+
+Fixture de cajero:
+- delete_pending_sales=false.
+- edit_pending_sales=false.
+- create_pending_sales=false.
+- cancel_pending_sales no existe.
+
+Resultado real del handler:
+HTTP 200 y el pedido fue eliminado.
+
+Causa:
+El rechazo exige que TRES valores sean exactamente false, incluido un permiso
+cancel_pending_sales que no figura en los valores predeterminados revisados.
+Si ese campo es undefined, la condición no bloquea el borrado.
+
+Caso Y02 — crear no debe equivaler a editar cualquier reserva
+server.ts:7929.
+Con create_pending_sales=true y edit_pending_sales=false, el cajero cambió una
+reserva existente de 1 a 0 y obtuvo HTTP 200.
+
+La guardia utiliza combinaciones con AND entre revocaciones. Eso protege el
+caso donde todos los indicadores están en false, pero no aplica cada permiso
+a la acción que representa.
+
+Corrección puntual:
+- Resolver permisos mediante una función común con los valores configurados.
+- Respetar la revocación explícita de eliminar o editar en la ruta correspondiente.
+- No depender de un permiso alternativo ausente para bloquear una operación.
+- Separar crear, editar, reservar/liberar, abonar, eliminar y finalizar.
+- Probar cada permiso revocado por separado y las combinaciones.
+- Definir expresamente qué autorizaciones necesita finalizar un pedido y
+  registrar una venta, sin saltarse una revocación por una ruta alternativa.
+
+Aceptación:
+Con eliminar deshabilitado, la petición devuelve 403 y conserva cabecera,
+líneas, reservas y pagos. Con editar deshabilitado, crear un nuevo pedido no
+otorga capacidad de modificar una reserva existente.
+
+============================================================
+4. PENDIENTE ALTO: ABONOS DE PEDIDOS TODAVÍA SE DUPLICAN
+============================================================
+
+Caso Y03 — misma clave, mismo pago, dos registros
+POST /api/pending-sales/:id/pay.
+
+La interfaz ahora manda clientOperationId, pero esta ruta no la consume para
+deduplicar ni guarda su resultado en processed_operations.
+
+Reproducción:
+- Pedido de Bs 100.
+- Abono de Bs 10 con una clave.
+- Repetición del mismo JSON y la misma clave.
+- Resultado: pagado=20 y dos filas de pagos; ambas respuestas HTTP 200.
+
+Corrección:
+Comprobar la clave y el hash de la operación antes de aplicar efectos.
+Registrar pago, cabecera, resultado y clave en la misma transacción.
+Una repetición idéntica debe recuperar el resultado anterior, y una distinta
+con la misma clave debe generar conflicto.
+
+Caso Y04 — reintento de crédito devuelve un error aunque ya se pagó
+POST /api/accounts-receivable/:id/pay.
+
+- Deuda Bs 100.
+- Pago Bs 70 con clave estable: se confirma y queda saldo 30.
+- Se repite esa misma clave y solicitud.
+- Respuesta: HTTP 400 por exceder saldo, aunque es el pago ya confirmado.
+- Quedó un solo pago; aquí el fallo es recuperar su confirmación.
+
+Causa:
+La validación contra el saldo actual ocurre antes de consultar la operación
+procesada. Debe reconocerse primero un reintento confirmado.
+
+También siguen abiertos:
+- T05: devolución sin clave se aplica dos veces.
+- T06: la API de crédito todavía acepta abonos sin clave y puede duplicarlos.
+- T21: repetir el mismo ingreso de mercadería suma stock dos veces aun enviando
+  clientOperationId, porque ese camino no aplica la deduplicación esperada.
+
+============================================================
+5. PENDIENTE ALTO: RECUPERACIÓN FORZADA DEL INCIDENTE #399
+============================================================
+
+Casos Y07 y Y08; firebaseSync.ts:819-824.
+
+La prehidratación arregla una instancia limpia con pull normal, pero:
+
+Y07:
+- La nube tiene una venta #399 vieja y un estado que la marca eliminada.
+- Se ejecuta pullFirestoreToLocal(true).
+- Resultado: sales contiene #399 y deleted_records contiene su marcador.
+
+La rama forceOverwrite elimina la tabla y limpia los marcadores que acababan
+de cargarse; luego importa el documento. La hidratación posterior vuelve a
+insertar el marcador, sin retirar la fila comercial ya importada.
+
+Y08:
+- #399 ya existe en una copia local antigua.
+- Se recupera su marcador remoto y se hace pull normal.
+- Resultado: la venta vieja sigue localmente, aunque el marcador existe.
+
+Corrección:
+- Preservar la invalidación también en descargas forzadas.
+- Aplicarla antes de importar cabeceras y dependencias.
+- Detectar copias locales ya contaminadas y recuperar el incidente de forma
+  coherente e idempotente, incluyendo sus efectos comprobados.
+- No limitarse a ocultar o borrar una cabecera dejando inventario/caja alterados.
+- Verificar con una copia local antigua, una instancia limpia y una réplica
+  remota antigua.
+- Mantener protegida la venta real #398 por Bs 2.150 y toda venta legítima.
+
+Esta revisión no abrió la base comercial ni certifica el resultado real de su
+limpieza. Los IDs de estos casos pertenecen a fixtures ficticios.
+
+============================================================
+6. PENDIENTE ALTO: SCRIPTS DE LIMPIEZA CON DATOS FIJOS
+============================================================
+
+Los scripts ahora son más difíciles de ejecutar accidentalmente. El cambio
+de modo por defecto es útil, pero no corrige la rama real de intervención.
+
+W09 — sigue aplicando deltas sin encontrar objetivos:
+Con #398/#424 ficticias presentes, cero ventas objetivo y sin cuarentena:
+- Producto 1: 100 -> 101.
+- Producto 5: 500 -> 524.
+- Caja de usuario 3: 1000 -> 930.
+
+W10 — la purga remota todavía escribe constantes:
+scripts/execute_firestore_cleanup.cjs:97 y :103.
+Con stock actualizado 17 y 456, termina en 3 y 330 al ejecutar esa rama.
+
+W11 — fallo de nube sigue pareciendo éxito:
+Con todas las llamadas remotas fallando, el script conserva el anuncio de
+finalización y salida 0.
+
+Y11 — el modo seco remoto abre SQLite antes de comprobar el modo:
+La apertura de gtr_pos.db ocurre en la línea 17; el control del modo está
+dentro de runFirestoreCleanup. El constructor se invocó con acceso normal de
+escritura aun sin --execute.
+No se observó una escritura comercial: se comprobó la apertura mediante
+dobles. Una base ausente podría crearse al abrirla así; mover la guardia evita
+esa posibilidad.
+
+Corrección:
+- Colocar la guardia antes de abrir SQLite o iniciar conexiones.
+- Para diagnóstico, usar lectura y presentar objetivos/cambios calculados.
+- Antes de ejecutar, comprobar manifiesto cerrado, hashes y saldos previos.
+- Si no hay objetivos o cambió la instantánea, no tocar stock ni caja.
+- Calcular deltas comprobados y preservar operaciones posteriores.
+- Sincronizar la versión corregida actual; no un stock constante histórico.
+- Verificar la nube y devolver error/estado pendiente si no se completa.
+- Usar un registro explícito de intervención para reanudar y repetir sin
+  volver a aplicar sus efectos.
+
+No reejecutar estas herramientas contra producción solo para verificar el
+código mientras conserven estas condiciones.
+
+============================================================
+7. PENDIENTE: MONEDAS Y RESIDUOS DE DEVOLUCIONES
+============================================================
+
+A. Y05 — la interfaz sigue comparando unidades distintas
+CuentasPorCobrarView.tsx, handleApplyPayment.
+
+Deuda: USD 10; tasa: 10; se intenta abonar Bs 50.
+El handler compara Bs 50 con el número 10 de la deuda y lo rechaza como si
+fueran Bs 10. No se envía ninguna solicitud.
+Lo correcto sería reducir la deuda a USD 5 y registrar Bs 50.
+
+La interfaz ya manda moneda, pero necesita conocer también la moneda del saldo
+de deuda. Mostrar o comparar todos los remaining_amount como Bs no es correcto
+para una venta USD.
+
+B. Y06 — aviso de abono con importe incorrecto
+Deuda Bs 100; abono USD 1 a tasa 10:
+- Backend: pagado Bs 10 y saldo Bs 90, correctamente.
+- Aviso de interfaz: "Abono aplicado por Bs. 1.00".
+
+La interfaz lee debtReduction, pero la respuesta devuelve actualDebtReduction;
+el fallback usa actualPayment, que está en la moneda del pago.
+
+Corrección:
+- Devolver la moneda y datos de conversión de la venta/deuda en el contrato.
+- Comparar el pago convertido con el saldo en su moneda real.
+- Usar los nombres de campos que realmente devuelve el backend.
+- Diferenciar monto recibido, reducción de deuda y saldo final en sus unidades.
+- Guardar metadatos estructurados de moneda/tasa/reducción en el historial;
+  el caso N10 sigue sin cumplir.
+
+C. Y13 — el residuo solo se corrige si no supera Bs 0,05
+El caso antiguo de seis unidades ya cumple, pero:
+- Se venden 40 unidades a Bs 1, descuento Bs 7,50, total Bs 32,50.
+- Se devuelven las 40 en solicitudes parciales.
+- Resultado: 40 unidades devueltas, reembolso total Bs 32,40.
+Faltan Bs 0,10 porque el código limita la corrección del residuo a 0,05.
+
+Corrección:
+Asignar el residuo histórico exacto a la última devolución completa válida,
+respetando lo cobrado y lo ya devuelto. No usar un umbral arbitrario que deja
+de funcionar cuando se acumulan más fracciones.
+
+D. P06 — abonos acumulados al finalizar
+Sigue existiendo el caso:
+pedido de 100 con abono previo de 80, finalización con abono adicional de 50.
+La cuenta termina con paid_amount=100, pero su detalle suma pagos=130.
+Limitar o rechazar el excedente de forma consistente antes de registrar
+cabecera y detalle, en una transacción.
+
+============================================================
+8. OTROS PROBLEMAS ANTERIORES QUE SIGUEN ABIERTOS
+============================================================
+
+A. Firestore y credenciales
+firestore.rules no cambió y conserva lectura/eliminación incondicionales
+en la regla genérica. No se comprobó qué reglas están publicadas.
+Si las publicadas son estas, el riesgo crítico del informe anterior continúa.
+
+El repositorio sigue siendo público y conserva los archivos de exportación y
+respaldo señalados. No se descargó su contenido comercial para esta revisión.
+
+El script remoto ahora lee credenciales desde variables de entorno, pero el
+runtime firebaseSync.ts todavía conserva una contraseña literal.
+Cambiar únicamente el script de limpieza no externaliza la credencial del
+sincronizador de la aplicación. No se reproduce ni se utilizó ese secreto.
+
+B. Respaldo con WAL
+N03 sigue fallando:
+Si el backup nativo falla mientras un lector mantiene WAL activo, el fallback
+de copia simple fue aceptado con 0 filas cuando el origen tenía 1.
+Cambiar a wal_checkpoint(TRUNCATE) no resuelve un checkpoint ocupado/fallido
+si no se comprueba su resultado ni se evita aceptar la copia incompleta.
+
+Mantener la separación de entornos ya corregida y rechazar un respaldo que
+no se pudo completar coherentemente.
+
+C. Reintentos históricos y actualización de versión
+D03 sigue devolviendo 409 al repetir una venta USD confirmada después de
+cambiar la tasa actual. La venta original no cambió en la prueba.
+
+D04 sigue detectando incompatibilidad con operaciones antiguas.
+Y10 comprobó además la versión inmediatamente anterior:
+una venta confirmada por el handler de ff17b7d recibe 409 al repetirla con el
+handler e8f55b7. La incorporación de initial_abono al hash requiere conservar
+compatibilidad o versionar la normalización de operaciones ya guardadas.
+
+T18 sigue dando error por restricción única al recuperar una venta histórica
+que no tiene su respuesta correspondiente en processed_operations.
+N01 todavía pierde respuestas antiguas al migrar una tabla de deduplicación.
+N02 todavía no recupera de forma idempotente la creación de producto.
+
+D. Caché y auditoría
+Q01: una respuesta vieja de productos puede quedar etiquetada con una versión
+posterior obtenida en otra consulta, conservando stock obsoleto.
+T11: auditoría individual y global no incorporan igual un conteo aprobado.
+T09: registrar un intento en el ledger no acredita confirmación en la nube.
+R03: persiste un caso de moneda USD incorrecta en el diagnóstico matemático
+auxiliar; los controles de precios del POS principal sí cumplen.
+
+E. Certificación de 30 escenarios
+scripts/verify_all_30_scenarios.cjs no cambió:
+- Diez escenarios todavía reciben true como aprobación fija.
+- El resumen sigue imprimiendo "0 FALLIDOS".
+- No devuelve salida de error al encontrar fallos.
+W12 reproduce 15 mensajes FAIL seguidos de "15/30 ... 0 FALLIDOS".
+Ese script no permite certificar que todo funciona correctamente.
+
+F. Diagnóstico del incidente
+diagnose_incident_399.cjs conserva columnas inexistentes de caja:
+W15 sigue fallando con "no such column: ca.account_name".
+
+============================================================
+9. QUÉ NO SE ESTÁ CONTANDO COMO UNA NUEVA VULNERABILIDAD
+============================================================
+
+K02 y F10:
+Los tests antiguos esperaban rechazo/auditoría de un ajuste de stock en
+PUT /api/products/:id. Esa ruta ahora conserva el stock e ignora su valor
+enviado. Respondió 200, pero el stock quedó intacto.
+Por eso cambió el resultado bruto de esos tests; no demuestra un ajuste
+no autorizado ni una pérdida de atomicidad de un ajuste que no se ejecutó.
+
+K12:
+El resultado 200 para consultar la cola offline propia sin costos es aceptable;
+no se considera una filtración por sí mismo.
+
+E15:
+El tratamiento de colas al cambiar de cajero requiere definir la política de
+terminal compartida y conservar atribución. El caso se mantiene identificado,
+sin presentarlo automáticamente como acceso indebido.
+
+S07:
+La pérdida reproducida con dos SQLite escritoras independientes es condicional.
+No se verificó que la producción tenga esa topología. Comprobarla antes de
+proponer cambios de infraestructura.
+
+Los 36 resultados diferentes del total incluyen estos casos, duplicidades y
+fallos del mismo grupo. No equivalen a 36 defectos independientes confirmados.
+
+============================================================
+10. CAMBIOS PUNTUALES NECESARIOS PARA CERRAR ESTA REVISIÓN
+============================================================
+
+1) Completar autorización de pedidos
+Respetar cada permiso de la acción, sin depender de flags alternativos ausentes
+ni de combinaciones de revocaciones. Probar crear=true con editar=false y
+eliminar=false con cancelación sin configurar.
+
+2) Cerrar reintentos monetarios
+Consumir la clave de abonos pendientes y recuperar pagos ya confirmados antes
+de validar contra el saldo actual. Versionar hashes para operaciones antiguas.
+Completar claves en devoluciones e ingresos de mercadería.
+
+3) Cerrar recuperación de limpieza
+Preservar marcadores en pulls forzados y tratar copias locales antiguas.
+Mantener corrección idempotente de relaciones, stock y caja. No invalidar
+solamente la visualización de una venta.
+
+4) Retirar constantes y éxitos falsos de scripts
+Validar la instantánea y calcular sus efectos; mover el dry-run antes de toda
+apertura. Ante errores de nube, dejar un estado pendiente y salida de fallo.
+
+5) Completar unidades monetarias
+Comparar pago y saldo en la misma moneda y utilizar actualDebtReduction.
+Resolver el residuo final completo y el excedente de abonos al finalizar.
+
+6) Terminar respaldos y reglas
+Eliminar aceptación de copias SQLite incompletas. Verificar reglas publicadas,
+externalizar la credencial del runtime y revisar archivos comerciales públicos.
+
+7) Verificar honestamente
+Sustituir true fijos por comprobaciones reales o NO EJECUTADO.
+Corregir el esquema del diagnóstico, ejecutar build y lint en una copia aislada,
+y validar interfaz/tickets/despliegue antes de declarar terminado el trabajo.
+
+Estas tareas pueden hacerse en los handlers, consultas, scripts y formularios
+existentes. Se conserva lo que ya pasó y se vuelve a comprobar cada escenario
+relacionado después del cambio. No se necesitan pruebas con ventas ficticias
+en la tienda real ni una reestructuración general.
+
+RESULTADO DE ESTA VERIFICACIÓN
+Hay una mejora demostrada respecto de ff17b7d. Las correcciones principales
+de stock obsoleto, reservas, prioridad sandbox y hashes ya pasan sus casos.
+La seguridad granular, los abonos, la recuperación forzada y las herramientas
+de limpieza todavía requieren los ajustes concretos indicados.
+
+No se verificó qué versión sirve dspos.app ni se certificó la limpieza real
+de producción. Las conclusiones corresponden al código fijado por el commit
+e8f55b7 y a las condiciones aisladas descritas.

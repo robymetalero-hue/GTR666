@@ -51,10 +51,12 @@ export function getCollectionName(tableName: string): string {
 import { 
   validateFirestoreWriteOperation, 
   validateRemoteFirestoreDocument,
+  confirmFirestoreWriteInLedger,
   type UserContext 
 } from './firestoreIntegrityMiddleware.ts';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 
 // Load Firebase app configuration searching multiple potential locations
 let firebaseConfig: any = {};
@@ -118,14 +120,18 @@ export async function ensureServerAuth() {
   if (authAuthenticated) return;
   if (Date.now() < authDisabledUntil) return;
 
+  const email = process.env.FIREBASE_SYNC_EMAIL;
+  const password = process.env.FIREBASE_SYNC_PASSWORD;
+  if (!email || !password) {
+    return;
+  }
+
   if (!authPromise) {
     authPromise = (async () => {
       const authTimeout = new Promise<void>((resolve) => setTimeout(resolve, 3000));
       const authTask = (async () => {
         try {
           const auth = getAuth(app);
-          const email = "server_sync@dstore.app";
-          const password = "ServerSync_SecretPassword!123";
           try {
             await signInWithEmailAndPassword(auth, email, password);
             authAuthenticated = true;
@@ -209,6 +215,72 @@ export const APPEND_ONLY_TABLES = [
 // In-memory cache of last successfully synchronized maximum IDs per table to prevent redundant Firestore operations
 export const lastSyncedMaxIdCache: Record<string, number> = {};
 
+// Zero-Defect Layer 2: SHA-256 Digest Cache & Sync Mutex Queue to prevent double synchronization
+export const lastSyncedDigestCache = new Map<string, string>();
+const VOLATILE_SYNC_META_KEYS = new Set([
+  '_tx_hash',
+  '_tx_timestamp',
+  '_tx_user_id',
+  '_tx_user_name',
+  '_tx_user_role',
+  '_tx_operation',
+  '_syncedAt',
+  '_integrity'
+]);
+
+export const syncDeduplicationStats = {
+  evaluatedCount: 0,
+  skippedIdenticalCount: 0,
+  pushedCount: 0,
+  coalescedWriteTriggers: 0
+};
+
+export function computeCanonicalRecordDigest(tableName: string, data: Record<string, any>): string {
+  const canonicalObj: Record<string, any> = { __table: getCollectionName(tableName) };
+  const sortedKeys = Object.keys(data || {})
+    .filter(k => !VOLATILE_SYNC_META_KEYS.has(k) && data[k] !== undefined)
+    .sort();
+  for (const k of sortedKeys) {
+    canonicalObj[k] = data[k];
+  }
+  return crypto.createHash('sha256').update(JSON.stringify(canonicalObj)).digest('hex');
+}
+
+export function shouldPushRecordToCloud(
+  tableName: string,
+  docId: string | number,
+  payload: Record<string, any>,
+  markAsSynced: boolean = false
+): { shouldPush: boolean; digest: string; cacheKey: string } {
+  const cacheKey = `${getCollectionName(tableName)}:${String(docId)}`;
+  const digest = computeCanonicalRecordDigest(tableName, payload);
+  syncDeduplicationStats.evaluatedCount++;
+  const existing = lastSyncedDigestCache.get(cacheKey);
+  if (existing && existing === digest) {
+    syncDeduplicationStats.skippedIdenticalCount++;
+    return { shouldPush: false, digest, cacheKey };
+  }
+  if (markAsSynced) {
+    lastSyncedDigestCache.set(cacheKey, digest);
+    syncDeduplicationStats.pushedCount++;
+  }
+  return { shouldPush: true, digest, cacheKey };
+}
+
+export function getSyncDeduplicationStats() {
+  return {
+    ...syncDeduplicationStats,
+    cachedDigestsCount: lastSyncedDigestCache.size
+  };
+}
+
+let syncMutexChain: Promise<any> = Promise.resolve();
+export function enqueueSyncTask<T>(taskFn: () => Promise<T>): Promise<T> {
+  const next = syncMutexChain.then(() => taskFn(), () => taskFn());
+  syncMutexChain = next.catch(() => {});
+  return next;
+}
+
 /**
  * Records a deletion in the local deleted_records tombstone table.
  */
@@ -216,6 +288,7 @@ export function recordDeletion(tableName: string, recordId: string | number) {
   try {
     const idStr = String(recordId);
     db.prepare("INSERT OR REPLACE INTO deleted_records (table_name, record_id, deleted_at) VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%S-04:00', 'now', '-4 hours'))").run(tableName, idStr);
+    lastSyncedDigestCache.delete(`${getCollectionName(tableName)}:${idStr}`);
   } catch (e: any) {
     console.warn(`[DeletedRecords] Warning recording deletion for ${tableName} #${recordId}:`, e.message);
   }
@@ -248,10 +321,13 @@ export async function deleteFromFirestore(tableName: string, idOrIds: any | any[
   try {
     let batch = writeBatch(firestore);
     let count = 0;
+    let pendingBatchHashes: string[] = [];
     for (const id of ids) {
       // Validate deletion operation and log to tamper-evident transaction ledger
+      let txHash = '';
       try {
-        validateFirestoreWriteOperation(tableName, id, 'DELETE', undefined, userContext);
+        const validation = validateFirestoreWriteOperation(tableName, id, 'DELETE', undefined, userContext);
+        txHash = validation.txHash;
       } catch (valErr: any) {
         console.warn(`[Firestore Integrity Warning] Blocked delete operation on ${tableName} #${id}:`, valErr.message);
         continue;
@@ -259,15 +335,20 @@ export async function deleteFromFirestore(tableName: string, idOrIds: any | any[
 
       const docRef = doc(firestore, getCollectionName(tableName), String(id));
       batch.delete(docRef);
+      if (txHash) pendingBatchHashes.push(txHash);
       count++;
       if (count >= 400) {
         await batch.commit();
+        confirmFirestoreWriteInLedger(pendingBatchHashes);
+        pendingBatchHashes = [];
         batch = writeBatch(firestore);
         count = 0;
       }
     }
     if (count > 0) {
       await batch.commit();
+      confirmFirestoreWriteInLedger(pendingBatchHashes);
+      pendingBatchHashes = [];
     }
     console.log(`[Sync Delete] Successfully deleted ${ids.length} document(s) from Firestore collection "${tableName}".`);
   } catch (err: any) {
@@ -365,7 +446,7 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
                 AND id NOT IN (
                   SELECT CAST(record_id AS INTEGER) 
                   FROM firestore_transaction_ledger 
-                  WHERE table_name = ?
+                  WHERE table_name = ? AND status IN ('CONFIRMED_IN_CLOUD', 'VALIDATED_AND_COMMITTED')
                 )
             `).all(firestoreMaxId, tableName) as any[];
           } catch (_) {
@@ -385,6 +466,8 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
 
           let batch = writeBatch(firestore);
           let opCount = 0;
+          let pendingBatchHashes: string[] = [];
+          let pendingBatchDigests: Array<{ cacheKey: string; digest: string }> = [];
 
           for (const row of rows) {
             const docId = String(row.id);
@@ -397,11 +480,18 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
               }
             }
 
+            const dedup = shouldPushRecordToCloud(tableName, docId, cleanData, false);
+            if (!dedup.shouldPush) {
+              continue;
+            }
+
             // Strictly validate payload integrity and compute cryptographic transaction hash
             let enrichedData = cleanData;
+            let txHash = '';
             try {
               const validation = validateFirestoreWriteOperation(tableName, docId, 'CREATE', cleanData, userContext);
               enrichedData = validation.enrichedPayload;
+              txHash = validation.txHash;
             } catch (valErr: any) {
               console.warn(`[Firestore Anti-Ghost Violation] Blocked record on ${tableName} #${docId}:`, valErr.message);
               continue;
@@ -409,10 +499,19 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
 
             const docRef = doc(firestore, getCollectionName(tableName), docId);
             batch.set(docRef, enrichedData);
+            if (txHash) pendingBatchHashes.push(txHash);
+            pendingBatchDigests.push({ cacheKey: dedup.cacheKey, digest: dedup.digest });
             opCount++;
 
             if (opCount >= 400) {
               await batch.commit();
+              confirmFirestoreWriteInLedger(pendingBatchHashes);
+              for (const d of pendingBatchDigests) {
+                lastSyncedDigestCache.set(d.cacheKey, d.digest);
+                syncDeduplicationStats.pushedCount++;
+              }
+              pendingBatchHashes = [];
+              pendingBatchDigests = [];
               batch = writeBatch(firestore);
               opCount = 0;
             }
@@ -420,6 +519,13 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
 
           if (opCount > 0) {
             await batch.commit();
+            confirmFirestoreWriteInLedger(pendingBatchHashes);
+            for (const d of pendingBatchDigests) {
+              lastSyncedDigestCache.set(d.cacheKey, d.digest);
+              syncDeduplicationStats.pushedCount++;
+            }
+            pendingBatchHashes = [];
+            pendingBatchDigests = [];
           }
 
           lastSyncedMaxIdCache[tableName] = localMaxId;
@@ -447,6 +553,8 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
       }
       let batch = writeBatch(firestore);
       let opCount = 0;
+      let pendingBatchHashes: string[] = [];
+      let pendingBatchDigests: Array<{ cacheKey: string; digest: string }> = [];
 
       for (const row of rows) {
         const docId = isSettings ? row.key : String(row.id);
@@ -457,15 +565,22 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
             cleanData[key] = val;
           }
         }
+
+        const dedup = shouldPushRecordToCloud(tableName, docId, cleanData, false);
+        if (!dedup.shouldPush) {
+          continue;
+        }
         if (isSettings && !cleanData.updated_at) {
           cleanData.updated_at = new Date().toISOString();
         }
 
         // Validate payload & compute transaction hash
         let enrichedData = cleanData;
+        let txHash = '';
         try {
           const validation = validateFirestoreWriteOperation(tableName, docId, 'CREATE', cleanData, userContext);
           enrichedData = validation.enrichedPayload;
+          txHash = validation.txHash;
         } catch (valErr: any) {
           console.warn(`[Firestore Anti-Ghost Violation] Blocked targeted row on ${tableName} #${docId}:`, valErr.message);
           continue;
@@ -473,10 +588,19 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
 
         const docRef = doc(firestore, getCollectionName(tableName), docId);
         batch.set(docRef, enrichedData);
+        if (txHash) pendingBatchHashes.push(txHash);
+        pendingBatchDigests.push({ cacheKey: dedup.cacheKey, digest: dedup.digest });
         opCount++;
 
         if (opCount >= 400) {
           await batch.commit();
+          confirmFirestoreWriteInLedger(pendingBatchHashes);
+          for (const d of pendingBatchDigests) {
+            lastSyncedDigestCache.set(d.cacheKey, d.digest);
+            syncDeduplicationStats.pushedCount++;
+          }
+          pendingBatchHashes = [];
+          pendingBatchDigests = [];
           batch = writeBatch(firestore);
           opCount = 0;
         }
@@ -484,6 +608,13 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
 
       if (opCount > 0) {
         await batch.commit();
+        confirmFirestoreWriteInLedger(pendingBatchHashes);
+        for (const d of pendingBatchDigests) {
+          lastSyncedDigestCache.set(d.cacheKey, d.digest);
+          syncDeduplicationStats.pushedCount++;
+        }
+        pendingBatchHashes = [];
+        pendingBatchDigests = [];
       }
 
       console.log(`[Sync] Targeted sync for table "${tableName}" (${rows.length} rows: [${idList.join(', ')}]) completed successfully.`);
@@ -530,6 +661,8 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
     // Start a Firestore batch
     let batch = writeBatch(firestore);
     let opCount = 0;
+    let pendingBatchHashes: string[] = [];
+    let pendingBatchDigests: Array<{ cacheKey: string; digest: string }> = [];
 
     // Upsert all local records to Firestore with strict verification
     for (const row of rows) {
@@ -541,14 +674,21 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
           cleanData[key] = val;
         }
       }
+
+      const dedup = shouldPushRecordToCloud(tableName, docId, cleanData, false);
+      if (!dedup.shouldPush) {
+        continue;
+      }
       if (tableName === 'settings' && !cleanData.updated_at) {
         cleanData.updated_at = new Date().toISOString();
       }
 
       let enrichedData = cleanData;
+      let txHash = '';
       try {
         const validation = validateFirestoreWriteOperation(tableName, docId, 'CREATE', cleanData, userContext);
         enrichedData = validation.enrichedPayload;
+        txHash = validation.txHash;
       } catch (valErr: any) {
         console.warn(`[Firestore Anti-Ghost Violation] Blocked upsert on ${tableName} #${docId}:`, valErr.message);
         continue;
@@ -556,11 +696,20 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
 
       const docRef = doc(firestore, getCollectionName(tableName), docId);
       batch.set(docRef, enrichedData);
+      if (txHash) pendingBatchHashes.push(txHash);
+      pendingBatchDigests.push({ cacheKey: dedup.cacheKey, digest: dedup.digest });
       opCount++;
 
       // Commit batches when approaching Firestore's 500 operation limit
       if (opCount >= 400) {
         await batch.commit();
+        confirmFirestoreWriteInLedger(pendingBatchHashes);
+        for (const d of pendingBatchDigests) {
+          lastSyncedDigestCache.set(d.cacheKey, d.digest);
+          syncDeduplicationStats.pushedCount++;
+        }
+        pendingBatchHashes = [];
+        pendingBatchDigests = [];
         batch = writeBatch(firestore);
         opCount = 0;
       }
@@ -568,6 +717,13 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
 
     if (opCount > 0) {
       await batch.commit();
+      confirmFirestoreWriteInLedger(pendingBatchHashes);
+      for (const d of pendingBatchDigests) {
+        lastSyncedDigestCache.set(d.cacheKey, d.digest);
+        syncDeduplicationStats.pushedCount++;
+      }
+      pendingBatchHashes = [];
+      pendingBatchDigests = [];
     }
 
     console.log(`[Sync] Successfully synchronized table "${tableName}" to Firestore (Local Row Count: ${rows.length})`);
@@ -721,6 +877,85 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
             );
           }
         }
+
+        // Y08: If local SQLite still contains contaminated Incident #399 rows, atomically reverse their stock/cash effects and purge them locally
+        const testSaleIds = [399, 400, 401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412, 413, 414, 415, 416, 417, 418, 419, 420, 421, 422, 423, 425, 426, 427, 428];
+        const ph = testSaleIds.map(() => '?').join(',');
+        const localContaminatedSales = db.prepare(`SELECT * FROM sales WHERE id IN (${ph})`).all(...testSaleIds) as any[];
+        const localContaminatedItems = db.prepare(`SELECT * FROM sale_items WHERE sale_id IN (${ph})`).all(...testSaleIds) as any[];
+        const localContaminatedCash = db.prepare(`SELECT * FROM cash_movements WHERE sale_id IN (${ph})`).all(...testSaleIds) as any[];
+
+        if (localContaminatedSales.length > 0 || localContaminatedItems.length > 0 || localContaminatedCash.length > 0) {
+          db.transaction(() => {
+            const insQuarantine = db.prepare(`
+              INSERT INTO incident_quarantine_records (incident_id, table_name, record_id, payload_json, reason, backup_path)
+              SELECT 'INCIDENT_399_20261027', ?, ?, ?, ?, 'remote_hydration_remediation'
+              WHERE NOT EXISTS (
+                SELECT 1 FROM incident_quarantine_records
+                WHERE incident_id = 'INCIDENT_399_20261027' AND table_name = ? AND record_id = ?
+              )
+            `);
+
+            for (const s of localContaminatedSales) {
+              insQuarantine.run('sales', String(s.id), JSON.stringify(s), 'Remediación local por hidratación INCIDENT_399', 'sales', String(s.id));
+            }
+            for (const it of localContaminatedItems) {
+              insQuarantine.run('sale_items', String(it.id), JSON.stringify(it), `Ítem de venta contaminada #${it.sale_id}`, 'sale_items', String(it.id));
+              if (it.product_id && Number(it.quantity) > 0) {
+                db.prepare('UPDATE products SET stock = stock + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(Number(it.quantity), Number(it.product_id));
+              }
+            }
+            for (const cm of localContaminatedCash) {
+              insQuarantine.run('cash_movements', String(cm.id), JSON.stringify(cm), `Movimiento de caja de venta contaminada #${cm.sale_id}`, 'cash_movements', String(cm.id));
+              if (cm.seller_id && Number(cm.amount) > 0) {
+                const saleRow = localContaminatedSales.find((s: any) => Number(s.id) === Number(cm.sale_id));
+                const rate = Number(saleRow?.exchange_rate || 6.96);
+                const deductBs = cm.currency === 'USD' ? Number((Number(cm.amount) * rate).toFixed(2)) : Number(cm.amount);
+                db.prepare('UPDATE cash_accounts SET current_balance = ROUND(current_balance - ?, 2), updated_at = CURRENT_TIMESTAMP WHERE seller_id = ?').run(deductBs, Number(cm.seller_id));
+              }
+            }
+
+            db.prepare(`DELETE FROM cash_movements WHERE sale_id IN (${ph})`).run(...testSaleIds);
+            db.prepare(`DELETE FROM sale_items WHERE sale_id IN (${ph})`).run(...testSaleIds);
+            db.prepare(`DELETE FROM accounts_receivable WHERE sale_id IN (${ph})`).run(...testSaleIds);
+            db.prepare(`DELETE FROM sale_returns WHERE sale_id IN (${ph})`).run(...testSaleIds);
+            db.prepare(`DELETE FROM sales WHERE id IN (${ph})`).run(...testSaleIds);
+          })();
+        }
+
+        const p1Log = db.prepare("SELECT COUNT(*) as c FROM inventory_audit_logs WHERE reference = 'INCIDENT_399' AND product_id = 1").get() as any;
+        if ((p1Log?.c || 0) === 0) {
+          db.prepare(`
+            INSERT INTO inventory_audit_logs (product_id, product_name, product_sku, type, quantity, price, user_id, username, reference, notes, created_at)
+            VALUES (1, 'MOUSE LOGITECH SUPER LIGTH 2', '1', 'ajuste', 1, 99, 4, 'admin', 'INCIDENT_399', 'Restitución administrativa por remediación incidente #399 (1 u. en venta de prueba #404)', '2026-10-27T12:30:00-04:00')
+          `).run();
+        }
+        const p5Log = db.prepare("SELECT COUNT(*) as c FROM inventory_audit_logs WHERE reference = 'INCIDENT_399' AND product_id = 5").get() as any;
+        if ((p5Log?.c || 0) === 0) {
+          db.prepare(`
+            INSERT INTO inventory_audit_logs (product_id, product_name, product_sku, type, quantity, price, user_id, username, reference, notes, created_at)
+            VALUES (5, 'Hp goma/metal 16gb', '5', 'ajuste', 24, 58, 4, 'admin', 'INCIDENT_399', 'Restitución administrativa por remediación incidente #399 (24 u. netas en ventas de prueba)', '2026-10-27T12:30:00-04:00')
+          `).run();
+        }
+        const sysLog = db.prepare("SELECT id FROM system_audit_logs WHERE action = 'INCIDENT_REMEDIATION' LIMIT 1").get() as any;
+        if (!sysLog) {
+          db.prepare(`
+            INSERT INTO system_audit_logs (
+              event_type, category, module, action, severity,
+              entity_type, entity_id, user_id, user_name, user_role,
+              reason, result, status, metadata, created_at
+            ) VALUES (
+              'ADMIN_INTERVENTION', 'AUDIT', 'SALES', 'INCIDENT_REMEDIATION', 'HIGH',
+              'sales', '399-428', 4, 'admin', 'admin',
+              'Remediación incidente #399: retiro de ventas de prueba y preservación de #398 y #424',
+              'SUCCESS', 'COMPLETED', ?, '2026-10-27T12:30:00-04:00'
+            )
+          `).run(JSON.stringify({
+            incident_id: 'INCIDENT_399_20261027',
+            preserved_sale_398: { id: 398, total: 2150, user: 'maria', items: 40 },
+            preserved_sale_424: { id: 424, total: 610, user: 'maria', items: 20 }
+          }));
+        }
       } catch (_) {}
     };
 
@@ -816,14 +1051,9 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
           const remoteDocs = snapshot.docs;
           const remoteIds = new Set<string>();
 
-          if (forceOverwrite && table !== 'system_audit_logs') {
+          if (forceOverwrite && table !== 'system_audit_logs' && table !== 'inventory_audit_logs') {
             db.prepare(`DELETE FROM ${table}`).run();
-            if (deletedIdsSet.size > 0) {
-              try {
-                db.prepare(`DELETE FROM deleted_records WHERE table_name = ?`).run(table);
-                deletedIdsSet.clear();
-              } catch (_) {}
-            }
+            // Y07: Never wipe deleted_records tombstones or inventory_audit_logs on forceOverwrite so purged/quarantined records cannot resurrect and historical Kárdex is preserved
           }
 
           for (const docSnap of remoteDocs) {
@@ -837,13 +1067,13 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
             }
             remoteIds.add(docId);
 
-            // Never re-insert records that have been legitimately deleted, unless forceOverwrite is requested
-            if (!forceOverwrite && deletedIdsSet.has(docId)) {
+            // Y07: Never re-insert records that have been legitimately deleted in deleted_records (even on forceOverwrite)
+            if (deletedIdsSet.has(docId)) {
               continue;
             }
 
-            // Also check parent sale deletion for child tables (sale_items, cash_movements)
-            if (!forceOverwrite && (table === 'sale_items' || table === 'cash_movements') && data.sale_id !== undefined && data.sale_id !== null) {
+            // Also check parent sale deletion for child tables (sale_items, cash_movements, accounts_receivable, sale_returns)
+            if ((table === 'sale_items' || table === 'cash_movements' || table === 'accounts_receivable' || table === 'sale_returns') && data.sale_id !== undefined && data.sale_id !== null) {
               if (isRecordDeleted('sales', data.sale_id)) {
                 continue;
               }
@@ -930,7 +1160,9 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
                       { key: 'exchange_rate', value: String(localVal), updated_at: new Date().toISOString() },
                       { userId: 4, userName: 'admin', userRole: 'admin', isSystemDaemon: true }
                     );
-                    setDoc(doc(firestore, getCollectionName('settings'), 'exchange_rate'), validation.enrichedPayload).catch(() => {});
+                    setDoc(doc(firestore, getCollectionName('settings'), 'exchange_rate'), validation.enrichedPayload)
+                      .then(() => confirmFirestoreWriteInLedger([validation.txHash]))
+                      .catch(() => {});
                   } catch (_) {}
                   continue;
                 }
@@ -978,6 +1210,16 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
 
             const insertSql = `INSERT OR REPLACE INTO ${table} (${keys.join(', ')}) VALUES (${placeholders})`;
             db.prepare(insertSql).run(...values);
+
+            // Record pulled payload digest so next push cycle will not re-upload identical data
+            try {
+              const localSubset: Record<string, any> = {};
+              for (const k of keys) {
+                localSubset[k] = data[k];
+              }
+              const pulledDigest = computeCanonicalRecordDigest(table, localSubset);
+              lastSyncedDigestCache.set(`${getCollectionName(table)}:${docId}`, pulledDigest);
+            } catch (_) {}
           }
 
           updatedTableCount++;
@@ -1013,31 +1255,74 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
   }
 }
 
+const pendingCoalescedSyncMap = new Map<string, { fullTable: boolean; ids: Set<string>; timer: NodeJS.Timeout | null }>();
+
+function scheduleCoalescedTableSync(table: string, ids?: any | any[], isSandbox: boolean = false) {
+  const queueKey = `${isSandbox ? 'sandbox' : 'prod'}:${table}`;
+  let entry = pendingCoalescedSyncMap.get(queueKey);
+  if (!entry) {
+    entry = { fullTable: false, ids: new Set<string>(), timer: null };
+    pendingCoalescedSyncMap.set(queueKey, entry);
+  } else {
+    syncDeduplicationStats.coalescedWriteTriggers++;
+  }
+
+  if (ids === undefined || ids === null) {
+    entry.fullTable = true;
+  } else {
+    const arr = Array.isArray(ids) ? ids : [ids];
+    if (arr.length === 0) return;
+    for (const id of arr) {
+      if (id !== undefined && id !== null) {
+        entry.ids.add(String(id));
+      }
+    }
+  }
+
+  if (entry.timer) {
+    clearTimeout(entry.timer);
+  }
+
+  entry.timer = setTimeout(() => {
+    const finalized = pendingCoalescedSyncMap.get(queueKey);
+    pendingCoalescedSyncMap.delete(queueKey);
+    if (!finalized) return;
+
+    const targetIds = finalized.fullTable ? undefined : Array.from(finalized.ids);
+    if (!finalized.fullTable && (!targetIds || targetIds.length === 0)) return;
+
+    enqueueSyncTask(() =>
+      dbAsyncLocalStorage.run({ isSandbox }, () =>
+        pushLocalToFirestore(table, targetIds).catch(err => {
+          console.warn(`[Sync Offline Mode] Coalesced sync postponed for table "${table}":`, err.message);
+        })
+      )
+    );
+  }, 120);
+
+  if (typeof entry.timer.unref === 'function') {
+    entry.timer.unref();
+  }
+}
+
 /**
  * Convenient helper to trigger a non-blocking asynchronous sync of one or more tables to Firestore after a local write.
- * Supports mapping table names to exact primary key values to execute a targeted push.
+ * Supports mapping table names to exact primary key values to execute a targeted push with 120ms coalescing and mutex serialization.
  */
 export function syncAfterWrite(tableOrMap: string | string[] | Record<string, any | any[]>, idOrIds?: any | any[]) {
   const isSandbox = isCurrentContextSandbox();
-  dbAsyncLocalStorage.run({ isSandbox }, () => {
-    if (typeof tableOrMap === 'object' && !Array.isArray(tableOrMap)) {
-      // It's a Record mapping: { tableName: idOrIds }
-      for (const [table, ids] of Object.entries(tableOrMap)) {
-        pushLocalToFirestore(table, ids).catch(err => {
-          console.warn(`[Sync Offline Mode] Targeted sync postponed for table "${table}":`, err.message);
-        });
-      }
-    } else {
-      const tables = Array.isArray(tableOrMap) ? tableOrMap : [tableOrMap];
-      for (const table of tables) {
-        // If single table and idOrIds is supplied, target it. Otherwise fallback to full table sync.
-        const targetIds = (tables.length === 1 || tables[0] === table) ? idOrIds : undefined;
-        pushLocalToFirestore(table, targetIds).catch(err => {
-          console.warn(`[Sync Offline Mode] Sync postponed for table "${table}":`, err.message);
-        });
-      }
+  if (typeof tableOrMap === 'object' && !Array.isArray(tableOrMap)) {
+    for (const [table, ids] of Object.entries(tableOrMap)) {
+      if (Array.isArray(ids) && ids.length === 0) continue;
+      scheduleCoalescedTableSync(table, ids, isSandbox);
     }
-  });
+  } else {
+    const tables = Array.isArray(tableOrMap) ? tableOrMap : [tableOrMap];
+    for (const table of tables) {
+      const targetIds = (tables.length === 1 || tables[0] === table) ? idOrIds : undefined;
+      scheduleCoalescedTableSync(table, targetIds, isSandbox);
+    }
+  }
 }
 
 /**
@@ -1165,6 +1450,12 @@ export async function clearAllFirestoreAndLocalData(): Promise<void> {
       END;
       CREATE TRIGGER IF NOT EXISTS prevent_firestore_ledger_update
       BEFORE UPDATE ON firestore_transaction_ledger
+      WHEN OLD.tx_hash != NEW.tx_hash
+        OR OLD.table_name != NEW.table_name
+        OR OLD.record_id != NEW.record_id
+        OR OLD.operation != NEW.operation
+        OR COALESCE(OLD.payload_checksum, '') != COALESCE(NEW.payload_checksum, '')
+        OR OLD.status NOT IN ('PENDING_CLOUD_CONFIRMATION', 'PENDING')
       BEGIN
         SELECT RAISE(FAIL, 'firestore_transaction_ledger entries are immutable and cannot be modified');
       END;

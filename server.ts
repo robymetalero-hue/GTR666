@@ -29,7 +29,7 @@ import {
 } from "./database.ts";
 import { hashPassword, verifyPassword, isPasswordHashed, getJwtSecret } from "./authSecurity.ts";
 import { normalizeProductName } from "./src/utils/productUtils.ts";
-import { pullFirestoreToLocal, pushFirestoreToLocal, startPeriodicLedgerReconciliation, syncAfterWrite, pushAllLocalToFirestore, firestore, clearAllFirestoreAndLocalData, recordDeletion, deleteFromFirestore, reconcileCatalogStockWithLedger, getCollectionName } from "./firebaseSync.ts";
+import { pullFirestoreToLocal, pushFirestoreToLocal, startPeriodicLedgerReconciliation, syncAfterWrite, pushAllLocalToFirestore, firestore, clearAllFirestoreAndLocalData, recordDeletion, deleteFromFirestore, reconcileCatalogStockWithLedger, getCollectionName, getSyncDeduplicationStats, shouldPushRecordToCloud } from "./firebaseSync.ts";
 import { getProductForensicTimeline, auditEntireCatalog, searchProductsForAudit, generateForensicMarkdownReport, getAvailableAuditPeriods, auditDatabaseByPeriod, reconcileProductDiscrepancy } from "./forensicAuditEngine.ts";
 import { requestContextStorage, getRecentFirestoreLedger, getFirestoreLedgerStats, validateFirestoreWriteOperation } from "./firestoreIntegrityMiddleware.ts";
 import { collection, getDocs, doc, getDoc, setDoc } from "firebase/firestore";
@@ -2766,13 +2766,36 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     const trimmedSku = sku.trim();
     const trimmedCategory = category.trim();
 
-    // 1. Check Idempotency Key
-    if (clientOperationId && typeof clientOperationId === 'string') {
+    const safeStock = Math.max(0, Number(stock || 0));
+    const safePriceUnit = Math.max(0, Number(price_unit || 0));
+    const safePriceBulk = Math.max(0, Number(price_bulk || 0));
+    const safePriceCost = Math.max(0, Number(price_cost !== undefined ? price_cost : (price_unit ? price_unit * 0.6 : 0)));
+    const safeStockAlarm = Math.max(0, Number(stock_alarm || 0));
+
+    const clientOpId = clientOperationId || req.body.client_operation_id || null;
+    const productPayloadHash = crypto.createHash('sha256').update(JSON.stringify({
+      name: trimmedName,
+      category: trimmedCategory,
+      sku: trimmedSku.toLowerCase(),
+      stock: safeStock,
+      price_unit: safePriceUnit,
+      price_bulk: safePriceBulk,
+      price_cost: safePriceCost
+    })).digest('hex');
+
+    // 1. Check Idempotency Key in canonical processed_operations BEFORE SKU/Name uniqueness checks (N02)
+    if (clientOpId && typeof clientOpId === 'string') {
       try {
-        const processed = db.prepare('SELECT result FROM processed_operations WHERE id = ?').get(clientOperationId) as any;
-        if (processed && processed.result) {
-          console.log(`[Idempotency Hit] Product operation ${clientOperationId} already processed.`);
-          return res.json(JSON.parse(processed.result));
+        const processed = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
+        if (processed && processed.response_body) {
+          if (processed.payload_hash && processed.payload_hash !== productPayloadHash) {
+            return res.status(409).json({
+              error: "Conflicto: la clave de operación ya fue utilizada con datos de producto diferentes.",
+              client_operation_id: clientOpId
+            });
+          }
+          const parsed = JSON.parse(processed.response_body);
+          return res.status(200).json({ ...parsed, isDuplicate: true });
         }
       } catch (idempErr) {
         console.warn("[Idempotency Check Warning]:", idempErr);
@@ -2812,16 +2835,22 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       });
     }
 
-    const safeStock = Math.max(0, Number(stock || 0));
-    const safePriceUnit = Math.max(0, Number(price_unit || 0));
-    const safePriceBulk = Math.max(0, Number(price_bulk || 0));
-    const safePriceCost = Math.max(0, Number(price_cost !== undefined ? price_cost : (price_unit ? price_unit * 0.6 : 0)));
-    const safeStockAlarm = Math.max(0, Number(stock_alarm || 0));
-
     try {
       const nowIso = getBoliviaISOString();
       
       const responseData = db.transaction(() => {
+        if (clientOpId && typeof clientOpId === 'string') {
+          const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
+          if (existingOp && existingOp.response_body) {
+            if (existingOp.payload_hash && existingOp.payload_hash !== productPayloadHash) {
+              const conflictErr = new Error("CONFLICT_409");
+              (conflictErr as any).statusCode = 409;
+              throw conflictErr;
+            }
+            return { ...JSON.parse(existingOp.response_body), isDuplicate: true };
+          }
+        }
+
         const result = db.prepare('INSERT INTO products (name, category, sku, stock, price_unit, price_bulk, price_cost, stock_alarm, image, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
           .run(trimmedName, trimmedCategory, trimmedSku, safeStock, safePriceUnit, safePriceBulk, safePriceCost, safeStockAlarm, image || null, nowIso);
         
@@ -2886,13 +2915,11 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
         const resPayload = { success: true, id: newProdId };
 
-        if (clientOperationId && typeof clientOperationId === 'string') {
-          try {
-            db.prepare('INSERT OR REPLACE INTO processed_operations (id, type, result) VALUES (?, ?, ?)')
-              .run(clientOperationId, 'product_creation', JSON.stringify(resPayload));
-          } catch (idempSaveErr) {
-            console.warn("[Idempotency Save Warning]:", idempSaveErr);
-          }
+        if (clientOpId && typeof clientOpId === 'string') {
+          db.prepare(`
+            INSERT OR REPLACE INTO processed_operations (client_operation_id, operation_type, payload_hash, response_body, status, created_at)
+            VALUES (?, 'product_creation', ?, ?, 'completed', ?)
+          `).run(clientOpId, productPayloadHash, JSON.stringify(resPayload), nowIso);
         }
 
         return resPayload;
@@ -2900,6 +2927,9 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
       res.json(responseData);
     } catch (e: any) {
+      if (e.message === 'CONFLICT_409' || e.statusCode === 409) {
+        return res.status(409).json({ error: "Conflicto: la clave de operación ya fue utilizada con datos diferentes.", client_operation_id: clientOpId });
+      }
       console.error("[Create Product Error]:", e);
       res.status(400).json({ error: e.message || "SKU duplicado o campos incorrectos." });
     }
@@ -4561,6 +4591,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
   app.post("/api/stock-arrivals", enforcePermission('increase_stock'), (req, res) => {
     const { product_id, quantity, arrival_price } = req.body;
+    const clientOpId = req.body.clientOperationId || req.body.client_operation_id || null;
     if (!product_id || !quantity || quantity <= 0) {
       return res.status(400).json({ error: "Datos del ingreso de stock inválidos." });
     }
@@ -4574,9 +4605,39 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         return res.status(404).json({ error: "Producto no encontrado." });
       }
       const finalPrice = isNaN(parsedPrice) || parsedPrice <= 0 ? (prod.price_cost || 0) : parsedPrice;
+      const arrivalPayloadHash = crypto.createHash('sha256').update(JSON.stringify({
+        product_id: Number(product_id),
+        quantity: Number(quantity),
+        arrival_price: Math.round(Number(finalPrice) * 100) / 100
+      })).digest('hex');
+
+      if (clientOpId) {
+        const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
+        if (existingOp && existingOp.response_body) {
+          if (existingOp.payload_hash && existingOp.payload_hash !== arrivalPayloadHash) {
+            return res.status(409).json({
+              error: "Conflicto: la clave de operación de ingreso de mercadería ya fue utilizada con parámetros distintos.",
+              client_operation_id: clientOpId
+            });
+          }
+          return res.status(200).json({ ...JSON.parse(existingOp.response_body), isDuplicate: true });
+        }
+      }
       
       // Begin transaction to insert arrival record and update product stock & price_cost
-      const { arrivalId, invLogId } = db.transaction(() => {
+      const txArrival = db.transaction(() => {
+        if (clientOpId) {
+          const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
+          if (existingOp && existingOp.response_body) {
+            if (existingOp.payload_hash && existingOp.payload_hash !== arrivalPayloadHash) {
+              const conflictErr = new Error("CONFLICT_409");
+              (conflictErr as any).statusCode = 409;
+              throw conflictErr;
+            }
+            return { ...JSON.parse(existingOp.response_body), isDuplicate: true };
+          }
+        }
+
         const result = db.prepare('INSERT INTO stock_arrivals (product_id, quantity, arrival_price) VALUES (?, ?, ?)')
           .run(product_id, quantity, finalPrice);
         
@@ -4597,10 +4658,23 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           INSERT INTO inventory_audit_logs 
           (product_id, product_name, product_sku, type, quantity, price, user_id, username, reference, notes, created_at)
           VALUES (?, ?, ?, 'ingreso_compra', ?, ?, ?, ?, ?, ?, ?)
-        `).run(product_id, pName, pSku, quantity, finalPrice, normUserId, normUsername, `Ingreso #${result.lastInsertRowid}`, 'Ingreso de existencias por compra manual', getBoliviaISOString());
+        `).run(product_id, pName, pSku, quantity, finalPrice, normUserId, normUsername, `Ingreso #${result.lastInsertRowid}`, 'Ingreso de existencias por compra manual', nowIso);
+
+        const responsePayload = { success: true, arrivalId: result.lastInsertRowid };
+        if (clientOpId) {
+          db.prepare(`
+            INSERT INTO processed_operations (client_operation_id, operation_type, payload_hash, response_body, status, created_at)
+            VALUES (?, 'stock_arrival', ?, ?, 'completed', ?)
+          `).run(clientOpId, arrivalPayloadHash, JSON.stringify(responsePayload), nowIso);
+        }
         
-        return { arrivalId: result.lastInsertRowid, invLogId: invRes.lastInsertRowid };
+        return { arrivalId: result.lastInsertRowid, invLogId: invRes.lastInsertRowid, isDuplicate: false };
       })();
+
+      if ((txArrival as any).isDuplicate) {
+        return res.status(200).json(txArrival);
+      }
+      const { arrivalId, invLogId } = txArrival as any;
 
       // Audit stock arrival
       let sysLogId: any = null;
@@ -4648,8 +4722,11 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
       syncAfterWrite(syncMap);
       incrementInventoryVersion();
-      res.json({ success: true });
+      res.json({ success: true, arrivalId });
     } catch (e: any) {
+      if (e.message === 'CONFLICT_409' || e.statusCode === 409) {
+        return res.status(409).json({ error: "Conflicto: la clave de operación ya fue utilizada con parámetros diferentes.", client_operation_id: clientOpId });
+      }
       res.status(500).json({ error: e.message });
     }
   });
@@ -5008,7 +5085,17 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           CREATE TRIGGER IF NOT EXISTS prevent_system_audit_logs_delete
           BEFORE DELETE ON system_audit_logs BEGIN SELECT RAISE(FAIL, 'system_audit_logs immutable'); END;
           CREATE TRIGGER IF NOT EXISTS prevent_firestore_ledger_update
-          BEFORE UPDATE ON firestore_transaction_ledger BEGIN SELECT RAISE(FAIL, 'ledger immutable'); END;
+          BEFORE UPDATE ON firestore_transaction_ledger
+          WHEN NOT (
+            OLD.status IN ('PENDING_CLOUD_CONFIRMATION', 'PENDING')
+            AND NEW.status = 'CONFIRMED_IN_CLOUD'
+            AND OLD.tx_hash = NEW.tx_hash
+            AND OLD.collection_name = NEW.collection_name
+            AND OLD.doc_id = NEW.doc_id
+            AND OLD.operation_type = NEW.operation_type
+            AND OLD.payload_json = NEW.payload_json
+          )
+          BEGIN SELECT RAISE(FAIL, 'ledger immutable'); END;
           CREATE TRIGGER IF NOT EXISTS prevent_firestore_ledger_delete
           BEFORE DELETE ON firestore_transaction_ledger BEGIN SELECT RAISE(FAIL, 'ledger immutable'); END;
         `);
@@ -5092,15 +5179,54 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const filename = `snapshot_${dateStr}_${safeReason}.db`;
       const destPath = path.join(BACKUP_DIR, filename);
 
-      // T10: Use native SQLite online backup API to cleanly capture active database and WAL pages
+      // T10 & N03: Use native SQLite online backup API; if fallback copy is needed, verify WAL checkpoint & row parity
+      let walCheckpointBusy = false;
       try {
-        db.pragma('wal_checkpoint(TRUNCATE)');
-      } catch (_) {}
+        const chk = db.pragma('wal_checkpoint(TRUNCATE)') as any[];
+        if (Array.isArray(chk) && chk[0] && Number(chk[0].busy) > 0) {
+          walCheckpointBusy = true;
+        }
+      } catch (_) {
+        walCheckpointBusy = true;
+      }
 
+      let usedFallbackCopy = false;
       try {
         await (db as any).backup(destPath);
       } catch (backupErr: any) {
+        if (walCheckpointBusy) {
+          console.warn("[Snapshot Aborted] Native backup failed while WAL checkpoint had busy readers; refusing incomplete copy.");
+          return null;
+        }
         fs.copyFileSync(dbPath, destPath);
+        usedFallbackCopy = true;
+      }
+
+      // N03: Verify snapshot integrity and row consistency against live database before accepting
+      try {
+        const liveSales = Number((db.prepare("SELECT count(*) as c FROM sales").get() as any)?.c || 0);
+        const liveProds = Number((db.prepare("SELECT count(*) as c FROM products").get() as any)?.c || 0);
+        const snapDb = new Database(destPath, { readonly: true });
+        let snapValid = false;
+        try {
+          const snapIntegrity = snapDb.pragma('integrity_check(1)') as any[];
+          const isSnapOk = Array.isArray(snapIntegrity) && snapIntegrity[0]?.integrity_check === 'ok';
+          const snapSales = Number((snapDb.prepare("SELECT count(*) as c FROM sales").get() as any)?.c || 0);
+          const snapProds = Number((snapDb.prepare("SELECT count(*) as c FROM products").get() as any)?.c || 0);
+          snapValid = isSnapOk && snapSales === liveSales && snapProds === liveProds;
+        } finally {
+          snapDb.close();
+        }
+        if (!snapValid) {
+          try { if (fs.existsSync(destPath)) fs.unlinkSync(destPath); } catch (_) {}
+          console.warn("[Snapshot Rejected] Snapshot copy failed row parity or integrity verification.");
+          return null;
+        }
+      } catch (verifyErr) {
+        if (usedFallbackCopy) {
+          try { if (fs.existsSync(destPath)) fs.unlinkSync(destPath); } catch (_) {}
+          return null;
+        }
       }
 
       // Only update environment-specific root backup copy if current DB has a verified healthy catalog and passes integrity check
@@ -6226,6 +6352,8 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       let query = `
         SELECT s.*, c.name as client_name, u.username as user_name,
                (SELECT COALESCE(SUM(quantity), 0) FROM sale_items WHERE sale_id = s.id) as item_count,
+               (SELECT COALESCE(SUM(refund_amount), 0) FROM sale_returns WHERE sale_id = s.id) as returned_amount,
+               (SELECT COALESCE(SUM(quantity), 0) FROM sale_returns WHERE sale_id = s.id) as returned_items_count,
                ${capitalSelect}
         FROM sales s
         LEFT JOIN clients c ON c.id = s.client_id
@@ -6424,23 +6552,52 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         }
       }
 
+      const refundPayloadHash = crypto.createHash('sha256').update(JSON.stringify({
+        sale_id: Number(sale_id),
+        items: item_refunds.map((it: any) => ({
+          sale_item_id: it.sale_item_id ? Number(it.sale_item_id) : null,
+          product_id: it.product_id ? Number(it.product_id) : null,
+          quantity: Number(it.quantity)
+        }))
+      })).digest('hex');
+
+      if (clientOpId) {
+        const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
+        if (existingOp && existingOp.response_body) {
+          if (existingOp.payload_hash && existingOp.payload_hash !== refundPayloadHash) {
+            return res.status(409).json({
+              error: "Conflicto: la clave de operación de devolución ya fue utilizada con artículos o cantidades diferentes.",
+              client_operation_id: clientOpId
+            });
+          }
+          return res.status(200).json({ ...JSON.parse(existingOp.response_body), isDuplicate: true });
+        }
+      }
+
       const stockRestore = db.prepare('UPDATE products SET stock = stock + ?, updated_at = ? WHERE id = ?');
       const auditPayloads: any[] = [];
 
       const refundTrx = db.transaction(() => {
-        // F03: Check processed_operations inside transaction
+        // F03 & T05: Check processed_operations inside transaction with payload_hash verification
         if (clientOpId) {
-          const existingOp = db.prepare('SELECT response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
-          if (existingOp) {
+          const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
+          if (existingOp && existingOp.response_body) {
+            if (existingOp.payload_hash && existingOp.payload_hash !== refundPayloadHash) {
+              const conflictErr = new Error("CONFLICT_409");
+              (conflictErr as any).statusCode = 409;
+              throw conflictErr;
+            }
             return { ...JSON.parse(existingOp.response_body), isDuplicate: true };
           }
         }
 
         const nowIso = getBoliviaISOString();
-        // Find original sale to know the seller, total, currency, rate and discount (F01, F02)
-        const originalSale = db.prepare('SELECT user_id, total, payment_method, currency, exchange_rate, discount FROM sales WHERE id = ?').get(sale_id) as any;
+        // Find original sale to know the seller, client, total, currency, rate and discount (F01, F02)
+        const originalSale = db.prepare('SELECT user_id, client_id, total, payment_method, currency, exchange_rate, discount FROM sales WHERE id = ?').get(sale_id) as any;
         if (!originalSale) {
-          throw new Error(`El ticket #${sale_id} no fue encontrado.`);
+          const notFoundErr = new Error(`El ticket #${sale_id} no fue encontrado.`);
+          (notFoundErr as any).statusCode = 404;
+          throw notFoundErr;
         }
 
         const auditUser = (req as any).auditUser || {};
@@ -6481,17 +6638,30 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           }
 
           if (!saleItem) {
-            console.warn(`[Refund Warning] Skipping item refund for product_id ${item.product_id} / sale_item_id ${item.sale_item_id}: item not found.`);
-            continue;
+            const badItemErr = new Error(`El artículo solicitado (ID ${item.sale_item_id || item.product_id}) no pertenece a la venta #${sale_id}.`);
+            (badItemErr as any).statusCode = 400;
+            throw badItemErr;
           }
 
           // FASE 4: Consultar cuántas unidades ya se devolvieron previamente sin alterar el comprobante original
           const alreadyReturnedRow = db.prepare('SELECT COALESCE(SUM(quantity), 0) as returned_qty FROM sale_returns WHERE sale_item_id = ?').get(saleItem.id) as any;
           const alreadyReturned = alreadyReturnedRow ? Number(alreadyReturnedRow.returned_qty) : 0;
-          const remainingToRefund = Math.max(0, saleItem.quantity - alreadyReturned);
+          const remainingToRefund = Math.max(0, Number(saleItem.quantity) - alreadyReturned);
+          const requestedQty = Number(item.quantity || 0);
+          const itemLabel = saleItem.product_name_snapshot || `Producto #${saleItem.product_id}`;
 
-          const cappedQty = Math.min(Math.max(0, Number(item.quantity || 0)), remainingToRefund);
-          if (cappedQty <= 0) continue;
+          if (remainingToRefund <= 0) {
+            const exhaustedErr = new Error(`Devolución rechazada: El artículo "${itemLabel}" ya fue devuelto en su totalidad (${saleItem.quantity}/${saleItem.quantity} unidades).`);
+            (exhaustedErr as any).statusCode = 400;
+            throw exhaustedErr;
+          }
+          if (requestedQty <= 0 || requestedQty > remainingToRefund) {
+            const overRefundErr = new Error(`Devolución rechazada: Solicitas devolver ${requestedQty} unidad(es) de "${itemLabel}", pero solo quedan ${remainingToRefund} unidad(es) disponibles para devolución.`);
+            (overRefundErr as any).statusCode = 400;
+            throw overRefundErr;
+          }
+
+          const cappedQty = requestedQty;
 
           // Fetch product details to update master stock
           const targetProductId = saleItem.product_id;
@@ -6609,7 +6779,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
             quantityChanged: cappedQty,
             quantityAfter: afterStock,
             priceAfter: pCost,
-            reason: `Devolución auditada de venta #${sale_id}`,
+            reason: item.reason || `Devolución auditada de venta #${sale_id}`,
             relatedTicket: `Devolución #${sale_id}`,
             relatedProductId: targetProductId,
             relatedSaleId: sale_id,
@@ -6617,7 +6787,13 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           });
         }
 
-        // Reconcile ±0.01 BOB rounding discrepancy when 100% of remaining units of the sale have been returned
+        if (returnRecords.length === 0) {
+          const emptyErr = new Error("No se procesaron artículos válidos para devolución.");
+          (emptyErr as any).statusCode = 400;
+          throw emptyErr;
+        }
+
+        // Y13: Reconcile exact historical rounding residual when 100% of remaining units of the sale have been returned
         try {
           const totalSoldUnitsRow = db.prepare('SELECT COALESCE(SUM(quantity), 0) as total_qty FROM sale_items WHERE sale_id = ?').get(sale_id) as any;
           const totalReturnedUnitsRow = db.prepare('SELECT COALESCE(SUM(quantity), 0) as returned_qty FROM sale_returns WHERE sale_id = ?').get(sale_id) as any;
@@ -6625,13 +6801,31 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           const totalReturnedUnits = Number(totalReturnedUnitsRow?.returned_qty || 0);
           if (totalSoldUnits > 0 && totalReturnedUnits >= totalSoldUnits && returnRecords.length > 0) {
             const residual = Math.round((maxPossibleRefund - totalRefundAmount) * 100) / 100;
-            if (Math.abs(residual) > 0 && Math.abs(residual) <= 0.05) {
+            if (Math.abs(residual) > 0) {
               totalRefundAmount = Math.round((totalRefundAmount + residual) * 100) / 100;
               const lastReturnId = returnRecords[returnRecords.length - 1];
               db.prepare('UPDATE sale_returns SET refund_amount = ROUND(refund_amount + ?, 2) WHERE id = ?').run(residual, lastReturnId);
             }
           }
         } catch (_) {}
+
+        // Revert proportional client loyalty points earned on the refunded portion of the sale
+        let updatedClientId: any = null;
+        let pointsReverted = 0;
+        const refundRate = Number(originalSale.exchange_rate || 6.96);
+        if (originalSale.client_id && totalRefundAmount > 0) {
+          const netRetainedBefore = Math.max(0, Number(originalSale.total) - alreadyRefundedTotal);
+          const netRetainedAfter = Math.max(0, netRetainedBefore - totalRefundAmount);
+          const retainedBsBefore = originalSale.currency === 'USD' ? (netRetainedBefore * refundRate) : netRetainedBefore;
+          const retainedBsAfter = originalSale.currency === 'USD' ? (netRetainedAfter * refundRate) : netRetainedAfter;
+          const pointsBefore = Math.floor(retainedBsBefore / 10);
+          const pointsAfter = Math.floor(retainedBsAfter / 10);
+          pointsReverted = Math.max(0, pointsBefore - pointsAfter);
+          if (pointsReverted > 0) {
+            db.prepare('UPDATE clients SET points = MAX(0, points - ?) WHERE id = ?').run(pointsReverted, originalSale.client_id);
+            updatedClientId = originalSale.client_id;
+          }
+        }
 
         // F04: Deducir de cuenta por cobrar si la venta original fue a crédito
         let cashRefundAmount = totalRefundAmount;
@@ -6662,58 +6856,79 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         let refAccId: any = null;
 
         if (cashRefundAmount > 0) {
-          // Ensure cash account exists
+          // F01: Calcular el equivalente en BOB a deducir del saldo de caja usando la tasa histórica de la venta original
+          const refundAmountInBs = originalSale.currency === 'USD' ? (cashRefundAmount * refundRate) : cashRefundAmount;
+
+          // Ensure original seller's cash account exists
           db.prepare(`
             INSERT OR IGNORE INTO cash_accounts (seller_id, seller_username, current_balance)
             VALUES (?, ?, 0.0)
           `).run(sId, sName);
 
-          // Record refund movement
+          const origAccRow = db.prepare('SELECT id, current_balance FROM cash_accounts WHERE seller_id = ?').get(sId) as any;
+          const origBalance = Number(origAccRow?.current_balance || 0);
+
+          let targetDrawerSellerId = sId;
+          let targetDrawerSellerName = sName;
+          let refundMovementNote = `Reembolso por devolución de venta #${sale_id}`;
+
+          // Smart drawer routing: if original seller already settled their drawer (0 or insufficient balance)
+          // and a different active operator is processing the refund with an active drawer balance, deduct from active operator
+          if (origBalance < refundAmountInBs && normUserId && Number(normUserId) !== Number(sId)) {
+            db.prepare(`
+              INSERT OR IGNORE INTO cash_accounts (seller_id, seller_username, current_balance)
+              VALUES (?, ?, 0.0)
+            `).run(Number(normUserId), normUsername);
+            const activeAccRow = db.prepare('SELECT id, current_balance FROM cash_accounts WHERE seller_id = ?').get(Number(normUserId)) as any;
+            if (Number(activeAccRow?.current_balance || 0) > 0) {
+              targetDrawerSellerId = Number(normUserId);
+              targetDrawerSellerName = normUsername;
+              refundMovementNote = `Reembolso por devolución de venta #${sale_id} (Desembolsado por cajero activo @${normUsername} por caja liquidada de @${sName})`;
+            }
+          }
+
+          // Record refund movement on target drawer
           const movResult = db.prepare(`
             INSERT INTO cash_movements (seller_id, sale_id, type, amount, currency, payment_method, status, notes)
             VALUES (?, ?, 'devolucion', ?, ?, ?, 'pendiente', ?)
           `).run(
-            sId,
+            targetDrawerSellerId,
             sale_id,
             -cashRefundAmount,
             originalSale.currency || 'BOB',
             originalSale.payment_method || 'Efectivo',
-            `Reembolso por devolución de venta #${sale_id}`
+            refundMovementNote
           );
           refMovId = movResult.lastInsertRowid;
 
-          // F01: Calcular el equivalente en BOB a deducir del saldo de caja usando la tasa histórica de la venta original
-          const refundRate = Number(originalSale.exchange_rate || 6.96);
-          const refundAmountInBs = originalSale.currency === 'USD' ? (cashRefundAmount * refundRate) : cashRefundAmount;
-
-          // Update seller's cash balance (current_balance está en BOB)
+          // Update target drawer's cash balance (current_balance está en BOB)
           db.prepare(`
             UPDATE cash_accounts
             SET current_balance = MAX(0, current_balance - ?), updated_at = CURRENT_TIMESTAMP
             WHERE seller_id = ?
-          `).run(refundAmountInBs, sId);
+          `).run(refundAmountInBs, targetDrawerSellerId);
 
-          const accRow = db.prepare('SELECT id FROM cash_accounts WHERE seller_id = ?').get(sId) as any;
+          const accRow = db.prepare('SELECT id FROM cash_accounts WHERE seller_id = ?').get(targetDrawerSellerId) as any;
           refAccId = accRow?.id;
         }
 
         if (clientOpId) {
           try {
             db.prepare(`
-              INSERT INTO processed_operations (client_operation_id, operation_type, response_body, status)
-              VALUES (?, 'refund', ?, 'completed')
-            `).run(clientOpId, JSON.stringify({ success: true, totalRefundAmount }));
+              INSERT INTO processed_operations (client_operation_id, operation_type, payload_hash, response_body, status, created_at)
+              VALUES (?, 'refund', ?, ?, 'completed', ?)
+            `).run(clientOpId, refundPayloadHash, JSON.stringify({ success: true, totalRefundAmount, pointsReverted, inventoryReconciliation: reconciledItems }), nowIso);
           } catch (_) {}
         }
 
-        return { refAccId, refMovId, updatedArId, totalRefundAmount, reconciledItems, refundedProductIds, refundedSaleItemIds, invLogIds, returnRecords, isDuplicate: false };
+        return { refAccId, refMovId, updatedArId, updatedClientId, pointsReverted, totalRefundAmount, reconciledItems, refundedProductIds, refundedSaleItemIds, invLogIds, returnRecords, isDuplicate: false };
       });
 
       const txRefund = refundTrx() as any;
       if (txRefund.isDuplicate) {
         return res.json(txRefund);
       }
-      const { refAccId, refMovId, updatedArId, totalRefundAmount, reconciledItems, refundedProductIds, refundedSaleItemIds, invLogIds, returnRecords } = txRefund;
+      const { refAccId, refMovId, updatedArId, updatedClientId, pointsReverted, totalRefundAmount, reconciledItems, refundedProductIds, refundedSaleItemIds, invLogIds, returnRecords } = txRefund;
 
       // Write advanced audit logs for each refunded product item
       const auditUser = (req as any).auditUser || {};
@@ -6744,7 +6959,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           userId: auditUser.userId || user_id || 1,
           userName: auditUser.userName || username || 'admin',
           userRole: auditUser.userRole || 'admin',
-          reason: `Devolución de artículos de la venta #${sale_id}`,
+          reason: `Devolución de artículos de la venta #${sale_id}${pointsReverted > 0 ? ` (Puntos revertidos: -${pointsReverted})` : ''}`,
           relatedTicket: `Devolución #${sale_id}`,
           status: 'success'
         });
@@ -6759,6 +6974,9 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       };
       if (updatedArId) {
         syncMap.accounts_receivable = [updatedArId];
+      }
+      if (updatedClientId) {
+        syncMap.clients = [updatedClientId];
       }
       // F05: Include sale_returns in explicit replication map
       if (returnRecords && returnRecords.length > 0) {
@@ -6776,8 +6994,14 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
       syncAfterWrite(syncMap);
       incrementInventoryVersion();
-      res.json({ success: true, totalRefundAmount, inventoryReconciliation: reconciledItems });
+      res.json({ success: true, totalRefundAmount, pointsReverted, inventoryReconciliation: reconciledItems });
     } catch (e: any) {
+      if (e.message === 'CONFLICT_409' || e.statusCode === 409) {
+        return res.status(409).json({ error: "Conflicto: la clave de operación de devolución ya fue utilizada con datos diferentes.", client_operation_id: clientOpId });
+      }
+      if (e.statusCode === 400 || e.statusCode === 404) {
+        return res.status(e.statusCode).json({ error: e.message });
+      }
       res.status(500).json({ error: e.message });
     }
   });
@@ -6798,8 +7022,20 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       if (!Number.isFinite(numTotal) || numTotal < 0 || !Number.isFinite(numDiscount) || numDiscount < 0) {
         return res.status(400).json({ error: "El total y descuento deben ser valores numéricos finitos y válidos." });
       }
-      const safeTotal = numTotal;
-      const safeDiscount = numDiscount;
+      const rawItemsSubtotal = items.reduce((acc: number, it: any) => {
+        const q = Number(it?.quantity);
+        const p = Number(it?.price);
+        if (Number.isFinite(q) && q > 0 && Number.isFinite(p) && p >= 0) {
+          return acc + (q * p);
+        }
+        return acc;
+      }, 0);
+      const authoritativeSubtotal = Number(rawItemsSubtotal.toFixed(2));
+      const safeDiscount = Math.min(authoritativeSubtotal, Math.max(0, Number(numDiscount.toFixed(2))));
+      const authoritativeTotal = Math.max(0, Number((authoritativeSubtotal - safeDiscount).toFixed(2)));
+      const clientSentTotal = numTotal;
+      const totalWasRecalculated = Math.abs(clientSentTotal - authoritativeTotal) >= 0.01;
+      const safeTotal = authoritativeTotal;
       const safeCurrency = currency || 'BOB';
       try {
         if (exchange_rate !== undefined && exchange_rate !== null) {
@@ -6827,6 +7063,172 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         const effectiveUserId = (verifiedUser && (!isAdmin || !user_id))
           ? Number(verifiedUser.id)
           : Number(user_id || verifiedUser?.id || 1);
+
+        const normalizedInitialAbono = payment_method === 'Crédito' ? Math.min(safeTotal, Math.max(0, Number(initial_abono || 0))) : 0;
+        const normalizedItemsForHash = items.map((it: any) => ({
+          product_id: Number(it.product_id),
+          quantity: Number(it.quantity),
+          price: Number(it.price)
+        }));
+        const buildSaleHashVariant = (rateVal: number, includeInitialAbono: boolean, uidVal = effectiveUserId, totalVal = safeTotal) => {
+          const p: Record<string, any> = {
+            items: normalizedItemsForHash,
+            total: totalVal,
+            discount: safeDiscount,
+            client_id: client_id || null,
+            payment_method: payment_method || 'Efectivo'
+          };
+          if (includeInitialAbono) {
+            p.initial_abono = normalizedInitialAbono;
+          }
+          p.currency = safeCurrency;
+          p.exchange_rate = rateVal;
+          p.user_id = uidVal;
+          return crypto.createHash('sha256').update(JSON.stringify(p)).digest('hex');
+        };
+        const canonicalSaleHash = buildSaleHashVariant(currentRate, true, effectiveUserId, safeTotal);
+
+        // Helper to check commercial equality or compatible historical hash for D03, D04, Y10, T18, W07
+        const checkSaleIdempotency = (): { status: 'none' | 'duplicate' | 'conflict' | 'blocked'; payload?: any } => {
+          if (!clientOpId) return { status: 'none' };
+          const existingOp = db.prepare('SELECT payload_hash, response_body, status FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
+          if (existingOp) {
+            const rawBody = String(existingOp.response_body || '');
+            if (existingOp.status === 'blocked_incident_399' || rawBody.includes('blocked_incident_399')) {
+              return { status: 'blocked' };
+            }
+          }
+
+          const existingSale = db.prepare('SELECT * FROM sales WHERE client_operation_id = ?').get(clientOpId) as any;
+          if (!existingOp && !existingSale) {
+            return { status: 'none' };
+          }
+
+          const candidateRates = new Set<number>([currentRate]);
+          if (exchange_rate !== undefined && exchange_rate !== null && Number.isFinite(Number(exchange_rate)) && Number(exchange_rate) > 0) {
+            candidateRates.add(Number(exchange_rate));
+          }
+          if (existingSale && Number.isFinite(Number(existingSale.exchange_rate)) && Number(existingSale.exchange_rate) > 0) {
+            candidateRates.add(Number(existingSale.exchange_rate));
+          }
+
+          const candidateUids = new Set<number>([effectiveUserId, Number(user_id || 1)]);
+          if (existingSale && existingSale.user_id) {
+            candidateUids.add(Number(existingSale.user_id));
+          }
+
+          const candidateTotals = new Set<number>([safeTotal, clientSentTotal]);
+
+          const compatibleHashes = new Set<string>();
+          for (const r of candidateRates) {
+            for (const u of candidateUids) {
+              for (const tVal of candidateTotals) {
+                compatibleHashes.add(buildSaleHashVariant(r, true, u, tVal));
+                // Y10: ff17b7d hash variant (before initial_abono was added to payload_hash) is compatible ONLY when initial_abono is not altered from the recorded sale
+                if (normalizedInitialAbono === 0 || !existingSale) {
+                  compatibleHashes.add(buildSaleHashVariant(r, false, u, tVal));
+                }
+              }
+            }
+          }
+          // D04: Legacy minimal hash variant
+          for (const tVal of candidateTotals) {
+            compatibleHashes.add(crypto.createHash('sha256').update(JSON.stringify({
+              items: normalizedItemsForHash,
+              total: tVal,
+              discount: safeDiscount,
+              client_id: client_id || null,
+              payment_method: payment_method || 'Efectivo'
+            })).digest('hex'));
+          }
+
+          // Check direct commercial match against existingSale in DB if present
+          let matchesExistingSaleRow = false;
+          if (existingSale) {
+            const totalMatches = Math.abs(Number(existingSale.total) - safeTotal) < 0.01 || Math.abs(Number(existingSale.total) - clientSentTotal) < 0.01;
+            const discountMatches = Math.abs(Number(existingSale.discount || 0) - safeDiscount) < 0.01;
+            const methodMatches = String(existingSale.payment_method || 'Efectivo') === String(payment_method || 'Efectivo');
+            const clientMatches = Number(existingSale.client_id || 0) === Number(client_id || 0);
+            const currencyMatches = String(existingSale.currency || 'BOB') === String(safeCurrency);
+            const dbItems = db.prepare('SELECT product_id, quantity, price FROM sale_items WHERE sale_id = ? ORDER BY id ASC').all(existingSale.id) as any[];
+            let itemsMatch = dbItems.length === normalizedItemsForHash.length;
+            if (itemsMatch) {
+              for (let i = 0; i < dbItems.length; i++) {
+                if (
+                  Number(dbItems[i].product_id) !== normalizedItemsForHash[i].product_id ||
+                  Number(dbItems[i].quantity) !== normalizedItemsForHash[i].quantity ||
+                  Math.abs(Number(dbItems[i].price) - normalizedItemsForHash[i].price) >= 0.01
+                ) {
+                  itemsMatch = false;
+                  break;
+                }
+              }
+            }
+            let abonoMatches = true;
+            if (String(existingSale.payment_method) === 'Crédito' && initial_abono !== undefined) {
+              const arRow = db.prepare('SELECT paid_amount FROM accounts_receivable WHERE sale_id = ?').get(existingSale.id) as any;
+              if (arRow && Math.abs(Number(arRow.paid_amount || 0) - normalizedInitialAbono) >= 0.01) {
+                abonoMatches = false;
+              }
+            }
+            matchesExistingSaleRow = totalMatches && discountMatches && methodMatches && clientMatches && currencyMatches && itemsMatch && abonoMatches;
+          }
+
+          if (existingOp && existingOp.payload_hash) {
+            // If existingSale exists and initial_abono was altered, reject even if ff17b7d hash didn't include initial_abono
+            if (existingSale && !matchesExistingSaleRow) {
+              return { status: 'conflict' };
+            }
+            if (compatibleHashes.has(existingOp.payload_hash) || matchesExistingSaleRow) {
+              let parsed: any = { success: true, saleId: existingSale?.id, total: existingSale?.total ?? safeTotal };
+              try {
+                if (existingOp.response_body) parsed = JSON.parse(existingOp.response_body);
+              } catch (_) {}
+              return { status: 'duplicate', payload: { ...parsed, isDuplicate: true } };
+            }
+            return { status: 'conflict' };
+          }
+
+          // Case where existingOp has no payload_hash (D04 legacy) or existingOp is missing but existingSale exists (T18)
+          if (existingSale) {
+            if (!matchesExistingSaleRow) {
+              return { status: 'conflict' };
+            }
+            const recoveredPayload = { success: true, saleId: existingSale.id, total: Number(existingSale.total) };
+            try {
+              db.prepare(`
+                INSERT OR REPLACE INTO processed_operations (client_operation_id, operation_type, payload_hash, response_body, status, created_at)
+                VALUES (?, 'sale', ?, ?, 'completed', ?)
+              `).run(clientOpId, canonicalSaleHash, JSON.stringify(recoveredPayload), existingSale.created_at || getBoliviaISOString());
+            } catch (_) {}
+            return { status: 'duplicate', payload: { ...recoveredPayload, isDuplicate: true } };
+          }
+
+          if (existingOp && existingOp.response_body) {
+            try {
+              const parsed = JSON.parse(existingOp.response_body);
+              if (parsed.total !== undefined && Math.abs(Number(parsed.total) - safeTotal) >= 0.01) {
+                return { status: 'conflict' };
+              }
+              return { status: 'duplicate', payload: { ...parsed, isDuplicate: true } };
+            } catch (_) {}
+          }
+          return { status: 'none' };
+        };
+
+        // Pre-validation idempotency check (handles D03, D04, Y10, T18 before price/exchange_rate/points checks)
+        if (clientOpId) {
+          const preCheck = checkSaleIdempotency();
+          if (preCheck.status === 'blocked') {
+            return res.status(409).json({ error: "Operación rechazada: clave de operación bloqueada por política de integridad (#399).", client_operation_id: clientOpId });
+          }
+          if (preCheck.status === 'conflict') {
+            return res.status(409).json({ error: "Conflicto: la clave de operación ya fue utilizada con datos comerciales diferentes.", client_operation_id: clientOpId });
+          }
+          if (preCheck.status === 'duplicate') {
+            return res.status(200).json(preCheck.payload);
+          }
+        }
 
         // Security check: validate discount permissions
         if (safeDiscount > 0 && !isAdmin && userPerms.apply_discounts === false) {
@@ -6939,42 +7341,23 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         const itemInsert = db.prepare('INSERT INTO sale_items (sale_id, product_id, quantity, price, cost, product_name_snapshot, product_sku_snapshot, subtotal_minor) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
         const stockUpdate = db.prepare('UPDATE products SET stock = stock - ?, updated_at = ? WHERE id = ?');
 
-        const normalizedInitialAbono = payment_method === 'Crédito' ? Math.min(safeTotal, Math.max(0, Number(initial_abono || 0))) : 0;
-        const canonicalSalePayload = {
-          items: items.map((it: any) => ({
-            product_id: Number(it.product_id),
-            quantity: Number(it.quantity),
-            price: Number(it.price)
-          })),
-          total: safeTotal,
-          discount: safeDiscount,
-          client_id: client_id || null,
-          payment_method: payment_method || 'Efectivo',
-          initial_abono: normalizedInitialAbono,
-          currency: safeCurrency,
-          exchange_rate: currentRate,
-          user_id: effectiveUserId
-        };
-        const canonicalSaleHash = crypto.createHash('sha256').update(JSON.stringify(canonicalSalePayload)).digest('hex');
-
         const auditPayloads: any[] = [];
         const transaction = db.transaction(() => {
-          // C02 & S06 & K07 & B04: Atomic transactional check in processed_operations
+          // C02 & S06 & K07 & B04 & D03 & D04 & Y10 & T18: Atomic transactional check
           if (clientOpId) {
-            const existingOp = db.prepare('SELECT payload_hash, response_body, status FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
-            if (existingOp) {
-              const rawBody = String(existingOp.response_body || '');
-              if (existingOp.status === 'blocked_incident_399' || rawBody.includes('blocked_incident_399')) {
-                const blockedErr = new Error("BLOCKED_INCIDENT_399");
-                (blockedErr as any).statusCode = 409;
-                throw blockedErr;
-              }
-              if (existingOp.payload_hash && existingOp.payload_hash !== canonicalSaleHash) {
-                const conflictErr = new Error("CONFLICT_409");
-                (conflictErr as any).statusCode = 409;
-                throw conflictErr;
-              }
-              return { ...JSON.parse(existingOp.response_body), isDuplicate: true };
+            const txCheck = checkSaleIdempotency();
+            if (txCheck.status === 'blocked') {
+              const blockedErr = new Error("BLOCKED_INCIDENT_399");
+              (blockedErr as any).statusCode = 409;
+              throw blockedErr;
+            }
+            if (txCheck.status === 'conflict') {
+              const conflictErr = new Error("CONFLICT_409");
+              (conflictErr as any).statusCode = 409;
+              throw conflictErr;
+            }
+            if (txCheck.status === 'duplicate') {
+              return txCheck.payload;
             }
           }
 
@@ -7193,11 +7576,15 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
             userId: auditUser.userId || user_id,
             userName: auditUser.userName || uName,
             userRole: auditUser.userRole || uRole,
+            priceBefore: totalWasRecalculated ? clientSentTotal : safeTotal,
             priceAfter: safeTotal,
-            reason: notes || 'Venta realizada en el mostrador del POS',
+            reason: totalWasRecalculated
+              ? `${notes || 'Venta realizada en el mostrador del POS'} [MATH_PRECISION_ENFORCED: Total recalculado de ${clientSentTotal} a ${safeTotal}]`
+              : (notes || 'Venta realizada en el mostrador del POS'),
             relatedTicket: `Venta #${saleId}`,
             afterData: {
               total: safeTotal,
+              client_sent_total: totalWasRecalculated ? clientSentTotal : undefined,
               discount: safeDiscount,
               payment_method,
               client_id,
@@ -7240,7 +7627,12 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
         syncAfterWrite(syncMap);
         incrementInventoryVersion();
-        res.json({ success: true, saleId });
+        res.json({
+          success: true,
+          saleId,
+          total: safeTotal,
+          recalculatedFromClientTotal: totalWasRecalculated ? clientSentTotal : undefined
+        });
     } catch (e: any) {
       console.error("[Sales API Failure]:", e);
       if (e.message === 'BLOCKED_INCIDENT_399') {
@@ -7284,7 +7676,8 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         return res.status(403).json({ error: "No tienes autorización para consultar cuentas por cobrar." });
       }
       const records = db.prepare(`
-        SELECT ar.*, c.name as client_name, c.phone as client_phone, s.created_at as sale_date, s.total as sale_total
+        SELECT ar.*, c.name as client_name, c.phone as client_phone, s.created_at as sale_date, s.total as sale_total,
+               COALESCE(s.currency, 'BOB') as sale_currency, COALESCE(s.exchange_rate, 6.96) as sale_exchange_rate
         FROM accounts_receivable ar
         JOIN clients c ON c.id = ar.client_id
         JOIN sales s ON s.id = ar.sale_id
@@ -7353,6 +7746,27 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         return res.status(400).json({ error: "El tipo de cambio del abono debe ser un valor numérico positivo mayor a cero." });
       }
 
+      const arPayHash = crypto.createHash('sha256').update(JSON.stringify({
+        account_receivable_id: Number(id),
+        amount: Math.round(payAmount * 100) / 100,
+        currency: payCurrency,
+        payment_method: payment_method || 'Efectivo'
+      })).digest('hex');
+
+      // Y04: Check processed_operations BEFORE checking remaining_amount so confirmed payment retries return 200 idempotent
+      if (clientOpId) {
+        const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
+        if (existingOp && existingOp.response_body) {
+          if (existingOp.payload_hash && existingOp.payload_hash !== arPayHash) {
+            return res.status(409).json({
+              error: "Conflicto: la clave de operación de abono ya fue utilizada con parámetros distintos.",
+              client_operation_id: clientOpId
+            });
+          }
+          return res.status(200).json({ ...JSON.parse(existingOp.response_body), isDuplicate: true });
+        }
+      }
+
       // T24: Multi-currency conversion between payment and accounts_receivable debt currency
       let debtReduction = payAmount;
       if (saleCurrency === 'USD' && payCurrency === 'BOB') {
@@ -7388,10 +7802,15 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const amountInBs = payCurrency === 'USD' ? Math.round(actualPayReceived * payRate * 100) / 100 : actualPayReceived;
 
       const txPay = db.transaction(() => {
-        // F07: Atomic check in processed_operations
+        // F07 & Y04: Atomic check in processed_operations
         if (clientOpId) {
-          const existingOp = db.prepare('SELECT response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
-          if (existingOp) {
+          const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
+          if (existingOp && existingOp.response_body) {
+            if (existingOp.payload_hash && existingOp.payload_hash !== arPayHash) {
+              const conflictErr = new Error("CONFLICT_409");
+              (conflictErr as any).statusCode = 409;
+              throw conflictErr;
+            }
             return { ...JSON.parse(existingOp.response_body), isDuplicate: true };
           }
         }
@@ -7400,10 +7819,11 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           ? `Abono de ${actualPayReceived} ${payCurrency} (Equivalente a ${actualDebtReduction} ${saleCurrency} a t/c ${payRate})` 
           : 'Abono realizado');
 
+        // N10: Persist structured currency, exchange_rate, and debt_reduction metadata in credit_payments
         const result = db.prepare(`
-          INSERT INTO credit_payments (account_receivable_id, amount, payment_method, user_id, notes, client_operation_id)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(id, actualPayReceived, payment_method || 'Efectivo', user_id || 1, paymentNote, clientOpId);
+          INSERT INTO credit_payments (account_receivable_id, amount, currency, exchange_rate, debt_reduction, payment_method, user_id, notes, client_operation_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(id, actualPayReceived, payCurrency, payRate, actualDebtReduction, payment_method || 'Efectivo', user_id || 1, paymentNote, clientOpId);
 
         db.prepare(`
           UPDATE accounts_receivable
@@ -7443,12 +7863,24 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
         const accRow = db.prepare('SELECT id FROM cash_accounts WHERE seller_id = ?').get(currentActiveUserId) as any;
 
+        const responsePayload = {
+          success: true,
+          actualPayment: actualPayReceived,
+          actualDebtReduction,
+          debtReduction: actualDebtReduction,
+          debtCurrency: saleCurrency,
+          paymentCurrency: payCurrency,
+          exchangeRate: payRate,
+          newRemainingAmount,
+          newStatus
+        };
+
         if (clientOpId) {
           try {
             db.prepare(`
-              INSERT INTO processed_operations (client_operation_id, operation_type, response_body, status)
-              VALUES (?, 'payment', ?, 'completed')
-            `).run(clientOpId, JSON.stringify({ success: true, actualPayment: actualPayReceived, actualDebtReduction, newRemainingAmount, newStatus }));
+              INSERT INTO processed_operations (client_operation_id, operation_type, payload_hash, response_body, status, created_at)
+              VALUES (?, 'payment', ?, ?, 'completed', ?)
+            `).run(clientOpId, arPayHash, JSON.stringify(responsePayload), getBoliviaISOString());
           } catch (_) {}
         }
 
@@ -7457,10 +7889,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           activeUserId: currentActiveUserId, 
           accId: accRow?.id, 
           movId: movResult.lastInsertRowid,
-          actualPayment: actualPayReceived,
-          actualDebtReduction,
-          newRemainingAmount,
-          newStatus,
+          ...responsePayload,
           isDuplicate: false
         };
       })();
@@ -7480,11 +7909,18 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       res.json({ 
         success: true, 
         actualPayment: resPayment ?? actualPayReceived, 
-        actualDebtReduction, 
+        actualDebtReduction,
+        debtReduction: actualDebtReduction,
+        debtCurrency: saleCurrency,
+        paymentCurrency: payCurrency,
+        exchangeRate: payRate,
         newRemainingAmount: resRemaining ?? newRemainingAmount, 
         newStatus: resStatus ?? newStatus 
       });
     } catch (e: any) {
+      if (e.message === 'CONFLICT_409' || e.statusCode === 409) {
+        return res.status(409).json({ error: "Conflicto: la clave de operación de abono ya fue utilizada con parámetros diferentes.", client_operation_id: clientOpId });
+      }
       res.status(500).json({ error: e.message });
     }
   });
@@ -7794,7 +8230,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const verifiedUser = (req as any).verifiedUser;
       const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
       const isAdmin = verifiedUser && (['admin', 'administrador', 'propietario'].includes(String(verifiedUser?.role || '').toLowerCase()) || isMainAdmin(verifiedUser));
-      if (!isAdmin && userPerms.edit_pending_sales === false && userPerms.create_pending_sales === false) {
+      if (!isAdmin && userPerms.edit_pending_sales === false) {
         return res.status(403).json({ error: "No tienes autorización para editar pedidos o ventas pendientes." });
       }
       const canModifyPrices = isAdmin || !!userPerms.modify_prices || !!userPerms.edit_prices;
@@ -7926,7 +8362,8 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     const uRole = String(verifiedUser.role || '').toLowerCase();
     const isAdmin = ['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser);
     const userPerms = (typeof verifiedUser.permissions === 'string' ? JSON.parse(verifiedUser.permissions || '{}') : verifiedUser.permissions) || {};
-    if (!isAdmin && userPerms.edit_pending_sales === false && userPerms.create_pending_sales === false) {
+    // Y02: Strictly enforce edit_pending_sales permission regardless of create_pending_sales
+    if (!isAdmin && userPerms.edit_pending_sales === false) {
       return res.status(403).json({ error: "No tienes autorización para modificar reservas de stock en ventas pendientes." });
     }
     try {
@@ -7976,7 +8413,8 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     const uRole = String(verifiedUser.role || '').toLowerCase();
     const isAdmin = ['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser);
     const userPerms = (typeof verifiedUser.permissions === 'string' ? JSON.parse(verifiedUser.permissions || '{}') : verifiedUser.permissions) || {};
-    if (!isAdmin && userPerms.cancel_pending_sales === false && userPerms.delete_pending_sales === false && userPerms.edit_pending_sales === false) {
+    // Y01: Strictly enforce delete_pending_sales / cancel_pending_sales if either is explicitly false
+    if (!isAdmin && (userPerms.delete_pending_sales === false || userPerms.cancel_pending_sales === false)) {
       return res.status(403).json({ error: "No tienes autorización para eliminar pedidos o ventas pendientes." });
     }
     try {
@@ -8017,6 +8455,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   app.post("/api/pending-sales/:id/pay", (req, res) => {
     const { id } = req.params;
     const { amount, payment_method, user_id, notes } = req.body;
+    const clientOpId = req.body.clientOperationId || req.body.client_operation_id || null;
     const verifiedUser = (req as any).verifiedUser;
     if (!verifiedUser) {
       return res.status(401).json({ error: "Sesión requerida." });
@@ -8024,7 +8463,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     const uRole = String(verifiedUser.role || '').toLowerCase();
     const isAdmin = ['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser);
     const userPerms = (typeof verifiedUser.permissions === 'string' ? JSON.parse(verifiedUser.permissions || '{}') : verifiedUser.permissions) || {};
-    if (!isAdmin && userPerms.edit_pending_sales === false && userPerms.create_pending_sales === false) {
+    if (!isAdmin && (userPerms.edit_pending_sales === false || userPerms.complete_pending_sales === false)) {
       return res.status(403).json({ error: "No tienes autorización para registrar abonos en ventas pendientes." });
     }
     const effectiveOperatorId = Number(verifiedUser.id || user_id || 1);
@@ -8033,13 +8472,34 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       if (!sale) {
         return res.status(404).json({ error: "El pedido pendiente especificado no existe." });
       }
-      // P05: Cannot add payments to already completed orders
-      if (['completada', 'completado', 'finalizada', 'cancelada', 'cancelado'].includes(sale.status)) {
-        return res.status(400).json({ error: `El pedido pendiente #${id} ya fue ${sale.status} y no admite nuevos abonos.` });
-      }
       const parsedAmount = Number(amount);
       if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
         return res.status(400).json({ error: "Monto de pago no válido." });
+      }
+
+      const pendingPayHash = crypto.createHash('sha256').update(JSON.stringify({
+        pending_sale_id: Number(id),
+        amount: Math.round(parsedAmount * 100) / 100,
+        payment_method: payment_method || 'Efectivo'
+      })).digest('hex');
+
+      // Y03: Check processed_operations BEFORE checking sale status or remaining balance
+      if (clientOpId) {
+        const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
+        if (existingOp && existingOp.response_body) {
+          if (existingOp.payload_hash && existingOp.payload_hash !== pendingPayHash) {
+            return res.status(409).json({
+              error: "Conflicto: la clave de operación de abono a pedido ya fue utilizada con parámetros diferentes.",
+              client_operation_id: clientOpId
+            });
+          }
+          return res.status(200).json({ ...JSON.parse(existingOp.response_body), isDuplicate: true });
+        }
+      }
+
+      // P05: Cannot add payments to already completed orders
+      if (['completada', 'completado', 'finalizada', 'cancelada', 'cancelado'].includes(sale.status)) {
+        return res.status(400).json({ error: `El pedido pendiente #${id} ya fue ${sale.status} y no admite nuevos abonos.` });
       }
       
       const totalAmount = Number(sale.total || 0);
@@ -8054,17 +8514,45 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const newPaidAmount = Math.min(totalAmount, Math.round((paidAmount + actualAccepted) * 100) / 100);
       const newRemainingAmount = Math.max(0, Math.round((totalAmount - newPaidAmount) * 100) / 100);
       
-      db.transaction(() => {
+      const txPendingPay = db.transaction(() => {
+        if (clientOpId) {
+          const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
+          if (existingOp && existingOp.response_body) {
+            if (existingOp.payload_hash && existingOp.payload_hash !== pendingPayHash) {
+              const conflictErr = new Error("CONFLICT_409");
+              (conflictErr as any).statusCode = 409;
+              throw conflictErr;
+            }
+            return { ...JSON.parse(existingOp.response_body), isDuplicate: true };
+          }
+        }
+
         db.prepare(`UPDATE pending_sales SET paid_amount = ? WHERE id = ?`).run(newPaidAmount, id);
         db.prepare(`
           INSERT INTO pending_sale_payments (pending_sale_id, amount, payment_method, user_id, notes)
           VALUES (?, ?, ?, ?, ?)
         `).run(id, actualAccepted, payment_method || 'Efectivo', effectiveOperatorId, notes || 'Abono registrado');
+
+        const resBody = { success: true, actualPayment: actualAccepted, newPaidAmount, newRemainingAmount };
+        if (clientOpId) {
+          db.prepare(`
+            INSERT INTO processed_operations (client_operation_id, operation_type, payload_hash, response_body, status, created_at)
+            VALUES (?, 'pending_payment', ?, ?, 'completed', ?)
+          `).run(clientOpId, pendingPayHash, JSON.stringify(resBody), getBoliviaISOString());
+        }
+        return { ...resBody, isDuplicate: false };
       })();
+
+      if ((txPendingPay as any).isDuplicate) {
+        return res.status(200).json(txPendingPay);
+      }
       
       syncAfterWrite(['pending_sales', 'pending_sale_payments']);
       res.json({ success: true, actualPayment: actualAccepted, newPaidAmount, newRemainingAmount });
     } catch (e: any) {
+      if (e.message === 'CONFLICT_409' || e.statusCode === 409) {
+        return res.status(409).json({ error: "Conflicto: la clave de operación ya fue utilizada con parámetros distintos.", client_operation_id: clientOpId });
+      }
       res.status(500).json({ error: e.message });
     }
   });
@@ -8088,6 +8576,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   app.post("/api/pending-sales/:id/finalize", (req, res) => {
     const { id } = req.params;
     const { payment_method, user_id, client_id, initial_abono, due_date, redeemed_points } = req.body;
+    const clientOpId = req.body.clientOperationId || req.body.client_operation_id || null;
     const verifiedUser = (req as any).verifiedUser;
     if (!verifiedUser) {
       return res.status(401).json({ error: "Sesión requerida." });
@@ -8095,12 +8584,33 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     const uRole = String(verifiedUser.role || '').toLowerCase();
     const isAdmin = ['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser);
     const userPerms = (typeof verifiedUser.permissions === 'string' ? JSON.parse(verifiedUser.permissions || '{}') : verifiedUser.permissions) || {};
-    if (!isAdmin && userPerms.complete_pending_sales === false && userPerms.create_sales === false) {
+    if (!isAdmin && (userPerms.complete_pending_sales === false || userPerms.create_sales === false)) {
       return res.status(403).json({ error: "No tienes autorización para finalizar o cobrar ventas pendientes." });
     }
     const effectiveOperatorId = Number(verifiedUser.id || user_id || 1);
     try {
       if (checkInventoryLock(res)) return;
+
+      const finalizePayloadHash = crypto.createHash('sha256').update(JSON.stringify({
+        pending_sale_id: Number(id),
+        payment_method: payment_method || 'Efectivo',
+        client_id: client_id ? Number(client_id) : null,
+        initial_abono: Number(initial_abono || 0),
+        redeemed_points: Number(redeemed_points || 0)
+      })).digest('hex');
+
+      if (clientOpId) {
+        const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
+        if (existingOp && existingOp.response_body) {
+          if (existingOp.payload_hash && existingOp.payload_hash !== finalizePayloadHash) {
+            return res.status(409).json({
+              error: "Conflicto: la clave de operación de finalización ya fue utilizada con parámetros diferentes.",
+              client_operation_id: clientOpId
+            });
+          }
+          return res.status(200).json({ ...JSON.parse(existingOp.response_body), isDuplicate: true });
+        }
+      }
 
       const sale = db.prepare(`SELECT * FROM pending_sales WHERE id = ?`).get(id) as any;
       if (!sale) {
@@ -8112,6 +8622,20 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const items = db.prepare(`SELECT * FROM pending_sale_items WHERE pending_sale_id = ?`).all(id) as any[];
       if (items.length === 0) {
         return res.status(400).json({ error: "El pedido no tiene artículos." });
+      }
+
+      const safeRedeemedPoints = Math.max(0, Number(redeemed_points || 0));
+      if (safeRedeemedPoints > 0) {
+        if (!client_id) {
+          return res.status(400).json({ error: "No se pueden canjear puntos de fidelidad sin asignar un cliente válido." });
+        }
+        const clientPtsRow = db.prepare('SELECT points FROM clients WHERE id = ?').get(client_id) as any;
+        const availablePts = Number(clientPtsRow?.points || 0);
+        if (safeRedeemedPoints > availablePts) {
+          return res.status(400).json({
+            error: `Puntos insuficientes: el cliente dispone de ${availablePts} puntos y se intentó canjear ${safeRedeemedPoints}.`
+          });
+        }
       }
 
       const wasReservingStock = sale.reserve_stock !== undefined && sale.reserve_stock !== null
@@ -8145,6 +8669,19 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const safeDiscount = Math.max(0, Number(sale.discount || 0));
       const safeCurrency = sale.currency || 'BOB';
       const safeRate = Number(sale.exchange_rate || 6.96) > 0 ? Number(sale.exchange_rate || 6.96) : 6.96;
+
+      // P06: Validate prior accumulated payments + additional initial_abono BEFORE starting transaction
+      const accumulatedAbonosPre = Math.max(0, Number(sale.paid_amount || 0));
+      const remainingOrderBalancePre = Math.max(0, Math.round((safeTotal - accumulatedAbonosPre) * 100) / 100);
+      const requestedInitialAbono = initial_abono !== undefined && initial_abono !== null ? Number(initial_abono) : 0;
+      if (!Number.isFinite(requestedInitialAbono) || requestedInitialAbono < 0) {
+        return res.status(400).json({ error: "El abono adicional al finalizar debe ser un monto numérico no negativo." });
+      }
+      if (requestedInitialAbono > remainingOrderBalancePre + 0.01) {
+        return res.status(400).json({
+          error: `El abono adicional (${requestedInitialAbono.toFixed(2)} ${safeCurrency}) sumado a los anticipos previos (${accumulatedAbonosPre.toFixed(2)} ${safeCurrency}) excede el saldo pendiente del pedido (${remainingOrderBalancePre.toFixed(2)} ${safeCurrency}).`
+        });
+      }
       
       const saleInsert = db.prepare('INSERT INTO sales (total, discount, payment_method, user_id, client_id, exchange_rate, currency, cierre_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)');
       const itemInsert = db.prepare('INSERT INTO sale_items (sale_id, product_id, quantity, price, cost, product_name_snapshot, product_sku_snapshot, subtotal_minor) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
@@ -8156,9 +8693,63 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const inventoryAuditLogIds: any[] = [];
       let arId: any = null;
       let cpId: any = null;
+      let cashMovId: any = null;
+      let cashAccId: any = null;
       const auditPayloads: any[] = [];
       
-      db.transaction(() => {
+      const finalizeTrx = db.transaction(() => {
+        if (clientOpId) {
+          const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
+          if (existingOp && existingOp.response_body) {
+            if (existingOp.payload_hash && existingOp.payload_hash !== finalizePayloadHash) {
+              const conflictErr = new Error("CONFLICT_409");
+              (conflictErr as any).statusCode = 409;
+              throw conflictErr;
+            }
+            return { ...JSON.parse(existingOp.response_body), isDuplicate: true };
+          }
+        }
+
+        // Re-verify pending sale status atomically inside transaction
+        const lockedSale = db.prepare('SELECT status, reserve_stock, paid_amount FROM pending_sales WHERE id = ?').get(id) as any;
+        if (!lockedSale || lockedSale.status === 'completada' || lockedSale.status === 'finalizada' || lockedSale.status === 'cancelada') {
+          const statusErr = new Error(`El pedido pendiente #${id} ya fue ${lockedSale?.status || 'procesado'} previamente.`);
+          (statusErr as any).statusCode = 400;
+          throw statusErr;
+        }
+
+        // Re-verify aggregate stock demand atomically inside transaction
+        const lockedWasReserving = lockedSale.reserve_stock !== undefined && lockedSale.reserve_stock !== null
+          ? Number(lockedSale.reserve_stock) === 1
+          : true;
+        for (const [pId, totalOrderQty] of demandByProduct.entries()) {
+          const prodRow = db.prepare('SELECT id, name, stock FROM products WHERE id = ?').get(pId) as any;
+          if (!prodRow) {
+            const notFoundProdErr = new Error(`El producto con ID ${pId} no existe en el inventario.`);
+            (notFoundProdErr as any).statusCode = 400;
+            throw notFoundProdErr;
+          }
+          const totalReservedAll = getReservedStock(pId);
+          const ownReservedQty = lockedWasReserving ? totalOrderQty : 0;
+          const reservedByOthers = Math.max(0, totalReservedAll - ownReservedQty);
+          const netAvailableForThisOrder = Math.max(0, (Number(prodRow.stock) || 0) - reservedByOthers);
+          if (totalOrderQty > netAvailableForThisOrder) {
+            const stockErr = new Error(`Venta rechazada: Stock disponible insuficiente para "${prodRow.name}". Físico: ${prodRow.stock}, Reservado por otros pedidos: ${reservedByOthers}, Disponible: ${netAvailableForThisOrder}, Solicitado: ${totalOrderQty}.`);
+            (stockErr as any).statusCode = 400;
+            throw stockErr;
+          }
+        }
+
+        if (client_id && safeRedeemedPoints > 0) {
+          const lockedClient = db.prepare('SELECT points FROM clients WHERE id = ?').get(client_id) as any;
+          const currentPts = Number(lockedClient?.points || 0);
+          if (safeRedeemedPoints > currentPts) {
+            const ptsErr = new Error(`Puntos insuficientes: el cliente dispone de ${currentPts} puntos y se intentó canjear ${safeRedeemedPoints}.`);
+            (ptsErr as any).statusCode = 400;
+            throw ptsErr;
+          }
+        }
+
         const nowIso = getBoliviaISOString();
         const result = saleInsert.run(safeTotal, safeDiscount, payment_method || 'Efectivo', effectiveOperatorId, client_id || null, safeRate, safeCurrency, nowIso);
         finalSaleId = result.lastInsertRowid;
@@ -8168,11 +8759,10 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           if (!prodRow) {
             throw new Error(`El producto con ID ${item.product_id} no existe en el inventario.`);
           }
-          if (prodRow.stock <= 0) {
-            throw new Error(`Venta rechazada: El producto "${prodRow.name}" no tiene stock disponible (Stock: 0).`);
-          }
-          if (item.quantity > prodRow.stock) {
-            throw new Error(`Venta rechazada: Stock insuficiente para "${prodRow.name}". Disponible: ${prodRow.stock} unidades, Solicitado: ${item.quantity}.`);
+          if (prodRow.stock <= 0 || item.quantity > prodRow.stock) {
+            const stErr = new Error(`Venta rechazada: Stock insuficiente para "${prodRow.name}". Disponible: ${prodRow.stock} unidades, Solicitado: ${item.quantity}.`);
+            (stErr as any).statusCode = 400;
+            throw stErr;
           }
 
           const currentCost = prodRow.price_cost || 0;
@@ -8232,9 +8822,8 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         }
         
         if (client_id) {
-          const safeRedeemed = Math.max(0, Number(redeemed_points || 0));
-          if (safeRedeemed > 0) {
-            db.prepare('UPDATE clients SET points = MAX(0, points - ?) WHERE id = ?').run(safeRedeemed, client_id);
+          if (safeRedeemedPoints > 0) {
+            db.prepare('UPDATE clients SET points = MAX(0, points - ?) WHERE id = ?').run(safeRedeemedPoints, client_id);
           }
           const amountForPoints = safeCurrency === 'USD' ? (safeTotal * safeRate) : safeTotal;
           const pointsEarned = Math.floor(amountForPoints / 10);
@@ -8253,7 +8842,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           VALUES (?, ?, 0.0)
         `).run(activeUserId, sName);
 
-        const accumulatedAbonos = Math.max(0, Number(sale.paid_amount || 0));
+        const accumulatedAbonos = Math.max(0, Number(lockedSale.paid_amount ?? sale.paid_amount ?? 0));
         let cashReceivedNow = 0;
 
         if (payment_method === 'Crédito') {
@@ -8281,7 +8870,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
             const cpResult = db.prepare(`
               INSERT INTO credit_payments (account_receivable_id, amount, payment_method, user_id, notes)
               VALUES (?, ?, ?, ?, ?)
-            `).run(arId, safeInitialAbono, 'Efectivo', user_id || 1, 'Abono final al liquidar / finalizar la venta');
+            `).run(arId, safeInitialAbono, 'Efectivo', effectiveOperatorId, 'Abono final al liquidar / finalizar la venta');
             cpId = cpResult.lastInsertRowid;
             cashReceivedNow = safeInitialAbono;
           }
@@ -8293,20 +8882,39 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
         if (cashReceivedNow > 0) {
           const cashInBs = safeCurrency === 'USD' ? (cashReceivedNow * safeRate) : cashReceivedNow;
-          db.prepare(`
+          const movRes = db.prepare(`
             INSERT INTO cash_movements (seller_id, sale_id, type, amount, currency, payment_method, status, notes)
             VALUES (?, ?, 'venta', ?, ?, ?, 'pendiente', ?)
           `).run(activeUserId, finalSaleId, cashReceivedNow, safeCurrency, payment_method || 'Efectivo', `Liquidación de pedido pendiente #${id}`);
+          cashMovId = movRes.lastInsertRowid;
 
           db.prepare(`
             UPDATE cash_accounts
             SET current_balance = current_balance + ?, updated_at = CURRENT_TIMESTAMP
             WHERE seller_id = ?
           `).run(cashInBs, activeUserId);
+          const accRow = db.prepare('SELECT id FROM cash_accounts WHERE seller_id = ?').get(activeUserId) as any;
+          cashAccId = accRow?.id;
         }
         
         db.prepare(`UPDATE pending_sales SET status = 'completada' WHERE id = ?`).run(id);
-      })();
+
+        if (clientOpId) {
+          try {
+            db.prepare(`
+              INSERT INTO processed_operations (client_operation_id, operation_type, payload_hash, response_body, status, created_at)
+              VALUES (?, 'finalize_pending_sale', ?, ?, 'completed', ?)
+            `).run(clientOpId, finalizePayloadHash, JSON.stringify({ success: true, saleId: finalSaleId }), nowIso);
+          } catch (_) {}
+        }
+
+        return { success: true, saleId: finalSaleId, isDuplicate: false };
+      });
+
+      const txResult = finalizeTrx() as any;
+      if (txResult && txResult.isDuplicate) {
+        return res.json(txResult);
+      }
 
       const auditUser = (req as any).auditUser || {};
 
@@ -8335,9 +8943,9 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           entityType: 'venta',
           entityId: finalSaleId,
           entityName: `Ticket Venta #${finalSaleId} (de Pedido #${id})`,
-          userId: auditUser.userId || user_id || 1,
-          userName: auditUser.userName || 'Cajero',
-          userRole: auditUser.userRole || 'cajero',
+          userId: auditUser.userId || effectiveOperatorId,
+          userName: auditUser.userName || verifiedUser?.username || 'Cajero',
+          userRole: auditUser.userRole || verifiedUser?.role || 'cajero',
           priceAfter: safeTotal,
           reason: `Pedido pendiente #${id} finalizado y convertido en venta en mostrador`,
           relatedTicket: `Venta #${finalSaleId}`,
@@ -8367,10 +8975,23 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       if (cpId) {
         syncMap.credit_payments = [cpId];
       }
+      if (cashMovId) {
+        syncMap.cash_movements = [cashMovId];
+      }
+      if (cashAccId) {
+        syncMap.cash_accounts = [cashAccId];
+      }
       
       syncAfterWrite(syncMap);
+      incrementInventoryVersion();
       res.json({ success: true, saleId: finalSaleId });
     } catch (e: any) {
+      if (e.message === 'CONFLICT_409' || e.statusCode === 409) {
+        return res.status(409).json({ error: "Conflicto: la clave de operación de finalización ya fue utilizada con parámetros diferentes.", client_operation_id: clientOpId });
+      }
+      if (e.statusCode === 400 || e.statusCode === 404) {
+        return res.status(e.statusCode).json({ error: e.message });
+      }
       res.status(500).json({ error: e.message });
     }
   });
@@ -8380,7 +9001,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   let lastSyncTime = new Date().toISOString();
 
   app.get("/api/sync/status", (req, res) => {
-    res.json({ isSyncing: isBackSyncing, lastSyncTime });
+    res.json({ isSyncing: isBackSyncing, lastSyncTime, deduplication: getSyncDeduplicationStats() });
   });
 
   app.post("/api/sync/trigger", async (req, res) => {
@@ -8405,7 +9026,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       } else {
         // Routine fast online sync: Push locally updated tables to cloud in non-blocking fashion
         console.log("[PWA API Sync] Routine fast online sync triggered...");
-        syncAfterWrite(['sales', 'sale_items', 'caja_cierres', 'shifts', 'settings', 'exchange_rate_audit', 'system_audit_logs']);
+        syncAfterWrite(['sales', 'sale_items', 'sale_returns', 'products', 'cash_accounts', 'cash_movements', 'accounts_receivable', 'credit_payments', 'pending_sales', 'pending_sale_items', 'inventory_audit_logs', 'caja_cierres', 'shifts', 'settings', 'exchange_rate_audit', 'system_audit_logs']);
       }
       lastSyncTime = new Date().toISOString();
       res.json({ status: "success", lastSyncTime, mode: isFullSync ? "full" : "fast" });
@@ -8726,8 +9347,15 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const adminId = adminUser.id || 1;
       const adminName = adminUser.username || 'Admin';
 
-      const safeTotal = Math.max(0, Number(pendingSale.total || 0));
-      const safeDiscount = Math.max(0, Number(pendingSale.discount || 0));
+      const offlineGrossSubtotal = items.reduce((acc: number, it: any) => {
+        const q = Math.max(0, Number(it?.quantity || 0));
+        const p = Math.max(0, Number(it?.price || 0));
+        return acc + (q * p);
+      }, 0);
+      const safeDiscount = Math.min(offlineGrossSubtotal, Math.max(0, Number(pendingSale.discount || 0)));
+      const safeTotal = items.length > 0
+        ? Math.max(0, Number((offlineGrossSubtotal - safeDiscount).toFixed(2)))
+        : Math.max(0, Number(pendingSale.total || 0));
       const safeCurrency = pendingSale.currency || 'BOB';
       const currentRate = Number(pendingSale.exchange_rate || 6.96);
       const paymentMethod = pendingSale.payment_method || 'Efectivo';
@@ -8745,7 +9373,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         (sale_id, product_id, quantity, price, cost, product_name_snapshot, product_sku_snapshot, subtotal_minor) 
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `);
-      const stockUpdate = db.prepare('UPDATE products SET stock = stock - ?, updated_at = ? WHERE id = ?');
+      const stockUpdate = db.prepare('UPDATE products SET stock = MAX(0, stock - ?), updated_at = ? WHERE id = ?');
 
       const nowIso = getBoliviaISOString();
       const auditPayloads: any[] = [];
@@ -9694,6 +10322,7 @@ DIRECTIVAS CRÍTICAS:
       const periodRefundsRow = db.prepare(`
         SELECT 
           COALESCE(SUM(CASE WHEN s.currency='USD' THEN sr.refund_amount * s.exchange_rate ELSE sr.refund_amount END), 0) as total_refunds,
+          COALESCE(SUM(sr.quantity), 0) as total_returned_items,
           COALESCE(SUM(
             CASE 
               WHEN si.cost IS NOT NULL AND si.cost > 0 THEN 
@@ -9707,15 +10336,18 @@ DIRECTIVAS CRÍTICAS:
         ${currReturnsWhere.whereSql}
       `).get(...currReturnsWhere.params) as any;
 
-      const totalSales = Number(periodSalesRow?.total_sales || 0);
+      const grossPeriodSales = Number(periodSalesRow?.total_sales || 0);
       const totalTx = Number(periodSalesRow?.total_tx || 0);
       const periodGross = Number(periodGrossProfitRow?.gross_profit || 0);
       const periodDisc = Number(periodDiscountRow?.total_discount || 0);
       const periodRef = Number(periodRefundsRow?.total_refunds || 0);
+      const periodRetItems = Number(periodRefundsRow?.total_returned_items || 0);
       const periodRetCosts = Number(periodRefundsRow?.total_returned_costs || 0);
+      // Net revenue and net profit after returns (100% parity with HistorialVentasView and DevolucionesView)
+      const totalSales = Math.max(0, Number((grossPeriodSales - periodRef).toFixed(2)));
       // R01 & R02: Honest margin with reincorporated returned cost and unclipped losses
-      const totalProfit = (periodGross - periodDisc - periodRef + periodRetCosts);
-      const totalItems = Number(periodGrossProfitRow?.total_items || 0);
+      const totalProfit = Number((periodGross - periodDisc - periodRef + periodRetCosts).toFixed(2));
+      const totalItems = Math.max(0, Number(periodGrossProfitRow?.total_items || 0) - periodRetItems);
 
       const avgTicket = totalTx > 0 ? totalSales / totalTx : 0;
       const avgItemsPerTicket = totalTx > 0 ? totalItems / totalTx : 0;
@@ -9788,12 +10420,13 @@ DIRECTIVAS CRÍTICAS:
           ${prevReturnsWhere.whereSql}
         `).get(...prevReturnsWhere.params) as any;
 
-        prevPeriodSales = Number(prevSalesRow?.total_sales || 0);
+        const prevGrossSales = Number(prevSalesRow?.total_sales || 0);
         const prevGross = Number(prevGrossRow?.gross_profit || 0);
         const prevDisc = Number(prevDiscountRow?.total_discount || 0);
         const prevRef = Number(prevRefundsRow?.total_refunds || 0);
         const prevRetCosts = Number(prevRefundsRow?.total_returned_costs || 0);
-        prevPeriodProfit = (prevGross - prevDisc - prevRef + prevRetCosts);
+        prevPeriodSales = Math.max(0, Number((prevGrossSales - prevRef).toFixed(2)));
+        prevPeriodProfit = Number((prevGross - prevDisc - prevRef + prevRetCosts).toFixed(2));
         prevPeriodTx = Number(prevSalesRow?.total_tx || 0);
 
         growthSalesPct = prevPeriodSales > 0 ? ((totalSales - prevPeriodSales) / prevPeriodSales) * 100 : (totalSales > 0 ? 100 : 0);
@@ -10016,12 +10649,17 @@ DIRECTIVAS CRÍTICAS:
         };
       });
 
+      const netSalesToday = Math.max(0, Number((Number(todaySales.total || 0) - todayRefunds).toFixed(2)));
       res.json({
-        salesToday: todaySales.total,
-        profitToday: todayProfit.profit,
+        salesToday: netSalesToday,
+        grossSalesToday: Number(todaySales.total || 0),
+        refundsToday: todayRefunds,
+        profitToday: Number(todayProfit.profit.toFixed(2)),
         sellers,
         periodSummary: {
           totalSales,
+          grossSales: grossPeriodSales,
+          totalRefunds: periodRef,
           totalProfit,
           totalTx,
           totalItems,

@@ -429,20 +429,28 @@ export function HistorialVentasView() {
     }, [sales, searchQuery, selectedCashier, selectedPaymentMethod, minAmount, maxAmount, isKioskLocked, user]);
 
     // calculate metrics (consolidated in Bs using historical exchange rates)
-    const toBs = (s: any, field: 'total' | 'discount' | 'capital' = 'total') => {
+    const toBs = (s: any, field: 'total' | 'discount' | 'capital' | 'returned_amount' = 'total') => {
         const rate = Number(s.exchange_rate || 1);
         const val = Number(s[field] || 0);
         return s.currency === 'USD' ? (val * rate) : val;
     };
 
-    const totalEarnings = filteredSales.reduce((sum, s) => sum + toBs(s, 'total'), 0);
+    const totalGrossEarnings = filteredSales.reduce((sum, s) => sum + toBs(s, 'total'), 0);
+    const totalReturnedBs = filteredSales.reduce((sum, s) => sum + toBs(s, 'returned_amount'), 0);
+    const totalEarnings = Math.max(0, totalGrossEarnings - totalReturnedBs);
     const totalDiscounts = filteredSales.reduce((sum, s) => sum + toBs(s, 'discount'), 0);
     const transactionsCount = filteredSales.length;
-    const totalItemsCount = filteredSales.reduce((sum, s) => sum + (s.item_count || 0), 0);
+    const totalItemsCount = filteredSales.reduce((sum, s) => sum + Math.max(0, Number(s.item_count || 0) - Number(s.returned_items_count || 0)), 0);
     const averageTicket = transactionsCount > 0 ? totalEarnings / transactionsCount : 0;
 
-    // Capital & Profit calculations requested by user
-    const totalCapital = filteredSales.reduce((sum, s) => sum + toBs(s, 'capital'), 0);
+    // Capital & Profit calculations net of returned items
+    const totalCapital = filteredSales.reduce((sum, s) => {
+        const grossCap = toBs(s, 'capital');
+        const soldQty = Number(s.item_count || 0);
+        const retQty = Number(s.returned_items_count || 0);
+        const retainedRatio = soldQty > 0 ? Math.max(0, Math.min(1, (soldQty - retQty) / soldQty)) : 1;
+        return sum + (grossCap * retainedRatio);
+    }, 0);
     const totalProfit = totalEarnings - totalCapital;
     const profitMargin = totalEarnings > 0 ? (totalProfit / totalEarnings) * 100 : 0;
 
@@ -1394,8 +1402,19 @@ export function HistorialVentasView() {
                                             </div>
                                             <div className="text-right shrink-0 flex flex-col items-end gap-1">
                                                 <span className="font-mono font-black text-sm text-slate-850 dark:text-white">
-                                                    Bs. {sale.total.toFixed(2)}
+                                                    {sale.currency === 'USD' ? '$' : 'Bs.'} {sale.total.toFixed(2)}
                                                 </span>
+                                                {Number(sale.returned_amount || 0) > 0 && (
+                                                    <span className={`text-[8.5px] px-1.5 py-0.5 rounded font-extrabold uppercase tracking-wider ${
+                                                        (Number(sale.returned_items_count || 0) >= Number(sale.item_count || 1) || Number(sale.returned_amount) >= Number(sale.total) - 0.01)
+                                                            ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                                                            : 'bg-rose-500/10 text-rose-600 dark:text-rose-400'
+                                                    }`}>
+                                                        {(Number(sale.returned_items_count || 0) >= Number(sale.item_count || 1) || Number(sale.returned_amount) >= Number(sale.total) - 0.01)
+                                                            ? 'Devuelto Total'
+                                                            : `Dev. -${sale.currency === 'USD' ? '$' : 'Bs.'}${Number(sale.returned_amount).toFixed(2)}`}
+                                                    </span>
+                                                )}
                                                 <ChevronRight size={14} className="text-slate-400" />
                                             </div>
                                         </div>
@@ -1459,7 +1478,18 @@ export function HistorialVentasView() {
                                                     </td>
                                                     <td className="p-3.5 text-right font-mono text-slate-500 font-semibold">{sale.item_count} pz</td>
                                                     <td className="p-3.5 text-right pr-5 font-black text-slate-850 dark:text-white font-mono text-xs">
-                                                        {sale.currency === 'USD' ? '$' : 'Bs.'} {sale.total.toFixed(2)}
+                                                        <div>{sale.currency === 'USD' ? '$' : 'Bs.'} {sale.total.toFixed(2)}</div>
+                                                        {Number(sale.returned_amount || 0) > 0 && (
+                                                            <div className={`text-[9px] font-extrabold uppercase mt-0.5 ${
+                                                                (Number(sale.returned_items_count || 0) >= Number(sale.item_count || 1) || Number(sale.returned_amount) >= Number(sale.total) - 0.01)
+                                                                    ? 'text-amber-600 dark:text-amber-400'
+                                                                    : 'text-rose-500 dark:text-rose-400'
+                                                            }`}>
+                                                                {(Number(sale.returned_items_count || 0) >= Number(sale.item_count || 1) || Number(sale.returned_amount) >= Number(sale.total) - 0.01)
+                                                                    ? '↺ Devuelto Total'
+                                                                    : `↺ Dev. -${sale.currency === 'USD' ? '$' : 'Bs.'}${Number(sale.returned_amount).toFixed(2)}`}
+                                                            </div>
+                                                        )}
                                                     </td>
                                                 </tr>
                                             );
@@ -1508,10 +1538,17 @@ export function HistorialVentasView() {
 
                             <span className="text-[9px] font-extrabold uppercase tracking-widest text-slate-400">Desglose de Artículos</span>
                             <div className="flex flex-col gap-2 overflow-y-auto max-h-[200px] border border-slate-100 dark:border-slate-850/60 p-2 rounded-2xl bg-neutral-50/50 dark:bg-black/10">
-                                {saleItems.map((item, index) => (
+                                 {saleItems.map((item, index) => (
                                     <div key={index} className="flex justify-between items-center text-xs p-2.5 rounded-xl bg-white dark:bg-[#080d14] border border-slate-150 dark:border-slate-850">
                                         <div className="min-w-0 pr-3">
-                                            <h4 className="font-bold text-slate-800 dark:text-slate-100 uppercase truncate leading-none mb-1">{item.product_name}</h4>
+                                            <div className="flex items-center gap-1.5">
+                                                <h4 className="font-bold text-slate-800 dark:text-slate-100 uppercase truncate leading-none mb-1">{item.product_name}</h4>
+                                                {Number(item.returned_quantity || 0) > 0 && (
+                                                    <span className="text-[8.5px] font-extrabold uppercase px-1.5 py-0.5 rounded bg-rose-500/10 text-rose-600 dark:text-rose-400 mb-1 shrink-0">
+                                                        Dev: {item.returned_quantity}/{item.quantity}
+                                                    </span>
+                                                )}
+                                            </div>
                                             <span className="text-[9px] font-mono text-slate-400 bg-slate-50 dark:bg-black/20 px-1 py-0.5 rounded font-bold">SKU {item.sku}</span>
                                         </div>
                                         <div className="text-right shrink-0">
@@ -1538,11 +1575,23 @@ export function HistorialVentasView() {
                                     </div>
                                 )}
                                 <div className="flex justify-between items-center border-t border-dashed border-slate-200 dark:border-slate-800 pt-2 text-sm font-extrabold text-slate-800 dark:text-white">
-                                    <span>TOTAL:</span>
+                                    <span>TOTAL ORIGINAL:</span>
                                     <span className="font-mono text-base font-black text-indigo-600 dark:text-indigo-400">
                                         {selectedSale.currency === 'USD' ? '$' : 'Bs.'} {selectedSale.total.toFixed(2)} {selectedSale.currency || 'BOB'}
                                     </span>
                                 </div>
+                                {Number(selectedSale.returned_amount || 0) > 0 && (
+                                    <>
+                                        <div className="flex justify-between items-center text-xs font-bold text-rose-600 dark:text-rose-400">
+                                            <span>Monto Reintegrado:</span>
+                                            <span className="font-mono">-{selectedSale.currency === 'USD' ? '$' : 'Bs.'} {Number(selectedSale.returned_amount).toFixed(2)}</span>
+                                        </div>
+                                        <div className="flex justify-between items-center text-xs font-black text-emerald-600 dark:text-emerald-400 pt-1 border-t border-slate-100 dark:border-slate-850">
+                                            <span>NETO RETENIDO:</span>
+                                            <span className="font-mono">{selectedSale.currency === 'USD' ? '$' : 'Bs.'} {Math.max(0, Number(selectedSale.total) - Number(selectedSale.returned_amount)).toFixed(2)} {selectedSale.currency || 'BOB'}</span>
+                                        </div>
+                                    </>
+                                )}
                             </div>
 
                             {/* Control Actions Panel */}
@@ -2152,11 +2201,12 @@ export function DepartamentosView() {
 // VIEW: DEVOLUCIONES (REFUNDS MANAGER)
 // ----------------------------------------------------
 export function DevolucionesView() {
-    const { fetchProducts } = useAppContext();
+    const { fetchProducts, isKioskLocked, requestSupervisorAuth } = useAppContext();
     const [sales, setSales] = useState<any[]>([]);
     const [selectedSale, setSelectedSale] = useState<any | null>(null);
     const [saleItems, setSaleItems] = useState<any[]>([]);
     const [refundQuantities, setRefundQuantities] = useState<{ [productId: number]: number }>({});
+    const [refundReason, setRefundReason] = useState<string>("");
     const [loading, setLoading] = useState(false);
     const [searchQuery, setSearchQuery] = useState("");
     const [notification, setNotification] = useState<string | null>(null);
@@ -2180,6 +2230,7 @@ export function DevolucionesView() {
         setSelectedSale(sale);
         setSaleItems([]);
         setRefundQuantities({});
+        setRefundReason("");
         try {
             const res = await fetch(`/api/sales/${sale.id}/items`);
             if (res.ok) {
@@ -2217,14 +2268,50 @@ export function DevolucionesView() {
         });
     };
 
+    const [submittingRefund, setSubmittingRefund] = useState(false);
+    const refundOpIdRef = React.useRef<string>('');
+
+    useEffect(() => {
+        refundOpIdRef.current = '';
+    }, [selectedSale?.id, refundQuantities]);
+
+    // Live calculation of units and prorated refund amount in the ticket's original currency
+    const refundPreview = React.useMemo(() => {
+        if (!selectedSale || saleItems.length === 0) {
+            return { totalUnits: 0, estimatedAmount: 0, currencySymbol: 'Bs.', currencyCode: 'BOB' };
+        }
+        const currencyCode = selectedSale.currency === 'USD' ? 'USD' : 'BOB';
+        const currencySymbol = currencyCode === 'USD' ? '$' : 'Bs.';
+        const grossTotal = saleItems.reduce((acc, si) => acc + (Number(si.quantity || 0) * Number(si.price || 0)), 0);
+        const saleDiscount = Number(selectedSale.discount || 0);
+        const discountRatio = grossTotal > 0 ? (saleDiscount / grossTotal) : 0;
+        const alreadyRefunded = Number(selectedSale.returned_amount || 0);
+        const maxRemainingBudget = Math.max(0, Number(selectedSale.total || 0) - alreadyRefunded);
+
+        let totalUnits = 0;
+        let rawEstimated = 0;
+        for (const item of saleItems) {
+            const qty = Number(refundQuantities[item.id] || 0);
+            if (qty > 0) {
+                totalUnits += qty;
+                const netUnitPrice = Math.max(0, Number(item.price || 0) * (1 - discountRatio));
+                rawEstimated += Math.round(qty * netUnitPrice * 100) / 100;
+            }
+        }
+        const estimatedAmount = Math.min(maxRemainingBudget, Math.round(rawEstimated * 100) / 100);
+        return { totalUnits, estimatedAmount, currencySymbol, currencyCode };
+    }, [selectedSale, saleItems, refundQuantities]);
+
     const executeRefund = async () => {
-        if (!selectedSale) return;
+        if (!selectedSale || submittingRefund) return;
+        const cleanReason = refundReason.trim();
         const itemsToRefund = saleItems.map(item => {
             const qty = refundQuantities[item.id] || 0;
             return {
                 sale_item_id: item.id,
                 product_id: item.product_id,
-                quantity: qty
+                quantity: qty,
+                reason: cleanReason || `Devolución auditada de venta #${selectedSale.id}`
             };
         }).filter(item => item.quantity > 0);
 
@@ -2234,24 +2321,34 @@ export function DevolucionesView() {
             return;
         }
 
+        if (!refundOpIdRef.current) {
+            refundOpIdRef.current = `refund_${selectedSale.id}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+        }
+        const currentOpId = refundOpIdRef.current;
+
+        setSubmittingRefund(true);
         try {
             const res = await fetch('/api/sales/refund', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     sale_id: selectedSale.id,
-                    item_refunds: itemsToRefund
+                    item_refunds: itemsToRefund,
+                    clientOperationId: currentOpId
                 })
             });
 
             if (res.ok) {
+                refundOpIdRef.current = '';
                 const resData = await res.json().catch(() => ({}));
                 const reconCount = resData.inventoryReconciliation?.length || 0;
-                setNotification(`✓ Devolución procesada. Incremento de stock validado y reconciliado de forma atómica (${reconCount} ítem${reconCount !== 1 ? 's' : ''}).`);
+                const ptsMsg = resData.pointsReverted > 0 ? ` | Puntos revertidos: -${resData.pointsReverted}` : '';
+                setNotification(`✓ Devolución procesada (${refundPreview.currencySymbol} ${Number(resData.totalRefundAmount ?? refundPreview.estimatedAmount).toFixed(2)}). Stock reconciliado (${reconCount} ítem${reconCount !== 1 ? 's' : ''})${ptsMsg}.`);
                 setTimeout(() => setNotification(null), 5000);
                 setSelectedSale(null);
                 setSaleItems([]);
                 setRefundQuantities({});
+                setRefundReason("");
                 loadSales();
                 fetchProducts(); // refresh master inventory numbers
             } else {
@@ -2261,7 +2358,25 @@ export function DevolucionesView() {
             }
         } catch (e) {
             console.error(e);
+        } finally {
+            setSubmittingRefund(false);
         }
+    };
+
+    const handleTriggerRefund = () => {
+        if (!selectedSale || submittingRefund) return;
+        if (refundPreview.totalUnits <= 0) {
+            setNotification("Debes seleccionar al menos 1 unidad de artículo para procesar la devolución.");
+            setTimeout(() => setNotification(null), 3000);
+            return;
+        }
+        if (isKioskLocked) {
+            requestSupervisorAuth(`Confirmar Devolución de Venta #${selectedSale.id} (${refundPreview.currencySymbol} ${refundPreview.estimatedAmount.toFixed(2)})`, () => {
+                executeRefund();
+            });
+            return;
+        }
+        executeRefund();
     };
 
     useEffect(() => {
@@ -2293,18 +2408,18 @@ export function DevolucionesView() {
                     <Undo2 className="text-blue-500 shrink-0" size={16} />
                     <h1 className="text-base font-extrabold text-slate-800 dark:text-white uppercase tracking-wider">Devoluciones y Reintegros</h1>
                 </div>
-                <p className="text-[11px] text-slate-400 mt-1.5 font-semibold">Anulaciones de artículos comprados, reincorporación de productos a existencias y cuadre fiscal.</p>
+                <p className="text-[11px] text-slate-400 mt-1.5 font-semibold">Anulaciones de artículos comprados, reincorporación de productos a existencias y cuadre fiscal multimoneda.</p>
             </div>
 
             {notification && (
-                <div className="bg-slate-800 text-white font-bold p-3 px-5 text-xs rounded-2xl border border-slate-700 w-max shadow-lg animate-bounce">
+                <div className="bg-slate-800 text-white font-bold p-3 px-5 text-xs rounded-2xl border border-slate-700 w-max max-w-full shadow-lg">
                     {notification}
                 </div>
             )}
 
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
                 {/* Search past tickets */}
-                <div className="lg:col-span-2 bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-200/60 dark:border-slate-850 flex flex-col overflow-hidden max-h-[500px]">
+                <div className="lg:col-span-2 bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-200/60 dark:border-slate-850 flex flex-col overflow-hidden max-h-[560px]">
                     <div className="p-4 border-b border-slate-100 dark:border-slate-850 flex items-center">
                         <div className="relative flex-1">
                             <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-slate-400 pointer-events-none">
@@ -2327,22 +2442,38 @@ export function DevolucionesView() {
                                     <th className="p-4 pl-6">ID Ticket</th>
                                     <th className="p-4 hidden sm:table-cell">Fecha</th>
                                     <th className="p-4">Cliente</th>
-                                    <th className="p-4 text-right pr-6">Monto Total (Bs.)</th>
+                                    <th className="p-4 text-right pr-6">Monto / Estado</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-slate-100 dark:divide-slate-850/40 text-[11px] font-bold">
-                                {filteredSales.map(sale => (
-                                    <tr 
-                                        key={sale.id}
-                                        onClick={() => handleSelectSaleForRefund(sale)}
-                                        className={`cursor-pointer transition hover:bg-slate-50/50 dark:hover:bg-[#0c111e]/65 ${selectedSale?.id === sale.id ? 'bg-blue-50/50 dark:bg-blue-950/20 text-blue-600 dark:text-blue-400' : ''}`}
-                                    >
-                                        <td className="p-4 pl-6 font-mono font-bold text-slate-400">#{sale.id}</td>
-                                        <td className="p-4 text-slate-500 hidden sm:table-cell">{new Date(sale.created_at).toLocaleDateString()}</td>
-                                        <td className="p-4 text-slate-700 dark:text-slate-350 uppercase truncate max-w-[120px]">{sale.client_name || 'Particular'}</td>
-                                        <td className="p-4 text-right pr-6 font-mono font-black">Bs. {sale.total.toFixed(2)}</td>
-                                    </tr>
-                                ))}
+                                {filteredSales.map(sale => {
+                                    const sym = sale.currency === 'USD' ? '$' : 'Bs.';
+                                    const retAmt = Number(sale.returned_amount || 0);
+                                    const isFullRet = retAmt > 0 && (Number(sale.returned_items_count || 0) >= Number(sale.item_count || 1) || retAmt >= Number(sale.total) - 0.01);
+                                    return (
+                                        <tr 
+                                            key={sale.id}
+                                            onClick={() => handleSelectSaleForRefund(sale)}
+                                            className={`cursor-pointer transition hover:bg-slate-50/50 dark:hover:bg-[#0c111e]/65 ${selectedSale?.id === sale.id ? 'bg-blue-50/50 dark:bg-blue-950/20 text-blue-600 dark:text-blue-400' : ''}`}
+                                        >
+                                            <td className="p-4 pl-6 font-mono font-bold text-slate-400">#{sale.id}</td>
+                                            <td className="p-4 text-slate-500 hidden sm:table-cell">{new Date(sale.created_at).toLocaleDateString()}</td>
+                                            <td className="p-4 text-slate-700 dark:text-slate-350 uppercase truncate max-w-[140px]">{sale.client_name || 'Particular'}</td>
+                                            <td className="p-4 text-right pr-6 font-mono">
+                                                <div className="font-black text-slate-850 dark:text-white">{sym} {Number(sale.total).toFixed(2)}</div>
+                                                {retAmt > 0 && (
+                                                    <span className={`inline-block mt-0.5 text-[8.5px] px-1.5 py-0.5 rounded font-extrabold uppercase tracking-wider ${
+                                                        isFullRet
+                                                            ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                                                            : 'bg-rose-500/10 text-rose-600 dark:text-rose-400'
+                                                    }`}>
+                                                        {isFullRet ? 'Devuelto Total' : `Dev. Parcial (-${sym}${retAmt.toFixed(2)})`}
+                                                    </span>
+                                                )}
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
                             </tbody>
                         </table>
                     </div>
@@ -2351,15 +2482,27 @@ export function DevolucionesView() {
                 {/* Refund controller panel */}
                 <div className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-200/60 dark:border-slate-850 p-5 flex flex-col gap-4">
                     {selectedSale ? (
-                        <div className="flex flex-col gap-4">
-                            <h3 className="font-extrabold text-xs uppercase tracking-wider text-slate-850 dark:text-slate-300">Reintegro de Ticket #{selectedSale.id}</h3>
+                        <div className="flex flex-col gap-3.5">
+                            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-850 pb-2.5">
+                                <div>
+                                    <h3 className="font-extrabold text-xs uppercase tracking-wider text-slate-850 dark:text-slate-200">Reintegro de Ticket #{selectedSale.id}</h3>
+                                    <span className="text-[10px] text-slate-400 font-semibold block mt-0.5">
+                                        Moneda: {selectedSale.currency === 'USD' ? 'USD ($)' : 'BOB (Bs.)'} • Pago: {selectedSale.payment_method || 'Efectivo'}
+                                    </span>
+                                </div>
+                                <span className="font-mono text-xs font-black text-blue-600 dark:text-blue-400 bg-blue-500/10 px-2.5 py-1 rounded-xl">
+                                    {selectedSale.currency === 'USD' ? '$' : 'Bs.'} {Number(selectedSale.total).toFixed(2)}
+                                </span>
+                            </div>
+
                             <p className="text-[10px] text-slate-400 font-semibold">Selecciona las unidades de los productos a devolver que ingresarán nuevamente a stock:</p>
                             
-                            <div className="flex flex-col gap-2.5 overflow-y-auto max-h-[300px]">
+                            <div className="flex flex-col gap-2.5 overflow-y-auto max-h-[260px]">
                                 {saleItems.map(item => {
                                     const qtySelected = refundQuantities[item.id] || 0;
                                     const availableQty = item.available_for_refund !== undefined ? item.available_for_refund : item.quantity;
                                     const isFullyRefunded = availableQty === 0;
+                                    const sym = selectedSale.currency === 'USD' ? '$' : 'Bs.';
                                     return (
                                         <div key={item.id} className={`flex justify-between items-center p-3 rounded-2xl border ${isFullyRefunded ? 'border-amber-500/20 bg-amber-500/5 dark:bg-amber-950/10' : 'border-slate-150 dark:border-slate-850 bg-slate-50/50 dark:bg-black/10'}`}>
                                             <div className="min-w-0 pr-3">
@@ -2371,15 +2514,15 @@ export function DevolucionesView() {
                                                         </span>
                                                     )}
                                                 </div>
-                                                <span className="text-[9px] font-bold text-slate-405 block mt-0.5 font-mono">
-                                                    Disponibles p/ devolución: {availableQty} pz {item.returned_quantity > 0 ? `(Devueltas: ${item.returned_quantity} pz)` : `(Venta orig: ${item.quantity} pz)`}
+                                                <span className="text-[9px] font-bold text-slate-400 block mt-0.5 font-mono">
+                                                    {sym}{Number(item.price || 0).toFixed(2)} c/u • Disp: {availableQty} pz {item.returned_quantity > 0 ? `(Dev: ${item.returned_quantity} pz)` : `(Orig: ${item.quantity} pz)`}
                                                 </span>
                                             </div>
                                             <div className="flex items-center gap-2">
                                                 <button 
                                                     onClick={() => decrementRefund(item.id)}
                                                     disabled={isFullyRefunded || qtySelected <= 0}
-                                                    className="w-6 h-6 rounded-lg bg-white dark:bg-slate-900 border text-xs font-black flex items-center justify-center hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40"
+                                                    className="w-6 h-6 rounded-lg bg-white dark:bg-slate-900 border text-xs font-black flex items-center justify-center hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 cursor-pointer"
                                                 >
                                                     -
                                                 </button>
@@ -2387,7 +2530,7 @@ export function DevolucionesView() {
                                                 <button 
                                                     onClick={() => incrementRefund(item.id, availableQty)}
                                                     disabled={isFullyRefunded || qtySelected >= availableQty}
-                                                    className="w-6 h-6 rounded-lg bg-white dark:bg-slate-900 border text-xs font-black flex items-center justify-center hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40"
+                                                    className="w-6 h-6 rounded-lg bg-white dark:bg-slate-900 border text-xs font-black flex items-center justify-center hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-40 cursor-pointer"
                                                 >
                                                     +
                                                 </button>
@@ -2397,11 +2540,39 @@ export function DevolucionesView() {
                                 })}
                             </div>
 
+                            {/* Reason input */}
+                            <div className="flex flex-col gap-1">
+                                <label className="text-[9.5px] font-extrabold uppercase tracking-wider text-slate-400">Motivo de Devolución (Auditoría):</label>
+                                <input
+                                    type="text"
+                                    placeholder="Ej. Cambio de modelo, defecto de fábrica, devolución acordada..."
+                                    value={refundReason}
+                                    onChange={e => setRefundReason(e.target.value)}
+                                    className="px-3 py-2 w-full bg-slate-50 dark:bg-black/15 border border-slate-200 dark:border-slate-800 rounded-xl text-xs font-semibold focus:outline-none focus:border-blue-500 text-slate-800 dark:text-slate-200"
+                                />
+                            </div>
+
+                            {/* Live Refund Summary Box */}
+                            <div className="p-3 rounded-2xl bg-rose-500/5 dark:bg-rose-950/15 border border-rose-500/20 flex items-center justify-between">
+                                <div>
+                                    <span className="text-[9px] font-extrabold uppercase tracking-wider text-rose-600 dark:text-rose-400 block">Resumen de Reintegro</span>
+                                    <span className="text-[10px] font-bold text-slate-500 dark:text-slate-400">
+                                        {refundPreview.totalUnits} unidad(es) seleccionada(s)
+                                    </span>
+                                </div>
+                                <div className="text-right font-mono">
+                                    <span className="text-sm font-black text-rose-600 dark:text-rose-400">
+                                        {refundPreview.currencySymbol} {refundPreview.estimatedAmount.toFixed(2)} {refundPreview.currencyCode}
+                                    </span>
+                                </div>
+                            </div>
+
                             <button 
-                                onClick={executeRefund}
-                                className="w-full mt-2 py-3 bg-rose-600 hover:bg-rose-500 text-white font-extrabold text-xs rounded-2xl tracking-wide uppercase transition hover:scale-[1.01] shadow-lg shadow-rose-500/15"
+                                onClick={handleTriggerRefund}
+                                disabled={submittingRefund || refundPreview.totalUnits <= 0}
+                                className="w-full py-3 bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white font-extrabold text-xs rounded-2xl tracking-wide uppercase transition hover:scale-[1.01] shadow-lg shadow-rose-500/15 cursor-pointer"
                             >
-                                Registrar Devolución Física
+                                {submittingRefund ? 'Procesando Devolución...' : 'Registrar Devolución Física'}
                             </button>
                         </div>
                     ) : (

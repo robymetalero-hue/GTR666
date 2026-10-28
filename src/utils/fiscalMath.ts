@@ -126,18 +126,32 @@ export function calculatePosTransaction(
   // 4. Subtotal tras descuento
   const subtotalAfterDiscount = Math.max(0, fromCents(toCents(grossSubtotal) - toCents(discountAmount)));
 
-  // 5. Puntos de fidelización (1 punto = 1.00 BOB)
   let pointsRedeemed = 0;
-  if (usePoints && availablePoints > 0) {
-    const maxRedeemable = Math.floor(subtotalAfterDiscount);
-    pointsRedeemed = Math.min(Math.floor(availablePoints), maxRedeemable);
+  let finalTotalBs = 0;
+  let finalTotalUSD = 0;
+
+  if (currency === 'USD') {
+    // En USD, grossSubtotal y subtotalAfterDiscount están expresados en USD
+    if (usePoints && availablePoints > 0) {
+      const maxRedeemablePts = Math.floor(subtotalAfterDiscount * rate);
+      pointsRedeemed = Math.min(Math.floor(availablePoints), maxRedeemablePts);
+    }
+    const pointsInUSD = roundToDecimals(pointsRedeemed / rate, 2);
+    finalTotalUSD = Math.max(0, fromCents(toCents(subtotalAfterDiscount) - toCents(pointsInUSD)));
+    finalTotalBs = roundToDecimals(finalTotalUSD * rate, 2);
+  } else {
+    // 5. Puntos de fidelización (1 punto = 1.00 BOB)
+    if (usePoints && availablePoints > 0) {
+      const maxRedeemable = Math.floor(subtotalAfterDiscount);
+      pointsRedeemed = Math.min(Math.floor(availablePoints), maxRedeemable);
+    }
+
+    // 6. Total neto a pagar en BOB
+    finalTotalBs = Math.max(0, fromCents(toCents(subtotalAfterDiscount) - toCents(pointsRedeemed)));
+
+    // 7. Equivalente en USD
+    finalTotalUSD = roundToDecimals(finalTotalBs / rate, 2);
   }
-
-  // 6. Total neto a pagar en BOB
-  const finalTotalBs = Math.max(0, fromCents(toCents(subtotalAfterDiscount) - toCents(pointsRedeemed)));
-
-  // 7. Equivalente en USD
-  const finalTotalUSD = roundToDecimals(finalTotalBs / rate, 2);
 
   // Detección de residuo binario de coma flotante
   const rawSum = items.reduce((acc, i) => acc + (i.price * i.quantity), 0);

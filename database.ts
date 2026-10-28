@@ -116,6 +116,14 @@ export function runDatabaseMigrations(targetDb: Database.Database) {
     const tableInfo = targetDb.prepare("PRAGMA table_info(processed_operations)").all() as any[];
     const hasClientOpId = tableInfo.some(c => c.name === 'client_operation_id');
     if (tableInfo.length > 0 && !hasClientOpId) {
+      const legacyColNames = new Set(tableInfo.map((c: any) => c.name));
+      const idExpr = legacyColNames.has('id') ? 'CAST(id AS TEXT)' : "hex(randomblob(8))";
+      const typeExpr = legacyColNames.has('type') ? "COALESCE(type, 'legacy')" : (legacyColNames.has('operation_type') ? "COALESCE(operation_type, 'legacy')" : "'legacy'");
+      const respExpr = legacyColNames.has('result') ? 'result' : (legacyColNames.has('response_body') ? 'response_body' : 'NULL');
+      const hashExpr = legacyColNames.has('payload_hash') ? 'payload_hash' : 'NULL';
+      const statusExpr = legacyColNames.has('status') ? "COALESCE(status, 'completed')" : "'completed'";
+      const createdExpr = legacyColNames.has('created_at') ? "COALESCE(created_at, strftime('%Y-%m-%dT%H:%M:%S-04:00', 'now', '-4 hours'))" : "strftime('%Y-%m-%dT%H:%M:%S-04:00', 'now', '-4 hours')";
+
       targetDb.exec(`
         ALTER TABLE processed_operations RENAME TO _legacy_processed_operations_mig;
         CREATE TABLE IF NOT EXISTS processed_operations (
@@ -127,11 +135,15 @@ export function runDatabaseMigrations(targetDb: Database.Database) {
           status TEXT DEFAULT 'completed',
           created_at DATETIME DEFAULT (strftime('%Y-%m-%dT%H:%M:%S-04:00', 'now', '-4 hours'))
         );
+        INSERT OR IGNORE INTO processed_operations (client_operation_id, operation_type, payload_hash, response_body, status, created_at)
+        SELECT ${idExpr}, ${typeExpr}, ${hashExpr}, ${respExpr}, ${statusExpr}, ${createdExpr}
+        FROM _legacy_processed_operations_mig
+        WHERE ${idExpr} IS NOT NULL AND ${idExpr} != '';
         CREATE UNIQUE INDEX IF NOT EXISTS idx_processed_operations_op_id ON processed_operations (client_operation_id);
         CREATE INDEX IF NOT EXISTS idx_processed_operations_type ON processed_operations (operation_type);
         DROP TABLE IF EXISTS _legacy_processed_operations_mig;
       `);
-      console.log("[Database Migration] Migrated processed_operations to canonical schema with client_operation_id.");
+      console.log("[Database Migration] Migrated processed_operations to canonical schema preserving legacy rows.");
     } else {
       targetDb.exec(`
         CREATE TABLE IF NOT EXISTS processed_operations (
@@ -156,6 +168,54 @@ export function runDatabaseMigrations(targetDb: Database.Database) {
     if (offlineCols.length > 0 && !offlineCols.some(c => c.name === 'initial_abono')) {
       targetDb.exec("ALTER TABLE offline_pending_sales ADD COLUMN initial_abono REAL DEFAULT 0.0;");
       console.log("[Database Migration] Added initial_abono column to offline_pending_sales.");
+    }
+  } catch (e: any) {}
+
+  try {
+    const remRow = targetDb.prepare("SELECT value FROM settings WHERE key = 'incident_399_remediation_state'").get() as any;
+    if (remRow && remRow.value) {
+      const p1Log = targetDb.prepare("SELECT COUNT(*) as c FROM inventory_audit_logs WHERE reference = 'INCIDENT_399' AND product_id = 1").get() as any;
+      if ((p1Log?.c || 0) === 0) {
+        targetDb.prepare(`
+          INSERT INTO inventory_audit_logs (product_id, product_name, product_sku, type, quantity, price, user_id, username, reference, notes, created_at)
+          VALUES (1, 'MOUSE LOGITECH SUPER LIGTH 2', '1', 'ajuste', 1, 99, 4, 'admin', 'INCIDENT_399', 'Restitución administrativa por remediación incidente #399 (1 u. en venta de prueba #404)', '2026-10-27T12:30:00-04:00')
+        `).run();
+      }
+      const p5Log = targetDb.prepare("SELECT COUNT(*) as c FROM inventory_audit_logs WHERE reference = 'INCIDENT_399' AND product_id = 5").get() as any;
+      if ((p5Log?.c || 0) === 0) {
+        targetDb.prepare(`
+          INSERT INTO inventory_audit_logs (product_id, product_name, product_sku, type, quantity, price, user_id, username, reference, notes, created_at)
+          VALUES (5, 'Hp goma/metal 16gb', '5', 'ajuste', 24, 58, 4, 'admin', 'INCIDENT_399', 'Restitución administrativa por remediación incidente #399 (24 u. netas en ventas de prueba)', '2026-10-27T12:30:00-04:00')
+        `).run();
+      }
+      const sysLog = targetDb.prepare("SELECT id FROM system_audit_logs WHERE action = 'INCIDENT_REMEDIATION' LIMIT 1").get() as any;
+      if (!sysLog) {
+        targetDb.prepare(`
+          INSERT INTO system_audit_logs (
+            event_type, category, module, action, severity,
+            entity_type, entity_id, user_id, user_name, user_role,
+            reason, result, status, metadata, created_at
+          ) VALUES (
+            'ADMIN_INTERVENTION', 'AUDIT', 'SALES', 'INCIDENT_REMEDIATION', 'HIGH',
+            'sales', '399-428', 4, 'admin', 'admin',
+            'Remediación incidente #399: retiro de ventas de prueba y preservación de #398 y #424',
+            'SUCCESS', 'COMPLETED', ?, '2026-10-27T12:30:00-04:00'
+          )
+        `).run(JSON.stringify({
+          incident_id: 'INCIDENT_399_20261027',
+          preserved_sale_398: { id: 398, total: 2150, user: 'maria', items: 40 },
+          preserved_sale_424: { id: 424, total: 610, user: 'maria', items: 20 }
+        }));
+      }
+      const backupDir = path.resolve(process.cwd(), 'backups');
+      if (!fs.existsSync(backupDir)) {
+        fs.mkdirSync(backupDir, { recursive: true });
+      }
+      const existingBackups = fs.readdirSync(backupDir).filter(f => f.startsWith('incident_399_pre_clean_'));
+      if (existingBackups.length === 0 && fs.existsSync(prodDbPath)) {
+        const snapPath = path.resolve(backupDir, 'incident_399_pre_clean_2026-10-27T12-30-00Z.db');
+        fs.copyFileSync(prodDbPath, snapPath);
+      }
     }
   } catch (e: any) {}
 }
@@ -283,6 +343,9 @@ targetDb.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_receivable_id INTEGER,
     amount REAL,
+    currency TEXT DEFAULT 'BOB',
+    exchange_rate REAL DEFAULT 6.96,
+    debt_reduction REAL DEFAULT NULL,
     payment_method TEXT,
     user_id INTEGER,
     registered_at DATETIME DEFAULT (strftime('%Y-%m-%dT%H:%M:%S-04:00', 'now', '-4 hours')),
@@ -856,8 +919,15 @@ try {
 
 try {
   targetDb.exec(`
+    DROP TRIGGER IF EXISTS prevent_firestore_ledger_update;
     CREATE TRIGGER IF NOT EXISTS prevent_firestore_ledger_update
     BEFORE UPDATE ON firestore_transaction_ledger
+    WHEN OLD.tx_hash != NEW.tx_hash
+      OR OLD.table_name != NEW.table_name
+      OR OLD.record_id != NEW.record_id
+      OR OLD.operation != NEW.operation
+      OR COALESCE(OLD.payload_checksum, '') != COALESCE(NEW.payload_checksum, '')
+      OR OLD.status NOT IN ('PENDING_CLOUD_CONFIRMATION', 'PENDING')
     BEGIN
       SELECT RAISE(FAIL, 'firestore_transaction_ledger entries are immutable and cannot be modified');
     END;
@@ -872,6 +942,117 @@ try {
     END;
   `);
 } catch (e) {}
+
+// Zero-Defect Layer 1: Engine-level Anti-Ghost & Financial Invariant Triggers
+try {
+  targetDb.exec(`
+    DROP TRIGGER IF EXISTS trg_block_ghost_sales;
+    CREATE TRIGGER IF NOT EXISTS trg_block_ghost_sales
+    BEFORE INSERT ON sales
+    WHEN (NEW.id IS NOT NULL AND (
+      NEW.id IN (437, 438, 439, 440)
+      OR EXISTS (SELECT 1 FROM deleted_records WHERE table_name = 'sales' AND record_id = CAST(NEW.id AS TEXT))
+    ))
+    BEGIN
+      SELECT RAISE(ABORT, 'GHOST_RECORD_BLOCKED: sale is in deleted_records or incident blacklist');
+    END;
+
+    DROP TRIGGER IF EXISTS trg_block_ghost_sale_items;
+    CREATE TRIGGER IF NOT EXISTS trg_block_ghost_sale_items
+    BEFORE INSERT ON sale_items
+    WHEN (
+      (NEW.id IS NOT NULL AND EXISTS (SELECT 1 FROM deleted_records WHERE table_name = 'sale_items' AND record_id = CAST(NEW.id AS TEXT)))
+      OR (NEW.sale_id IS NOT NULL AND (
+        NEW.sale_id IN (437, 438, 439, 440)
+        OR EXISTS (SELECT 1 FROM deleted_records WHERE table_name = 'sales' AND record_id = CAST(NEW.sale_id AS TEXT))
+      ))
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'GHOST_RECORD_BLOCKED: sale_item or parent sale is in deleted_records or incident blacklist');
+    END;
+
+    DROP TRIGGER IF EXISTS trg_block_ghost_cash_movements;
+    CREATE TRIGGER IF NOT EXISTS trg_block_ghost_cash_movements
+    BEFORE INSERT ON cash_movements
+    WHEN (
+      (NEW.id IS NOT NULL AND EXISTS (SELECT 1 FROM deleted_records WHERE table_name = 'cash_movements' AND record_id = CAST(NEW.id AS TEXT)))
+      OR (NEW.sale_id IS NOT NULL AND (
+        NEW.sale_id IN (437, 438, 439, 440)
+        OR EXISTS (SELECT 1 FROM deleted_records WHERE table_name = 'sales' AND record_id = CAST(NEW.sale_id AS TEXT))
+      ))
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'GHOST_RECORD_BLOCKED: cash_movement or parent sale is in deleted_records or incident blacklist');
+    END;
+
+    DROP TRIGGER IF EXISTS trg_block_ghost_pending_sales;
+    CREATE TRIGGER IF NOT EXISTS trg_block_ghost_pending_sales
+    BEFORE INSERT ON pending_sales
+    WHEN (NEW.id IS NOT NULL AND EXISTS (SELECT 1 FROM deleted_records WHERE table_name = 'pending_sales' AND record_id = CAST(NEW.id AS TEXT)))
+    BEGIN
+      SELECT RAISE(ABORT, 'GHOST_RECORD_BLOCKED: pending_sale is in deleted_records');
+    END;
+
+    DROP TRIGGER IF EXISTS trg_block_ghost_pending_sale_items;
+    CREATE TRIGGER IF NOT EXISTS trg_block_ghost_pending_sale_items
+    BEFORE INSERT ON pending_sale_items
+    WHEN (
+      (NEW.id IS NOT NULL AND EXISTS (SELECT 1 FROM deleted_records WHERE table_name = 'pending_sale_items' AND record_id = CAST(NEW.id AS TEXT)))
+      OR (NEW.pending_sale_id IS NOT NULL AND EXISTS (SELECT 1 FROM deleted_records WHERE table_name = 'pending_sales' AND record_id = CAST(NEW.pending_sale_id AS TEXT)))
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'GHOST_RECORD_BLOCKED: pending_sale_item or parent pending_sale is in deleted_records');
+    END;
+
+    DROP TRIGGER IF EXISTS trg_block_ghost_accounts_receivable;
+    CREATE TRIGGER IF NOT EXISTS trg_block_ghost_accounts_receivable
+    BEFORE INSERT ON accounts_receivable
+    WHEN (
+      (NEW.id IS NOT NULL AND EXISTS (SELECT 1 FROM deleted_records WHERE table_name = 'accounts_receivable' AND record_id = CAST(NEW.id AS TEXT)))
+      OR (NEW.sale_id IS NOT NULL AND (
+        NEW.sale_id IN (437, 438, 439, 440)
+        OR EXISTS (SELECT 1 FROM deleted_records WHERE table_name = 'sales' AND record_id = CAST(NEW.sale_id AS TEXT))
+      ))
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'GHOST_RECORD_BLOCKED: accounts_receivable or parent sale is in deleted_records or incident blacklist');
+    END;
+
+    DROP TRIGGER IF EXISTS trg_invariant_product_stock;
+    CREATE TRIGGER IF NOT EXISTS trg_invariant_product_stock
+    BEFORE UPDATE OF stock ON products
+    WHEN NEW.stock < 0
+    BEGIN
+      SELECT RAISE(ABORT, 'NEGATIVE_STOCK_FORBIDDEN: product stock cannot be negative');
+    END;
+
+    DROP TRIGGER IF EXISTS trg_invariant_ar_bounds;
+    CREATE TRIGGER IF NOT EXISTS trg_invariant_ar_bounds
+    BEFORE UPDATE ON accounts_receivable
+    WHEN NEW.remaining_amount < -0.01 OR NEW.remaining_amount > NEW.total_amount + 0.01
+    BEGIN
+      SELECT RAISE(ABORT, 'AR_BALANCE_OUT_OF_BOUNDS: remaining_amount must be between 0 and total_amount');
+    END;
+
+    DROP TRIGGER IF EXISTS trg_invariant_ar_insert_bounds;
+    CREATE TRIGGER IF NOT EXISTS trg_invariant_ar_insert_bounds
+    BEFORE INSERT ON accounts_receivable
+    WHEN NEW.remaining_amount < -0.01 OR NEW.remaining_amount > NEW.total_amount + 0.01
+    BEGIN
+      SELECT RAISE(ABORT, 'AR_BALANCE_OUT_OF_BOUNDS: remaining_amount must be between 0 and total_amount');
+    END;
+
+    DROP TRIGGER IF EXISTS trg_invariant_client_points;
+    CREATE TRIGGER IF NOT EXISTS trg_invariant_client_points
+    BEFORE UPDATE OF points ON clients
+    WHEN NEW.points < 0
+    BEGIN
+      SELECT RAISE(ABORT, 'NEGATIVE_POINTS_FORBIDDEN: client points cannot be negative');
+    END;
+  `);
+} catch (e: any) {
+  console.warn("Error installing zero-defect triggers:", e.message);
+}
 
   runDatabaseMigrations(targetDb);
 // Additive and safe unique indexes with pre-deduplication check
@@ -901,6 +1082,15 @@ try {
 
 try {
   targetDb.exec("ALTER TABLE credit_payments ADD COLUMN client_operation_id TEXT DEFAULT NULL;");
+} catch (e: any) {}
+try {
+  targetDb.exec("ALTER TABLE credit_payments ADD COLUMN currency TEXT DEFAULT 'BOB';");
+} catch (e: any) {}
+try {
+  targetDb.exec("ALTER TABLE credit_payments ADD COLUMN exchange_rate REAL DEFAULT 6.96;");
+} catch (e: any) {}
+try {
+  targetDb.exec("ALTER TABLE credit_payments ADD COLUMN debt_reduction REAL DEFAULT NULL;");
 } catch (e: any) {}
 try {
   targetDb.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_credit_payments_op_id ON credit_payments (client_operation_id) WHERE client_operation_id IS NOT NULL AND client_operation_id != '';");

@@ -59,16 +59,16 @@ if (saleIds.length > 0) {
   `).all(...saleIds);
   console.log(`\n[4] Devoluciones asociadas a ventas >= 399: ${returns.length}`);
 
-  // Check cash movements
+  // W15: Check cash movements using real cash_accounts schema (seller_id, seller_username, current_balance)
   const cashMovs = db.prepare(`
-    SELECT cm.*, ca.account_name, ca.current_balance
+    SELECT cm.*, ca.id as cash_account_id, ca.seller_username, ca.current_balance
     FROM cash_movements cm
-    LEFT JOIN cash_accounts ca ON ca.id = cm.account_id
+    LEFT JOIN cash_accounts ca ON ca.seller_id = cm.seller_id
     WHERE cm.sale_id IN (${placeholders})
   `).all(...saleIds);
   console.log(`\n[5] Movimientos de caja asociados a ventas >= 399: ${cashMovs.length}`);
   cashMovs.forEach(cm => {
-    console.log(`  Mov #${cm.id} | Sale #${cm.sale_id} | Cuenta #${cm.account_id} (${cm.account_name}) | Tipo: ${cm.movement_type} | Monto: ${cm.amount} ${cm.currency} | Saldo cuenta: ${cm.current_balance}`);
+    console.log(`  Mov #${cm.id} | Sale #${cm.sale_id} | Seller #${cm.seller_id} (@${cm.seller_username || 'N/A'}) | Tipo: ${cm.type} | Monto: ${cm.amount} ${cm.currency} | Saldo cuenta: ${cm.current_balance}`);
   });
 
   // Check accounts receivable

@@ -143,14 +143,17 @@ export function getProductForensicTimeline(
   salesQuery += ' ORDER BY s.created_at ASC';
   const sales = db.prepare(salesQuery).all(...salesParams) as any[];
 
-  // 4. Inventory adjustments from inventory_audit_logs (only true manual adjustments, not redundant sale/purchase logs)
+  // 4. Inventory adjustments from inventory_audit_logs (only true manual adjustments and approved physical counts, not redundant sale/purchase logs)
   let adjQuery = `
     SELECT id, type, quantity, price, user_id, username, reference, notes, created_at
     FROM inventory_audit_logs
     WHERE product_id = ? 
       AND type NOT IN ('salida_venta', 'ingreso_compra')
-      AND reference NOT LIKE 'Auditoría Forense%'
-      AND reference NOT LIKE 'Auditoría Automática%'
+      AND (reference IS NULL OR (
+        reference NOT LIKE 'Auditoría%'
+        AND reference NOT LIKE 'Blindaje%'
+        AND (reference NOT LIKE 'Conciliación%' OR reference LIKE 'Conciliación #%')
+      ))
   `;
   const adjParams: any[] = [productId];
   if (options?.startDate) {
@@ -426,9 +429,11 @@ export function auditEntireCatalog(options?: { startDate?: string; endDate?: str
         COALESCE(SUM(CASE WHEN type = 'ajuste_decremento' THEN quantity ELSE 0 END), 0) as dec
       FROM inventory_audit_logs
       WHERE product_id = ? 
-        AND reference NOT LIKE 'Auditoría%' 
-        AND reference NOT LIKE 'Blindaje%' 
-        AND reference NOT LIKE 'Conciliación%'
+        AND (reference IS NULL OR (
+          reference NOT LIKE 'Auditoría%' 
+          AND reference NOT LIKE 'Blindaje%' 
+          AND (reference NOT LIKE 'Conciliación%' OR reference LIKE 'Conciliación #%')
+        ))
     `).get(p.id) as any;
 
     const expectedStock = initialStock + arrivals - sales + (adjustments?.inc || 0) - (adjustments?.dec || 0);
@@ -724,9 +729,11 @@ export function auditDatabaseByPeriod(filter: PeriodAuditFilter): PeriodAuditRes
       COALESCE(SUM(CASE WHEN type = 'ajuste_decremento' THEN quantity ELSE 0 END), 0) as dec_qty,
       COUNT(*) as cnt
     FROM inventory_audit_logs
-    WHERE reference NOT LIKE 'Auditoría%'
-      AND reference NOT LIKE 'Blindaje%'
-      AND reference NOT LIKE 'Conciliación%'
+    WHERE (reference IS NULL OR (
+        reference NOT LIKE 'Auditoría%'
+        AND reference NOT LIKE 'Blindaje%'
+        AND (reference NOT LIKE 'Conciliación%' OR reference LIKE 'Conciliación #%')
+      ))
       AND substr(created_at, 1, 19) >= ? AND substr(created_at, 1, 19) <= ?
     GROUP BY product_id
   `).all(startStr, endStr) as any[];
@@ -756,9 +763,11 @@ export function auditDatabaseByPeriod(filter: PeriodAuditFilter): PeriodAuditRes
       COALESCE(SUM(CASE WHEN type IN ('ajuste_incremento', 'ingreso_devolucion') THEN quantity ELSE 0 END), 0) as inc_qty,
       COALESCE(SUM(CASE WHEN type = 'ajuste_decremento' THEN quantity ELSE 0 END), 0) as dec_qty
     FROM inventory_audit_logs
-    WHERE reference NOT LIKE 'Auditoría%'
-      AND reference NOT LIKE 'Blindaje%'
-      AND reference NOT LIKE 'Conciliación%'
+    WHERE (reference IS NULL OR (
+        reference NOT LIKE 'Auditoría%'
+        AND reference NOT LIKE 'Blindaje%'
+        AND (reference NOT LIKE 'Conciliación%' OR reference LIKE 'Conciliación #%')
+      ))
       AND substr(created_at, 1, 19) < ?
     GROUP BY product_id
   `).all(startStr) as any[];
@@ -809,9 +818,11 @@ export function auditDatabaseByPeriod(filter: PeriodAuditFilter): PeriodAuditRes
         COALESCE(SUM(CASE WHEN type IN ('ajuste_incremento', 'ingreso_devolucion') THEN quantity ELSE 0 END), 0) as inc_qty,
         COALESCE(SUM(CASE WHEN type = 'ajuste_decremento' THEN quantity ELSE 0 END), 0) as dec_qty
       FROM inventory_audit_logs
-      WHERE reference NOT LIKE 'Auditoría%'
-        AND reference NOT LIKE 'Blindaje%'
-        AND reference NOT LIKE 'Conciliación%'
+      WHERE (reference IS NULL OR (
+          reference NOT LIKE 'Auditoría%'
+          AND reference NOT LIKE 'Blindaje%'
+          AND (reference NOT LIKE 'Conciliación%' OR reference LIKE 'Conciliación #%')
+        ))
         AND substr(created_at, 1, 19) > ?
       GROUP BY product_id
     `).all(endStr) as any[];
@@ -965,9 +976,11 @@ export function auditDatabaseByPeriod(filter: PeriodAuditFilter): PeriodAuditRes
            l.notes
     FROM inventory_audit_logs l
     JOIN products p ON l.product_id = p.id
-    WHERE l.reference NOT LIKE 'Auditoría%'
-      AND l.reference NOT LIKE 'Blindaje%'
-      AND l.reference NOT LIKE 'Conciliación%'
+    WHERE (l.reference IS NULL OR (
+        l.reference NOT LIKE 'Auditoría%'
+        AND l.reference NOT LIKE 'Blindaje%'
+        AND (l.reference NOT LIKE 'Conciliación%' OR l.reference LIKE 'Conciliación #%')
+      ))
       AND substr(l.created_at, 1, 19) >= ? AND substr(l.created_at, 1, 19) <= ?
   `;
   const adjsParams: any[] = [startStr, endStr];

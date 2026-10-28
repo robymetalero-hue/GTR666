@@ -8,6 +8,13 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.email == 'robymetalero@gmail.com' ||
+        request.auth.token.role == 'admin'
+      );
+    }
+
     function hasIntegrityProof() {
       return request.resource != null && request.resource.data != null && (
         request.resource.data.keys().hasAll(['_tx_hash', '_tx_timestamp']) ||
@@ -17,6 +24,17 @@ service cloud.firestore {
 
     function isSandbox(coll) {
       return coll.matches('^sandbox_.*');
+    }
+
+    function isBlockedIncidentSaleId(docId) {
+      return docId in ['437', '438', '439', '440'];
+    }
+
+    function hasValidNumericInvariants(coll, docId) {
+      return !(coll == 'sales' && isBlockedIncidentSaleId(docId))
+        && !(coll == 'products' && request.resource.data.keys().hasAny(['stock']) && request.resource.data.stock is number && request.resource.data.stock < 0)
+        && !(coll == 'sales' && request.resource.data.keys().hasAny(['total']) && request.resource.data.total is number && request.resource.data.total < 0)
+        && !(coll == 'accounts_receivable' && request.resource.data.keys().hasAny(['remaining_amount']) && request.resource.data.remaining_amount is number && request.resource.data.remaining_amount < -0.01);
     }
 
     // System sync state - client needs read to detect sync pulses
@@ -44,7 +62,7 @@ service cloud.firestore {
 
     // User accounts & security (Protected under Fase 4 rules)
     match /users/{userId} {
-      allow read: if true;
+      allow read: if isAuthenticated();
       allow create, update: if (isAuthenticated() || hasIntegrityProof());
       allow delete: if false;
     }
@@ -69,39 +87,40 @@ service cloud.firestore {
 
     // Sale Returns (Auditoría de Devoluciones - FASE 4)
     match /sale_returns/{returnId} {
-      allow read: if true;
-      allow create, update: if isSandbox('sale_returns') || hasIntegrityProof();
-      allow delete: if false;
+      allow read: if isAuthenticated();
+      allow create, update: if (isSandbox('sale_returns') || isAuthenticated() || hasIntegrityProof())
+        && !(request.resource.data.keys().hasAny(['refund_amount']) && request.resource.data.refund_amount is number && request.resource.data.refund_amount < 0);
+      allow delete: if isAdmin();
     }
     match /sandbox_sale_returns/{returnId} {
       allow read, write: if true;
     }
 
-    // Audit logs & transaction ledger
+    // Audit logs & transaction ledger (Append-Only in Production)
     match /system_audit_logs/{logId} {
-      allow read: if true;
-      allow create, update: if true;
-      allow delete: if true;
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() || hasIntegrityProof();
+      allow delete: if false;
     }
     match /sandbox_system_audit_logs/{logId} {
       allow read, write: if true;
     }
 
     match /firestore_transaction_ledger/{txId} {
-      allow read: if true;
-      allow create, update: if true;
-      allow delete: if true;
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() || hasIntegrityProof();
+      allow delete: if false;
     }
     match /sandbox_firestore_transaction_ledger/{txId} {
       allow read, write: if true;
     }
 
     // Business Data collections (sales, inventory, clients, credits, caja, products)
-    // Sandbox collections are isolated for dev testing; production writes accept integrity proof or server daemon
+    // Sandbox collections are isolated for dev testing; production writes accept integrity proof or authenticated server daemon
     match /{collectionName}/{docId} {
-      allow read: if true;
-      allow create, update: if isSandbox(collectionName) || hasIntegrityProof();
-      allow delete: if true;
+      allow read: if isSandbox(collectionName) || isAuthenticated() || collectionName in ['products', 'departments', 'deleted_records'];
+      allow create, update: if (isSandbox(collectionName) || isAuthenticated() || hasIntegrityProof()) && hasValidNumericInvariants(collectionName, docId);
+      allow delete: if isSandbox(collectionName) || isAuthenticated() || isAdmin();
     }
   }
 }

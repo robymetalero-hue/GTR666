@@ -1448,18 +1448,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             setCachedMinimalProducts(prods).catch(() => {});
             setIsOffline(false);
 
-            // Update local versions if available
-            try {
-                fetch(`/api/catalog/version?_t=${Date.now()}`)
-                    .then(r => r.json())
-                    .then(v => {
-                        if (v && v.catalogVersion && v.inventoryVersion) {
-                            sessionStorage.setItem('last_catalog_version', String(v.catalogVersion));
-                            sessionStorage.setItem('last_inventory_version', String(v.inventoryVersion));
-                        }
-                    })
-                    .catch(() => {});
-            } catch (_) {}
+            // Update local versions via fallback endpoint ONLY if response headers were omitted
+            if (!catHeader || !invHeader) {
+                try {
+                    fetch(`/api/catalog/version?_t=${Date.now()}`)
+                        .then(r => r.json())
+                        .then(v => {
+                            if (v && v.catalogVersion && v.inventoryVersion) {
+                                if (!catHeader) sessionStorage.setItem('last_catalog_version', String(v.catalogVersion));
+                                if (!invHeader) sessionStorage.setItem('last_inventory_version', String(v.inventoryVersion));
+                            }
+                        })
+                        .catch(() => {});
+                } catch (_) {}
+            }
         } catch (e) {
             console.warn("Failed to fetch products, evaluating cached fallback:", e);
             const isZeroTainted = (items: Product[]) => {

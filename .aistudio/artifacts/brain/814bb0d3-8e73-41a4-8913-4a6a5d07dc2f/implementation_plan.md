@@ -1,81 +1,57 @@
-# Plan de Implementación: Correcciones Prioritarias de Auditoría Técnica (GTR666)
+# Plan de Implementación — Blindaje Integral "Cero Fallas" (Trazabilidad 100%, Anti-Fantasma, Anti-Doble Sync y Precisión Matemática)
 
-Este plan integra todas las mejoras seleccionadas del informe de auditoría (`Revision_integral_GTR666_ff17b7d`) de forma **100% quirúrgica y retrocompatible**, sin alterar el flujo de trabajo actual ni romper la sincronización en tiempo real del cliente web.
-
----
-
-## Bloque 1: Seguridad, Permisos, Aislamiento de Entorno e Integridad de Stock
-
-### 1.1 Aislamiento Estricto de Entorno y Respaldos (`database.ts`, `server.ts`)
-- **Prevención de salto a Producción desde Sandbox/Test (`server.ts`, `database.ts`)**:
-  - En el middleware de contexto de entorno (`server.ts:218-240`) y `getDb()` (`database.ts:43-62`), si el proceso del servidor fue iniciado en `sandbox` o `test` (`APP_ENV` / `NODE_ENV`), ignorar cualquier cabecera `x-app-environment: production` o inferencia por `Host` para impedir que peticiones externas apunten a `gtr_pos.db`.
-- **Respaldos `.bak` separados por entorno y verificación de integridad (`server.ts:5090-5116`, `database.ts:74`)**:
-  - Usar rutas de respaldo específicas por entorno (`gtr_pos.db.bak` para producción, `gtr_pos_sandbox.db.bak` para sandbox) y ejecutar `PRAGMA wal_checkpoint(TRUNCATE)` + `PRAGMA integrity_check` antes de validar cualquier respaldo de contingencia.
-
-### 1.2 Permisos y Atribución en Rutas de Ventas Pendientes / Pedidos (`server.ts`)
-- **`POST /api/pending-sales/:id/toggle-reserve` (`server.ts:7849`)**:
-  - Exigir `requirePermission(['edit_pending_sales', 'create_pending_sales'])` y tomar la identidad del operador desde `req.authSession` en lugar de confiar en campos del `req.body`.
-- **`POST /api/pending-sales/:id/finalize` (`server.ts:7985`)**:
-  - Exigir `requirePermission(['complete_pending_sales', 'create_sales'])` y vincular `user_id` al usuario autenticado de la sesión.
-- **Revisión de rutas vecinas de pedidos (`PUT /api/pending-sales/:id`, `DELETE /api/pending-sales/:id`, `POST /api/pending-sales/:id/pay`)**:
-  - Asegurar que todas validen su permiso correspondiente (`edit_pending_sales`, `cancel_pending_sales`) y registren el usuario real de `req.authSession`.
-
-### 1.3 Respeto Estricto de Reservas de Stock en Finalización y Carrito POS (`server.ts`, `src/views/POS.tsx`, `src/context/AppContext.tsx`)
-- **Finalización de pedido (`POST /api/pending-sales/:id/finalize` en `server.ts:7985`)**:
-  - Calcular el stock disponible real descontando las unidades reservadas por **otros** pedidos activos (`stock - reserved_by_other_orders`), liberando únicamente la reserva propia del pedido que se está finalizando si tenía `reserve_stock = 1`.
-- **Catálogo y límites en Carrito POS (`src/context/AppContext.tsx`, `src/views/POS.tsx`)**:
-  - Respetar `stock_available` (stock físico menos reservas activas) al validar cantidades máximas en `addToCart` y `updateQuantity` para evitar que el cajero arme carritos con unidades comprometidas en reservas activas.
-
-### 1.4 Edición Segura de Productos sin Sobrescribir Stock Vendido (`src/views/Inventory.tsx`, `server.ts`)
-- **Separación de edición de metadatos vs. ajuste de stock**:
-  - En `Inventory.tsx` y `PUT /api/products/:id` (`server.ts:3145`), al guardar la edición normal de un producto (nombre, código, categoría, precios, proveedor, imagen, stock mínimo), **ignorar el campo `stock`** del formulario para que nunca pise ventas ocurridas mientras el modal estaba abierto.
-  - En el modal de edición de producto, mostrar el campo de stock como informativo (solo lectura) con acceso directo al flujo dedicado de **Ajuste de Inventario** (`POST /api/inventory/adjustments` o Ajuste Masivo), donde el cambio se aplica por delta auditado y con motivo obligatorio.
+## 1. Objetivo
+Garantizar que el sistema opere con **precisión matemática del 100%**, **trazabilidad inmutable** y **cero posibilidad de registros fantasmas o doble sincronización**, integrando barreras a nivel de motor SQLite, sincronizador Firestore, endpoints transaccionales y una batería exhaustiva de pruebas automatizadas.
 
 ---
 
-## Bloque 2: Sincronización en la Nube, Tombstones, Hashes y Guarda Forense
+## 2. Capas de Blindaje a Implementar
 
-### 2.1 Orden de Hidratación y Prevención de Ventas "Revividas" (`firebaseSync.ts`, `server.ts`)
-- **Hidratar invalidaciones antes de ventas (`firebaseSync.ts:928-956`)**:
-  - Invertir el orden en `hydrateSqliteFromFirestoreIfNeeded` y sincronización incremental para que `hydrateInvalidatedSalesFromFirestore` se ejecute **antes** de procesar `sales` y `sale_items`, garantizando que los tombstones bloqueen la reimportación de ventas anuladas.
-- **Preservar `payload_hash` en `processed_operations` (`firebaseSync.ts:766-819`)**:
-  - Incluir `payload_hash` en la sincronización de `processed_operations` y usar `ON CONFLICT(operation_id) DO UPDATE SET payload_hash = COALESCE(excluded.payload_hash, processed_operations.payload_hash)` para no borrar el hash local durante una rehidratación.
-- **Limpieza de `pending_sale_items` eliminados al editar pedido (`server.ts:7759-7845`, `firebaseSync.ts`)**:
-  - Al actualizar los ítems de una venta pendiente (`PUT /api/pending-sales/:id`), eliminar en Firestore los documentos de `pending_sale_items` que ya no formen parte del pedido actualizado.
-
-### 2.2 Bloqueo de Operaciones de Incidente y Guarda Forense (`server.ts`, `src/services/forensicAuditEngine.ts`)
-- **Rechazo de `blocked_incident_399` en `POST /api/sales` (`server.ts:6931`)**:
-  - Si `existingOp.status === 'blocked_incident_399'`, rechazar inmediatamente la operación con `409 Conflict` en lugar de permitir que continúe como venta nueva.
-- **Guarda de seguridad en `forensicAuditEngine.ts` (`src/services/forensicAuditEngine.ts:1098`)**:
-  - Desactivar la sobrescritura automática de `products.stock` en `reconcileStock` cuando el producto no tenga un corte base verificado o cuando solo se intente reconstruir desde `inventory_logs` parciales, dejándolo como alerta diagnóstica sin mutar el stock físico automáticamente.
+### Capa 1: Triggers SQLite Anti-Fantasma e Invariantes Financieros (`database.ts`)
+Se instalarán triggers nativos en SQLite dentro de `ensureAllTablesAndMigrations()` para que el propio motor de base de datos impida cualquier estado inválido o resurrección de registros eliminados, sin importar qué ruta o proceso intente escribir:
+- **Triggers Anti-Resurrección de Tombstones (`trg_block_ghost_*`)**:
+  - `BEFORE INSERT` en `sales`, `pending_sales`, `cash_movements`, `accounts_receivable`, `credit_payments`, y `sale_returns`: aborta con `RAISE(ABORT, 'GHOST_RECORD_BLOCKED')` si el `NEW.id` existe en `deleted_records` para esa tabla o si la venta/pedido padre está en `deleted_records` o en `BLOCKED_INCIDENT_SALE_IDS` (`437`, `438`, `439`, `440`).
+  - `BEFORE INSERT` en `sale_items` y `pending_sale_items`: aborta si su `sale_id` / `pending_sale_id` padre está en `deleted_records` o si el ítem mismo fue eliminado.
+- **Triggers de Invariantes Numéricos y No-Negatividad (`trg_invariant_*`)**:
+  - **Stock protegido**: `BEFORE UPDATE OF stock ON products` impide que `NEW.stock < 0` (`RAISE(ABORT, 'NEGATIVE_STOCK_FORBIDDEN')`).
+  - **Saldos de Cuentas por Cobrar coherentes**: `BEFORE INSERT / UPDATE ON accounts_receivable` impide que `NEW.remaining_amount < -0.01` o `NEW.remaining_amount > NEW.amount + 0.01`.
+  - **Puntos de fidelidad no negativos**: `BEFORE UPDATE OF points ON clients` impide que `NEW.points < 0`.
 
 ---
 
-## Bloque 3: Idempotencia Extremo a Extremo y Precisión Multimoneda (USD / BOB)
-
-### 3.1 Llaves de Idempotencia Persistentes y Hash Completo (`src/views/POS.tsx`, `src/views/Inventory.tsx`, `src/views/CuentasPorCobrarView.tsx`, `server.ts`)
-- **Persistencia de `clientOperationId` ante reintentos de red**:
-  - Mantener el mismo `clientOperationId` asociado a la intención de cobro, abono, devolución o entrada de stock hasta que el servidor confirme éxito o el usuario modifique los datos del formulario, evitando duplicados por doble clic o corte momentáneo de red.
-- **Hash de idempotencia completo en Ventas Pendientes (`server.ts:7490`)**:
-  - Incluir `initial_abono`, `reserve_stock` y metadatos de pago dentro de `buildPendingSaleOperationHash`.
-- **Validación de tasa de cambio histórica en reintentos confirmados (`server.ts:6915`)**:
-  - Verificar que la tasa de cambio (`exchange_rate`) coincida antes de devolver respuesta idempotente exitosa.
-
-### 3.2 Precisión en Créditos, Abonos Multimoneda y Devoluciones (`server.ts`, `src/views/CuentasPorCobrarView.tsx`)
-- **Validación estricta de tasa de cambio (`exchangeRate > 0`)**:
-  - Validar en todos los endpoints financieros (`/api/sales`, `/api/pending-sales`, `/api/credits/:id/pay`, `/api/Cashier/Open`, `/api/Cashier/Close`) que `Number.isFinite(rate) && rate > 0`.
-- **Moneda y tasa explícita en abonos de Cuentas por Cobrar (`src/views/CuentasPorCobrarView.tsx`, `server.ts:5576`, `server.ts:7663`)**:
-  - Permitir indicar explícitamente si el abono se recibe en `BOB` o `USD` junto con el tipo de cambio, registrando el monto exacto en la moneda de la cuenta de caja destino y el equivalente en `BOB` sobre el saldo de la deuda, e impidiendo sobrepagos tanto en el detalle como en la cabecera (`amount_paid <= total`).
-- **Sincronización de `accounts_receivable` y ajuste de centavos en devoluciones (`server.ts:7416`, `server.ts:7212`)**:
-  - Al procesar una devolución que reduzca el saldo de un crédito (`accounts_receivable`), replicar el documento actualizado de `accounts_receivable` a Firestore.
-  - Cuando se devuelva el 100% de las unidades restantes de una venta, conciliar cualquier diferencia residual de `±0.01 BOB` por redondeo para que el reembolso total nunca supere ni quede por debajo del total cobrado.
+### Capa 2: Prevención de Doble Sincronización y Deduplicación por Hash (`firebaseSync.ts` y `server.ts`)
+Para erradicar escrituras redundantes, condiciones de carrera entre `push` y `pull` y ciclos de re-sincronización de datos idénticos:
+- **Caché de Huellas SHA-256 (`lastSyncedDigestCache`)**:
+  - Cada registro sincronizado (`tableName:docId`) almacena un hash determinista de su payload útil (excluyendo metadatos volátiles como `_syncedAt` e `_integrity`).
+  - En `pushLocalToFirestore`: si el hash actual del registro local coincide exactamente con el último hash confirmado en Firestore (ya sea por un `push` previo o recién descargado en `pullFirestoreToLocal`), se omite el `batch.set()` ahorrando cuota y evitando doble sincronización.
+  - En `pullFirestoreToLocal`: al insertar o actualizar un documento remoto válido, se registra inmediatamente su hash en `lastSyncedDigestCache` para que el siguiente ciclo de `push` no vuelva a subirlo a Firestore.
+- **Mutex / Cola Unificada y Coalescencia de `syncAfterWrite`**:
+  - Implementar un cerrojo de exclusión mutua (`syncExecutionQueue`) para que `pushLocalToFirestore` y `pullFirestoreToLocal` nunca se ejecuten en paralelo.
+  - En `server.ts`, agregar un debounce/coalescencia de 250 ms por `tableName:id` en `syncAfterWrite` para agrupar múltiples actualizaciones rápidas de una misma transacción en un único envío a Firestore.
 
 ---
 
-## Bloque 4: Saneamiento de Scripts Externos de Consola (`scripts/` y raíz)
+### Capa 3: Precisión Matemática Autoritativa al 100% y Dashboard Neto (`server.ts`)
+- **Recálculo e Imposición Autoritativa en `POST /api/sales` y `POST /api/pending-sales`**:
+  - El servidor calculará de forma autoritativa el subtotal exacto de los ítems (`ROUND(SUM(quantity * price), 2)`), validará que el descuento manual y el descuento por puntos no superen el subtotal, e **impondrá automáticamente el `authoritativeTotal` calculado por el servidor** (`Math.max(0, Number((itemsSubtotal - safeDiscount - safePointsDiscount).toFixed(2)))`).
+  - Si el total enviado por el cliente difería del total real, se corrige transparentemente al valor exacto del servidor y se deja constancia en el log de auditoría (`[MATH_PRECISION_ENFORCED]`), garantizando **cero errores de cálculo** en ventas, pagos mixtos, créditos y comisiones.
+- **Dashboard Financiero 100% Neto de Devoluciones (`GET /api/dashboard`)**:
+  - Ajustar las consultas de ingresos (`totalRevenue`), ganancias (`totalProfit`), ventas del período y métricas por método de pago en `GET /api/dashboard` para descontar las devoluciones registradas en `sale_returns` (tanto ingresos devueltos como utilidad revertida según el costo de los productos devueltos), manteniendo paridad exacta al centavo con el Historial de Ventas y Devoluciones.
 
-- **Parametrización y modo seguro (`--dry-run` por defecto)**:
-  - En `scripts/execute_remediation.cjs`, `scripts/execute_firestore_cleanup.cjs`, `scripts/verify_all_30_scenarios.cjs` y `diagnose_incident_399.cjs`:
-    - Eliminar credenciales/emails fijos o exigir variables de entorno (`ADMIN_EMAIL`, `ADMIN_PASSWORD`, `TARGET_SALE_ID`).
-    - Envolver las correcciones SQL en transacciones atómicas (`db.transaction(...)`).
-    - Exigir un flag explícito `--execute` para mutar datos reales (ejecutando `--dry-run` por defecto) para evitar ejecuciones accidentales.
+---
+
+### Capa 4: Endurecimiento de Reglas de Firestore (`firestore.rules`)
+- Definir explícitamente la función `isAdmin()` verificando `request.auth != null && request.auth.token.email == 'robymetalero@gmail.com' && request.auth.token.email_verified == true`.
+- Añadir validaciones de límites numéricos (`hasValidSaleBounds`, `hasValidProductBounds`, `hasValidReceivableBounds`) que impidan crear o actualizar documentos con `stock < 0`, `total < 0`, `remaining_amount < 0` o IDs bloqueados (`437..440`), preservando intacta la sincronización automática del servidor mediante `hasIntegrityProof()`.
+- Desplegar las reglas actualizadas con `deploy_firebase`.
+
+---
+
+### Capa 5: Suite Automatizada de Certificación Multi-Escenario (`scripts/verify_zero_defect_suite.cjs`)
+Se creará y ejecutará una suite de pruebas exhaustiva que certificará en vivo tanto la nueva batería **Zero-Defect** como los **30 escenarios previos**:
+1. **Prueba de Triggers SQLite Anti-Fantasma**: Intento directo de insertar ventas/ítems/movimientos cuyos IDs están en `deleted_records` o en la lista negra `#437-#440` -> verifica bloqueo inmediato por trigger.
+2. **Prueba de Invariantes Numéricos en Motor DB**: Intento de forzar stock negativo en `products`, saldo negativo en `accounts_receivable` o puntos negativos en `clients` -> verifica rechazo por trigger.
+3. **Prueba de Recálculo Matemático Autoritativo**: Envío de una venta con `total` manipulado o con error de redondeo en el cliente -> verifica que el servidor impone el total exacto de la suma de ítems menos descuentos y registra el movimiento de caja por el monto exacto.
+4. **Prueba de Deduplicación Anti-Doble Sync**: Ejecución consecutiva de sincronización sobre los mismos registros -> verifica mediante el caché de hashes que la segunda pasada detecta `0` cambios pendientes y no duplica escrituras.
+5. **Prueba de Trazabilidad Completa (Venta -> Crédito -> Pago -> Devolución Parcial -> Dashboard Neto -> Kárdex)**: Verifica cuadre exacto al centavo entre `sales`, `sale_returns`, `cash_accounts`, `cash_movements`, `inventory_audit_logs` y `/api/dashboard`.
+6. **Ejecución de `scripts/verify_all_30_scenarios.cjs`**: Confirmación de 30/30 PASS sin regresiones.

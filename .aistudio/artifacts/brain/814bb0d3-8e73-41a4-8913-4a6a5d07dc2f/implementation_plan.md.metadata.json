@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan de implementacion integral y quirurgico basado en la auditoria tecnica (Revision_integral_GTR666_ff17b7d): Bloque 1 (Permisos de rutas, aislamiento de entorno, respeto de reservas de stock y edicion segura de productos sin pisar stock), Bloque 2 (Sincronizacion de tombstones, conservacion de payload_hash, limpieza de pending_sale_items, bloqueo de incidentes #399 y guarda forense), Bloque 3 (Idempotencia extremo a extremo, multimoneda USD/BOB en abonos y devoluciones, respaldos separados por entorno) y Bloque 4 (Saneamiento de scripts externos en carpeta scripts/).",
-  "updatedAt":  "2026-10-28T00:42:27.596199422Z",
+  "summary":  "Plan de blindaje integral Cero Fallas (Zero-Defect): Triggers SQLite anti-fantasma e invariantes financieros, deduplicación por hash y cola de sincronización anti doble-sync, recálculo autoritativo de totales y Dashboard neto con devoluciones, reglas Firestore endurecidas con isAdmin() y suite automatizada multi-escenario.",
+  "updatedAt":  "2026-10-28T03:06:12.714619286Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

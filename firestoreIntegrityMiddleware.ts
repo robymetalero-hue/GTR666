@@ -185,12 +185,12 @@ export function validateFirestoreWriteOperation(
     };
   }
 
-  // 6. Record in Tamper-Evident Firestore Transaction Ledger
+  // 6. Record in Tamper-Evident Firestore Transaction Ledger as pending until remote commit succeeds (T09)
   try {
     db.prepare(`
       INSERT OR REPLACE INTO firestore_transaction_ledger 
       (tx_hash, table_name, record_id, operation, user_id, user_name, user_role, payload_checksum, status, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'VALIDATED_AND_COMMITTED', ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_CLOUD_CONFIRMATION', ?)
     `).run(
       txHash,
       tableName,
@@ -212,6 +212,26 @@ export function validateFirestoreWriteOperation(
     enrichedPayload: enrichedPayload || payload,
     user: activeUser
   };
+}
+
+/**
+ * Marks ledger entries as CONFIRMED_IN_CLOUD only after Firestore batch/write network commit succeeds (T09).
+ */
+export function confirmFirestoreWriteInLedger(txHashes: string[]) {
+  if (!txHashes || txHashes.length === 0) return;
+  try {
+    const stmt = db.prepare(`
+      UPDATE firestore_transaction_ledger
+      SET status = 'CONFIRMED_IN_CLOUD'
+      WHERE tx_hash = ? AND status IN ('PENDING_CLOUD_CONFIRMATION', 'PENDING')
+    `);
+    const tx = db.transaction((hashes: string[]) => {
+      for (const h of hashes) {
+        if (h) stmt.run(h);
+      }
+    });
+    tx(txHashes);
+  } catch (_) {}
 }
 
 /**
