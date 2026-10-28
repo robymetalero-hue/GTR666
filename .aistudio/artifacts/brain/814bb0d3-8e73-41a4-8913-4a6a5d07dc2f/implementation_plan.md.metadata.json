@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan de trabajo exclusivo para corregir defectos de interfaz y optimizar el diseno adaptativo en Modo Vertical (Portrait) y Modo Horizontal (Landscape) en toda la aplicacion actual, sin agregar funciones ni modulos no solicitados.",
-  "updatedAt":  "2026-10-28T11:02:33.515830307Z",
+  "summary":  "Plan de restauración íntegra de la base de datos de producción (gtr_pos.db) desde Firestore, desbloqueo de autenticación del demonio de sincronización tras reinicios de contenedor y purga definitiva de los registros residuales de pruebas de IA en Firestore y SQLite.",
+  "updatedAt":  "2026-10-28T12:47:05.303191775Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

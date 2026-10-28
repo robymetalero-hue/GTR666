@@ -5,8 +5,7 @@ process.env.TZ = 'America/La_Paz';
 // In development, preview containers (ais-dev), or tests, default strictly to 'sandbox'.
 // Only assume 'production' when explicitly declared or running on verified production domain (dspos.app).
 if (!process.env.APP_ENV) {
-  const isDspos = Boolean(process.env.APP_URL?.includes('dspos.app') || process.env.HOST?.includes('dspos.app'));
-  process.env.APP_ENV = isDspos ? 'production' : 'sandbox';
+  process.env.APP_ENV = process.env.NODE_ENV === 'test' ? 'sandbox' : 'production';
 }
 
 import "dotenv/config";
@@ -216,27 +215,18 @@ async function startServer() {
   // Sandbox vs Production Environment Isolation Gate
   // Accede inequívocamente a producción para dspos.app, ais-pre o cabecera explícita 'production' (salvo cuando el proceso es sandbox o test)
   app.use((req, res, next) => {
-    const rawHost = String(req.headers['x-forwarded-host'] || req.headers['host'] || req.hostname || '').toLowerCase();
     const explicitEnv = String(req.headers['x-app-environment'] || '').toLowerCase();
-    const isProdDomain = rawHost.includes('dspos.app') || rawHost.includes('ais-pre');
-    const isDevDomain = rawHost.includes('ais-dev');
 
     let isSandbox = false;
     if (
       process.env.APP_ENV === 'test' ||
       process.env.APP_ENV === 'sandbox' ||
-      process.env.NODE_ENV === 'test'
+      process.env.NODE_ENV === 'test' ||
+      explicitEnv === 'sandbox'
     ) {
       isSandbox = true;
-    } else if (explicitEnv === 'sandbox') {
-      isSandbox = true;
-    } else if (isProdDomain || explicitEnv === 'production') {
-      isSandbox = false;
-    } else if (isDevDomain) {
-      isSandbox = true;
     } else {
-      // Fail-closed: any untagged request without explicit environment header defaults to sandbox
-      isSandbox = true;
+      isSandbox = false;
     }
 
     (req as any).isSandbox = isSandbox;

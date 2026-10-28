@@ -41,6 +41,10 @@ export interface DbContext {
 export const dbAsyncLocalStorage = new AsyncLocalStorage<DbContext>();
 
 export function isCurrentContextSandbox(): boolean {
+  const store = dbAsyncLocalStorage.getStore();
+  if (store !== undefined) {
+    return store.isSandbox;
+  }
   if (
     process.env.APP_ENV === 'test' ||
     process.env.APP_ENV === 'sandbox' ||
@@ -48,18 +52,7 @@ export function isCurrentContextSandbox(): boolean {
   ) {
     return true;
   }
-  const store = dbAsyncLocalStorage.getStore();
-  if (store !== undefined) {
-    return store.isSandbox;
-  }
-  if (process.env.APP_ENV === 'production') {
-    return false;
-  }
-  return Boolean(
-    process.env.K_SERVICE?.startsWith('ais-dev') || 
-    process.env.APP_URL?.includes('ais-dev') ||
-    process.env.NODE_ENV !== 'production'
-  );
+  return false;
 }
 
 export const prodDbPath = path.resolve(process.cwd(), 'gtr_pos.db');

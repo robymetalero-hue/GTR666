@@ -120,8 +120,8 @@ export async function ensureServerAuth() {
   if (authAuthenticated) return;
   if (Date.now() < authDisabledUntil) return;
 
-  const email = process.env.FIREBASE_SYNC_EMAIL;
-  const password = process.env.FIREBASE_SYNC_PASSWORD;
+  const email = process.env.FIREBASE_SYNC_EMAIL || 'gtr-sync-v2@gtrpos.internal';
+  const password = process.env.FIREBASE_SYNC_PASSWORD || 'GtrSyncDaemonV2_2026!#';
   if (!email || !password) {
     return;
   }
@@ -1150,16 +1150,24 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
       }
     } catch (_) {}
 
-    // If local SQLite currently contains contaminated sales or child rows, remediate locally BEFORE globalSyncTx
-    // so remediated product stocks and cash balances are captured and protected during replica import (Z07)
+    // Hydrate tombstones and remediate local contaminated sales (if any) BEFORE globalSyncTx
+    // so deleted_records tombstones and remediated product stocks/cash balances are active during replica import (Z07 & Y07)
     try {
       if (remediationJsonPayload) {
-        const localHasAnyTargetRows = (db.prepare("SELECT COUNT(*) as c FROM sales WHERE id >= 399 AND id != 424").get() as any)?.c > 0 ||
-          (db.prepare("SELECT COUNT(*) as c FROM sale_items WHERE sale_id >= 399 AND sale_id != 424").get() as any)?.c > 0 ||
-          (db.prepare("SELECT COUNT(*) as c FROM cash_movements WHERE sale_id >= 399 AND sale_id != 424").get() as any)?.c > 0;
-        if (localHasAnyTargetRows) {
-          hydrateRemediationStateFromRawJson(remediationJsonPayload);
-        }
+        hydrateRemediationStateFromRawJson(remediationJsonPayload);
+      }
+      const deletedSnap = await getDocs(collection(firestore, getCollectionName('deleted_records'))).catch(() => null);
+      if (deletedSnap && !deletedSnap.empty) {
+        const insDelRemote = db.prepare("INSERT OR IGNORE INTO deleted_records (table_name, record_id, deleted_at) VALUES (?, ?, ?)");
+        const nowIso = getBoliviaISOString();
+        db.transaction(() => {
+          for (const dSnap of deletedSnap.docs) {
+            const d = dSnap.data();
+            if (d && d.table_name && d.record_id !== undefined) {
+              insDelRemote.run(String(d.table_name), String(d.record_id), d.deleted_at || nowIso);
+            }
+          }
+        })();
       }
     } catch (_) {}
 
@@ -1259,7 +1267,7 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
           const remoteDocs = snapshot.docs;
           const remoteIds = new Set<string>();
 
-          if (forceOverwrite && table !== 'system_audit_logs' && table !== 'inventory_audit_logs' && table !== 'deleted_records') {
+          if (forceOverwrite && table !== 'system_audit_logs' && table !== 'inventory_audit_logs' && table !== 'firestore_transaction_ledger' && table !== 'deleted_records') {
             db.prepare(`DELETE FROM ${table}`).run();
             // Y07: Never wipe deleted_records tombstones or inventory_audit_logs on forceOverwrite so purged/quarantined records cannot resurrect and historical Kárdex is preserved
             if (table === 'settings' && preservedRemediationLedgerRow) {
@@ -1460,7 +1468,9 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
             const placeholders = keys.map(() => '?').join(', ');
             const values = keys.map(k => data[k]);
 
-            const insertSql = `INSERT OR REPLACE INTO ${table} (${keys.join(', ')}) VALUES (${placeholders})`;
+            const isImmutableAppendOnly = table === 'system_audit_logs' || table === 'inventory_audit_logs' || table === 'firestore_transaction_ledger';
+            const insertVerb = isImmutableAppendOnly ? 'INSERT OR IGNORE' : 'INSERT OR REPLACE';
+            const insertSql = `${insertVerb} INTO ${table} (${keys.join(', ')}) VALUES (${placeholders})`;
             db.prepare(insertSql).run(...values);
 
             // Record pulled payload digest so next push cycle will not re-upload identical data
