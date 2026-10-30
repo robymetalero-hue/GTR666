@@ -1214,6 +1214,47 @@ export const OfflineManagerModal: React.FC<OfflineManagerModalProps> = ({ isOpen
                             {/* TAB 3: BACKUP */}
                             {activeTab === 'backup' && (
                                 <div className="flex flex-col gap-4">
+                                    {/* Card 1: Full Server Verified Backup (1-Click JSON SHA-256 & SQLite) */}
+                                    <div className="p-4 sm:p-5 rounded-2xl bg-emerald-50/50 dark:bg-emerald-950/20 border border-emerald-200/60 dark:border-emerald-900/40 flex flex-col gap-3">
+                                        <div className="flex items-start gap-3">
+                                            <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                                                <Database size={20} />
+                                            </div>
+                                            <div>
+                                                <h4 className="text-sm font-black text-slate-900 dark:text-white">
+                                                    Respaldo Integral de Producción (1 Clic)
+                                                </h4>
+                                                <p className="text-xs text-slate-600 dark:text-slate-300 mt-1 leading-relaxed">
+                                                    Descarga una copia completa y verificada (con firma criptográfica <strong>SHA-256</strong>) de toda la base de datos de producción: ventas, productos, kárdex, cajas, clientes y cuentas por cobrar.
+                                                </p>
+                                            </div>
+                                        </div>
+
+                                        <div className="pt-2 flex flex-wrap items-center gap-2.5">
+                                            <a
+                                                href="/api/backup/export-verified"
+                                                download
+                                                onClick={() => showNotification?.("Generando y descargando respaldo JSON verificado (SHA-256)...", "success")}
+                                                className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-black uppercase tracking-wider flex items-center gap-2 transition cursor-pointer shadow-md shadow-emerald-600/10"
+                                            >
+                                                <ShieldCheck size={14} />
+                                                <span>Respaldo Verificado (.JSON SHA-256)</span>
+                                            </a>
+                                            {isAdmin && (
+                                                <a
+                                                    href="/api/backup/download"
+                                                    download
+                                                    onClick={() => showNotification?.("Descargando base de datos SQLite completa (.db)...", "success")}
+                                                    className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 dark:bg-slate-800 dark:hover:bg-slate-700 text-white text-xs font-black uppercase tracking-wider flex items-center gap-2 transition cursor-pointer shadow-md"
+                                                >
+                                                    <Database size={14} />
+                                                    <span>Base SQLite Completa (.DB)</span>
+                                                </a>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    {/* Card 2: Offline Queue Emergency Backup */}
                                     <div className="p-4 sm:p-5 rounded-2xl bg-indigo-50/50 dark:bg-indigo-950/20 border border-indigo-200/60 dark:border-indigo-900/40 flex flex-col gap-3">
                                         <div className="flex items-start gap-3">
                                             <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0">
@@ -1221,10 +1262,10 @@ export const OfflineManagerModal: React.FC<OfflineManagerModalProps> = ({ isOpen
                                             </div>
                                             <div>
                                                 <h4 className="text-sm font-black text-slate-900 dark:text-white">
-                                                    Respaldo de Emergencia Offline
+                                                    Respaldo de Cola Offline Local (Dispositivo)
                                                 </h4>
                                                 <p className="text-xs text-slate-600 dark:text-slate-300 mt-1 leading-relaxed">
-                                                    Si el servidor central o el internet permanecen caídos por un tiempo prolongado, puedes descargar un archivo <strong>.JSON</strong> con todas las ventas, productos y acciones realizadas localmente en esta terminal.
+                                                    Si el internet permanece caído y tienes ventas retenidas en este navegador, descarga el archivo <strong>.JSON</strong> con las operaciones locales de esta terminal.
                                                 </p>
                                             </div>
                                         </div>
@@ -1236,7 +1277,7 @@ export const OfflineManagerModal: React.FC<OfflineManagerModalProps> = ({ isOpen
                                                 className="px-4 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-black uppercase tracking-wider flex items-center gap-2 transition cursor-pointer shadow-md shadow-indigo-600/10"
                                             >
                                                 <Download size={14} />
-                                                <span>Descargar Respaldo Local (.JSON)</span>
+                                                <span>Descargar Cola Local (.JSON)</span>
                                             </button>
                                         </div>
                                     </div>
@@ -1246,9 +1287,9 @@ export const OfflineManagerModal: React.FC<OfflineManagerModalProps> = ({ isOpen
                                             ¿Cómo funciona la seguridad de datos en GTR POS?
                                         </p>
                                         <ul className="list-disc pl-5 flex flex-col gap-1">
-                                            <li>Los datos se guardan instantáneamente en <strong>IndexedDB</strong> (base de datos nativa del navegador con cuota de hasta varios Gigabytes).</li>
-                                            <li>Si se cierra el navegador, se apaga la computadora o se reinicia la terminal, los datos <strong>no se pierden</strong>.</li>
-                                            <li>Al detectar conexión con el servidor, la cola se procesa automáticamente de forma secuencial garantizando la consistencia del inventario y las ventas.</li>
+                                            <li>Todas las ventas y movimientos se sincronizan en tiempo real con <strong>Cloud Firestore</strong> y <strong>SQLite WAL</strong>.</li>
+                                            <li>En modo sin conexión, los datos se guardan instantáneamente en <strong>IndexedDB</strong> del dispositivo.</li>
+                                            <li>Al reconectar, la cola se procesa de forma transaccional garantizando la integridad del inventario y las cajas.</li>
                                         </ul>
                                     </div>
                                 </div>

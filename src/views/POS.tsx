@@ -10,12 +10,12 @@ import {
     AlertTriangle, CreditCard, DollarSign, Camera, X, ClipboardCheck,
     Coins, HelpCircle, ChevronRight, ChevronDown, ShoppingBag, Grid, List, LayoutGrid,
     CheckCircle2, ArrowLeftRight, QrCode, History, Eye, Star, FileText, Sparkles, Download, Check, Clock, Truck, Lock, Loader2,
-    RotateCcw, ShieldAlert, Maximize2, Package, Maximize, Minimize
+    RotateCcw, ShieldAlert, Maximize2, Package, Maximize, Minimize, MessageCircle
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import BarcodeScannerModal from '../components/BarcodeScannerModal';
 import OfflineStatusHUD from '../components/OfflineStatusHUD';
-import { saveOfflineSale, saveOfflineAction } from '../utils/offlineStorage';
+import { saveOfflineSale, saveOfflineAction, markOperationCompleted } from '../utils/offlineStorage';
 import { useElasticScroll } from '../utils/touchScroll';
 import { safeDispatchEvent } from '../utils/events';
 import { getFavorites, toggleFavorite } from '../utils/posUiPreferences';
@@ -29,7 +29,7 @@ interface SaleTab {
     clientPhone: string;
     discount: number;
     discountType: 'monto' | 'porcentaje';
-    paymentMethod: 'Efectivo' | 'Tarjeta' | 'Transferencia' | 'Crédito';
+    paymentMethod: 'Efectivo' | 'Tarjeta' | 'Transferencia' | 'Crédito' | 'Mixto';
 }
 
 const triggerVibrate = (pattern: number | number[] = 40) => {
@@ -358,7 +358,9 @@ export default function POS() {
         exchangeRate: number;
         cashReceived: string;
         destination?: string;
+        splitPayment?: { cash_amount: number; qr_amount: number };
     } | null>(null);
+    const [quickWhatsappPhone, setQuickWhatsappPhone] = useState<string>("");
     
     // Density/Layout mode for high product visibility
     const [viewLayoutMode, setViewLayoutMode] = useState<'grid' | 'compact-grid' | 'list'>(() => {
@@ -817,17 +819,44 @@ export default function POS() {
         };
     }, [products, addToCart, cart, activeCartItemId]);
 
-    // Core checkout parameters
+    // Core checkout parameters — clientOperationId is locked per active cart tab so retries, modal re-opens, or hot updates never generate duplicate IDs for the same sale
     const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
     const [isCheckoutProcessing, setIsCheckoutProcessing] = useState(false);
-    const [clientOperationId, setClientOperationId] = useState<string>("");
+    const [clientOperationId, setClientOperationId] = useState<string>(() => {
+        try {
+            return localStorage.getItem(`gtr_active_cart_op_id_${activeTabId}`) || "";
+        } catch {
+            return "";
+        }
+    });
     const [checkoutCurrency, setCheckoutCurrency] = useState<'BOB' | 'USD'>('BOB');
     const cashInputRef = useRef<HTMLInputElement>(null);
 
     useEffect(() => {
+        if (cart.length === 0) {
+            try {
+                localStorage.removeItem(`gtr_active_cart_op_id_${activeTabId}`);
+            } catch {}
+            setClientOperationId("");
+            return;
+        }
+        try {
+            const storageKey = `gtr_active_cart_op_id_${activeTabId}`;
+            let existingOpId = localStorage.getItem(storageKey);
+            if (!existingOpId) {
+                existingOpId = "op_" + Date.now() + "_" + Math.random().toString(36).substring(2, 11);
+                localStorage.setItem(storageKey, existingOpId);
+            }
+            setClientOperationId(existingOpId);
+        } catch {
+            if (!clientOperationId) {
+                setClientOperationId("op_" + Date.now() + "_" + Math.random().toString(36).substring(2, 11));
+            }
+        }
+    }, [cart.length, activeTabId]);
+
+    useEffect(() => {
         if (isCheckoutOpen) {
-            const opId = "op_" + Date.now() + "_" + Math.random().toString(36).substring(2, 11);
-            setClientOperationId(opId);
             setIsCheckoutProcessing(false);
         }
     }, [isCheckoutOpen]);
@@ -851,6 +880,8 @@ export default function POS() {
     const [initialAbono, setInitialAbono] = useState<number>(0);
     const [dueDate, setDueDate] = useState<string>("");
     const [cashReceived, setCashReceived] = useState<string>("");
+    const [splitCashInput, setSplitCashInput] = useState<string>("");
+    const [splitQrInput, setSplitQrInput] = useState<string>("");
     const [showClientSuggestions, setShowClientSuggestions] = useState(false);
     const [usePoints, setUsePoints] = useState<boolean>(false);
     const [creditDestination, setCreditDestination] = useState<string>( "");
@@ -1362,11 +1393,70 @@ export default function POS() {
 
     useEffect(() => {
         if (!receiptConfirmation) return;
+        setQuickWhatsappPhone(receiptConfirmation.clientPhone || "");
         const timer = setTimeout(() => {
             setReceiptConfirmation(null);
-        }, 8000);
+        }, 14000);
         return () => clearTimeout(timer);
     }, [receiptConfirmation]);
+
+    const openExternalWhatsAppUrl = (url: string) => {
+        const a = document.createElement('a');
+        a.href = url;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+    };
+
+    const sendReceiptViaWhatsApp = (params: {
+        saleId: number | string;
+        clientName?: string;
+        phone?: string;
+        currency?: string;
+        total: number;
+        discount?: number;
+        paymentMethod: string;
+        items: Array<{ name: string; quantity: number; unitPrice: number }>;
+        splitPayment?: { cash_amount: number; qr_amount: number };
+        notes?: string;
+    }) => {
+        const currSym = params.currency === 'USD' ? '$' : 'Bs.';
+        const storeTitle = receiptTemplate?.logoText || 'GTR POS';
+        const lines: string[] = [];
+        lines.push(`🧾 *COMPROBANTE DE VENTA #${params.saleId} — ${storeTitle}*`);
+        lines.push(`📅 *Fecha:* ${new Date().toLocaleString('es-BO')}`);
+        lines.push(`👤 *Cliente:* ${params.clientName || 'Cliente Particular'}`);
+        lines.push(`────────────────────`);
+        lines.push(`📦 *DETALLE DE ARTÍCULOS:*`);
+        params.items.forEach((it) => {
+            const sub = (Number(it.quantity) || 1) * (Number(it.unitPrice) || 0);
+            lines.push(`• ${it.quantity}x ${it.name} — ${currSym} ${sub.toFixed(2)}`);
+        });
+        lines.push(`────────────────────`);
+        if (params.discount && params.discount > 0) {
+            lines.push(`🏷️ *Descuento:* -${currSym} ${Number(params.discount).toFixed(2)}`);
+        }
+        lines.push(`💰 *TOTAL COBRADO:* *${currSym} ${Number(params.total).toFixed(2)}*`);
+        lines.push(`💳 *Método de Pago:* ${params.paymentMethod}`);
+        if (params.paymentMethod === 'Mixto' && params.splitPayment) {
+            lines.push(`   ├─ Efectivo: ${currSym} ${Number(params.splitPayment.cash_amount).toFixed(2)}`);
+            lines.push(`   └─ QR / Transf.: ${currSym} ${Number(params.splitPayment.qr_amount).toFixed(2)}`);
+        } else if (params.notes && String(params.notes).includes('Pago Mixto')) {
+            lines.push(`📝 ${params.notes}`);
+        }
+        lines.push(`────────────────────`);
+        lines.push(`¡Gracias por su preferencia!`);
+
+        const rawPhone = (params.phone || '').replace(/\D/g, '');
+        const normalizedPhone = rawPhone.length === 8 ? `591${rawPhone}` : rawPhone;
+        const encodedText = encodeURIComponent(lines.join('\n'));
+        const waUrl = normalizedPhone
+            ? `https://wa.me/${normalizedPhone}?text=${encodedText}`
+            : `https://api.whatsapp.com/send?text=${encodedText}`;
+        openExternalWhatsAppUrl(waUrl);
+    };
 
     useEffect(() => {
         // Listen to AI checkout request events from AudioVoice
@@ -1592,6 +1682,39 @@ export default function POS() {
         return Math.max(0, usdSubtotal - (discountValue + pointsRedeemedValue) / exchangeRate);
     }, [usdSubtotal, discountValue, pointsRedeemedValue, exchangeRate]);
 
+    // Initialize split payment fields empty in Bs. when switching to 'Mixto' for manual entry
+    useEffect(() => {
+        if (paymentMethod === 'Mixto') {
+            setCheckoutCurrency('BOB');
+            setSplitCashInput("");
+            setSplitQrInput("");
+        }
+    }, [paymentMethod]);
+
+    const handleSplitCashChange = (valStr: string) => {
+        const clean = valStr.replace(/[^0-9.]/g, '');
+        setSplitCashInput(clean);
+        if (clean === '') {
+            setSplitQrInput('');
+            return;
+        }
+        const numCash = Math.min(total, Math.max(0, parseFloat(clean) || 0));
+        const remQr = Math.max(0, Number((total - numCash).toFixed(2)));
+        setSplitQrInput(remQr.toFixed(2));
+    };
+
+    const handleSplitQrChange = (valStr: string) => {
+        const clean = valStr.replace(/[^0-9.]/g, '');
+        setSplitQrInput(clean);
+        if (clean === '') {
+            setSplitCashInput('');
+            return;
+        }
+        const numQr = Math.min(total, Math.max(0, parseFloat(clean) || 0));
+        const remCash = Math.max(0, Number((total - numQr).toFixed(2)));
+        setSplitCashInput(remCash.toFixed(2));
+    };
+
     const executeCheckout = async (methodToUse = paymentMethod) => {
         if (cart.length === 0) return;
         if (isCheckoutProcessing) return;
@@ -1599,6 +1722,20 @@ export default function POS() {
         if (methodToUse === 'Crédito' && !clientName.trim()) {
             showNotification("⚠️ Se requiere registrar un cliente con Nombre para procesar ventas al Crédito.", "error");
             return;
+        }
+
+        const activeTargetTotal = methodToUse === 'Mixto' ? total : (checkoutCurrency === 'USD' ? usdTotal : total);
+        const splitCashAmount = methodToUse === 'Mixto' ? Math.max(0, parseFloat(splitCashInput) || 0) : 0;
+        const splitQrAmount = methodToUse === 'Mixto' ? Math.max(0, parseFloat(splitQrInput) || 0) : 0;
+        if (methodToUse === 'Mixto') {
+            if (splitCashInput.trim() === '' && splitQrInput.trim() === '') {
+                showNotification("⚠️ Ingresa cuánto pagó en Efectivo (Bs.) y cuánto por QR (Bs.).", "error");
+                return;
+            }
+            if (Math.abs((splitCashAmount + splitQrAmount) - total) > 0.05) {
+                showNotification(`⚠️ En Pago Mixto, la suma de Efectivo (Bs. ${splitCashAmount.toFixed(2)}) + QR (Bs. ${splitQrAmount.toFixed(2)}) debe cuadrar con el total (Bs. ${total.toFixed(2)}).`, "error");
+                return;
+            }
         }
 
         setIsCheckoutProcessing(true);
@@ -1641,10 +1778,20 @@ export default function POS() {
 
             const opId = clientOperationId || ("op_" + Date.now() + "_" + Math.random().toString(36).substring(2, 11));
 
+            const splitPaymentObj = methodToUse === 'Mixto'
+                ? { cash_amount: Number(splitCashAmount.toFixed(2)), qr_amount: Number(splitQrAmount.toFixed(2)) }
+                : undefined;
+
+            const currSym = checkoutCurrency === 'USD' ? '$' : 'Bs.';
+            const effectiveCheckoutNotes = methodToUse === 'Mixto' && splitPaymentObj
+                ? `${checkoutDescription ? checkoutDescription + ' | ' : ''}[Pago Mixto: Efectivo ${currSym} ${splitPaymentObj.cash_amount.toFixed(2)} + QR ${currSym} ${splitPaymentObj.qr_amount.toFixed(2)}]`
+                : checkoutDescription;
+
             const salePayload = {
                 total: checkoutCurrency === 'USD' ? usdTotal : total,
                 discount: checkoutCurrency === 'USD' ? (discountValue + pointsRedeemedValue) / exchangeRate : (discountValue + pointsRedeemedValue),
                 payment_method: methodToUse,
+                split_payment: splitPaymentObj,
                 user_id: user?.id || 1,
                 client_id: clientId,
                 items: cart.filter(c => c.cartQuantity > 0).map(c => ({
@@ -1657,7 +1804,7 @@ export default function POS() {
                 redeemed_points: pointsRedeemedValue,
                 currency: checkoutCurrency,
                 exchange_rate: exchangeRate,
-                notes: checkoutDescription,
+                notes: effectiveCheckoutNotes,
                 clientOperationId: opId
             };
 
@@ -1678,8 +1825,8 @@ export default function POS() {
                         });
                     }
 
-                    const contingencyNotes = (checkoutDescription ? checkoutDescription + ' ' : '') + '[CONTINGENCIA OFFLINE - PENDIENTE APROBACIÓN]';
-                    generateTicketPDF(methodToUse, placeholderSaleId, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, creditDestination, contingencyNotes);
+                    const contingencyNotes = (effectiveCheckoutNotes ? effectiveCheckoutNotes + ' ' : '') + '[CONTINGENCIA OFFLINE - PENDIENTE APROBACIÓN]';
+                    generateTicketPDF(methodToUse, placeholderSaleId, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, creditDestination, contingencyNotes, splitPaymentObj);
                     
                     setReceiptConfirmation({
                         saleId: placeholderSaleId,
@@ -1697,9 +1844,14 @@ export default function POS() {
                         subtotal,
                         exchangeRate,
                         cashReceived,
-                        destination: creditDestination
+                        destination: creditDestination,
+                        splitPayment: splitPaymentObj
                     });
 
+                    try {
+                        localStorage.removeItem(`gtr_active_cart_op_id_${activeTabId}`);
+                    } catch (_) {}
+                    setClientOperationId("");
                     clearCart(true);
                     setLocalPriceInputs({});
                     setSelectedCartItemId(null);
@@ -1712,6 +1864,8 @@ export default function POS() {
                     setInitialAbono(0);
                     setDueDate("");
                     setCashReceived("");
+                    setSplitCashInput("");
+                    setSplitQrInput("");
                     setUsePoints(false);
                     setPaymentMethod('Efectivo');
                     setIsCheckoutOpen(false);
@@ -1733,6 +1887,7 @@ export default function POS() {
                 const authToken = typeof localStorage !== 'undefined' ? localStorage.getItem('auth_token') : null;
                 const saleHeaders: Record<string, string> = {
                     'Content-Type': 'application/json',
+                    'x-pos-checkout': 'true',
                     'x-user-id': String(user?.id || 1),
                     'x-user-role': String(user?.role || 'vendedor'),
                     'x-user-username': String(user?.username || 'Cajero')
@@ -1749,6 +1904,11 @@ export default function POS() {
                 if (res.ok) {
                     const data = await res.json();
                     const saleId = data.saleId;
+                    markOperationCompleted(opId, String(saleId));
+                    try {
+                        localStorage.removeItem(`gtr_active_cart_op_id_${activeTabId}`);
+                    } catch (_) {}
+                    setClientOperationId("");
                     
                     // Dispatch global event for inventory transaction tracking
                     safeDispatchEvent('inventory_operation', {
@@ -1760,7 +1920,7 @@ export default function POS() {
                         }
                     });
                     
-                    generateTicketPDF(methodToUse, saleId, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, creditDestination, checkoutDescription);
+                    generateTicketPDF(methodToUse, saleId, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, creditDestination, effectiveCheckoutNotes, splitPaymentObj);
                     
                     setReceiptConfirmation({
                         saleId,
@@ -1778,7 +1938,8 @@ export default function POS() {
                         subtotal,
                         exchangeRate,
                         cashReceived,
-                        destination: creditDestination
+                        destination: creditDestination,
+                        splitPayment: splitPaymentObj
                     });
 
                     clearCart(true);
@@ -1793,6 +1954,8 @@ export default function POS() {
                     setInitialAbono(0);
                     setDueDate("");
                     setCashReceived("");
+                    setSplitCashInput("");
+                    setSplitQrInput("");
                     setUsePoints(false);
                     setPaymentMethod('Efectivo');
                     try {
@@ -1840,7 +2003,8 @@ export default function POS() {
         overrideExchangeRate?: number,
         overrideCashReceived?: string,
         overrideDestination?: string,
-        overrideNotes?: string
+        overrideNotes?: string,
+        overrideSplitPayment?: { cash_amount: number; qr_amount: number }
     ) => {
         const activeCart = overrideCart || cart;
         const activeClientName = overrideClientName !== undefined ? overrideClientName : clientName;
@@ -2121,14 +2285,25 @@ export default function POS() {
                 doc.text(`Pago: ${methodUsed} [${activeCurrency}]`, ml, y);
                 y += 4.5;
 
-                if (methodUsed === 'Efectivo' && activeCashReceived.trim()) {
+                if (methodUsed === 'Mixto' && overrideSplitPayment) {
+                    const sym = activeCurrency === 'USD' ? '$' : 'Bs.';
+                    doc.text(`  • Efectivo:`, ml, y);
+                    doc.text(`${sym} ${Number(overrideSplitPayment.cash_amount || 0).toFixed(2)}`, mr, y, { align: 'right' });
+                    y += 4;
+                    doc.text(`  • QR / Transf.:`, ml, y);
+                    doc.text(`${sym} ${Number(overrideSplitPayment.qr_amount || 0).toFixed(2)}`, mr, y, { align: 'right' });
+                    y += 4.5;
+                }
+
+                if ((methodUsed === 'Efectivo' || methodUsed === 'Mixto') && activeCashReceived.trim()) {
                     const recNum = parseFloat(activeCashReceived);
-                    if (!isNaN(recNum)) {
-                        doc.text(`Entregado:`, ml, y);
+                    const cashTarget = methodUsed === 'Mixto' && overrideSplitPayment ? Number(overrideSplitPayment.cash_amount || 0) : activeTotal;
+                    if (!isNaN(recNum) && recNum > 0) {
+                        doc.text(`Entregado (Efec.):`, ml, y);
                         doc.text(`${activeCurrency === 'USD' ? '$' : 'Bs.'} ${recNum.toFixed(2)}`, mr, y, { align: 'right' });
                         y += 4;
 
-                        const finalChange = recNum - activeTotal;
+                        const finalChange = recNum - cashTarget;
                         doc.setFont(font, "bold");
                         doc.text(`Cambio:`, ml, y);
                         doc.text(`${activeCurrency === 'USD' ? '$' : 'Bs.'} ${Math.max(0, finalChange).toFixed(2)}`, mr, y, { align: 'right' });
@@ -2789,15 +2964,63 @@ export default function POS() {
                                 <div className="text-slate-400">Método de Pago:</div>
                                 <div className="text-right font-bold text-slate-850 dark:text-slate-100">{receiptConfirmation.paymentMethod}</div>
 
+                                {receiptConfirmation.paymentMethod === 'Mixto' && receiptConfirmation.splitPayment && (
+                                    <>
+                                        <div className="text-slate-400 pl-2">├─ En Efectivo:</div>
+                                        <div className="text-right font-bold text-emerald-600 dark:text-emerald-400 tabular-nums">
+                                            {receiptConfirmation.currency === 'USD' ? '$' : 'Bs.'} {receiptConfirmation.splitPayment.cash_amount.toFixed(2)}
+                                        </div>
+                                        <div className="text-slate-400 pl-2">└─ Por QR / Transf.:</div>
+                                        <div className="text-right font-bold text-indigo-600 dark:text-indigo-400 tabular-nums">
+                                            {receiptConfirmation.currency === 'USD' ? '$' : 'Bs.'} {receiptConfirmation.splitPayment.qr_amount.toFixed(2)}
+                                        </div>
+                                    </>
+                                )}
+
                                 <div className="text-slate-400">Artículos Vendidos:</div>
                                 <div className="text-right font-bold text-slate-850 dark:text-slate-100">{receiptConfirmation.itemsCount} u</div>
 
                                 <div className="col-span-2 border-t border-slate-150 dark:border-slate-800/80 my-1"></div>
 
                                 <div className="text-slate-500 font-sans font-black text-xs uppercase tracking-wider">Total Cobrado:</div>
-                                <div className="text-right font-sans font-black text-emerald-600 dark:text-emerald-400 text-sm">
+                                <div className="text-right font-sans font-black text-emerald-600 dark:text-emerald-400 text-sm tabular-nums">
                                     {receiptConfirmation.currency === 'USD' ? '$' : 'Bs.'} {receiptConfirmation.total.toFixed(2)} {receiptConfirmation.currency}
                                 </div>
+                            </div>
+
+                            {/* Quick WhatsApp Dispatch Row */}
+                            <div className="flex items-center gap-2 bg-emerald-500/5 dark:bg-emerald-500/10 border border-emerald-500/20 rounded-2xl p-2">
+                                <input
+                                    type="tel"
+                                    value={quickWhatsappPhone}
+                                    onChange={(e) => setQuickWhatsappPhone(e.target.value)}
+                                    placeholder="Celular WhatsApp (ej. 70000000)"
+                                    className="flex-1 min-w-0 px-3 py-1.5 bg-white dark:bg-[#070b14] border border-slate-200 dark:border-slate-800 rounded-xl text-xs font-mono font-bold text-slate-800 dark:text-white focus:outline-none focus:border-emerald-500"
+                                />
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        sendReceiptViaWhatsApp({
+                                            saleId: receiptConfirmation.saleId,
+                                            clientName: receiptConfirmation.clientName,
+                                            phone: quickWhatsappPhone || receiptConfirmation.clientPhone,
+                                            currency: receiptConfirmation.currency,
+                                            total: receiptConfirmation.total,
+                                            discount: receiptConfirmation.discountValue,
+                                            paymentMethod: receiptConfirmation.paymentMethod,
+                                            splitPayment: receiptConfirmation.splitPayment,
+                                            items: (receiptConfirmation.items || []).map((it: any) => ({
+                                                name: it.name || 'Producto',
+                                                quantity: it.cartQuantity || 1,
+                                                unitPrice: receiptConfirmation.currency === 'USD' ? getCartItemPriceUSD(it) : getCartItemPriceBs(it)
+                                            }))
+                                        });
+                                    }}
+                                    className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-[10px] font-black uppercase tracking-wider transition flex items-center gap-1.5 shrink-0 cursor-pointer shadow-xs whitespace-nowrap"
+                                >
+                                    <MessageCircle className="w-3.5 h-3.5" />
+                                    <span>Enviar WhatsApp</span>
+                                </button>
                             </div>
 
                             {/* CTAs */}
@@ -2817,7 +3040,9 @@ export default function POS() {
                                             receiptConfirmation.currency,
                                             receiptConfirmation.exchangeRate,
                                             receiptConfirmation.cashReceived,
-                                            receiptConfirmation.destination
+                                            receiptConfirmation.destination,
+                                            undefined,
+                                            receiptConfirmation.splitPayment
                                         );
                                         showNotification("✓ Copia del ticket de venta descargada.", "success");
                                     }}
@@ -3876,21 +4101,47 @@ export default function POS() {
                             </div>
 
                             {/* Modal Footer Controls */}
-                            <div className="flex gap-2.5 mt-2 shrink-0">
+                            <div className="flex flex-wrap gap-2 mt-2 shrink-0">
                                 <button
                                     onClick={() => setLastSaleModalOpen(false)}
-                                    className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-extrabold uppercase rounded-xl transition cursor-pointer dark:bg-slate-900 dark:text-slate-350"
+                                    className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-extrabold uppercase rounded-xl transition cursor-pointer dark:bg-slate-900 dark:text-slate-350"
                                 >
                                     Cerrar
                                 </button>
                                 {lastSaleDetails && (
-                                    <button
-                                        onClick={() => generatePastTicketPDF(lastSaleDetails, lastSaleItems)}
-                                        className="flex-1 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-black uppercase rounded-xl transition flex items-center justify-center gap-1.5 shadow-lg shadow-indigo-500/10 cursor-pointer"
-                                    >
-                                        <Printer size={12} />
-                                        Re-Imprimir PDF
-                                    </button>
+                                    <>
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                sendReceiptViaWhatsApp({
+                                                    saleId: lastSaleDetails.id,
+                                                    clientName: lastSaleDetails.client_name,
+                                                    phone: lastSaleDetails.client_phone,
+                                                    currency: lastSaleDetails.currency,
+                                                    total: Number(lastSaleDetails.total || 0),
+                                                    discount: Number(lastSaleDetails.discount || 0),
+                                                    paymentMethod: lastSaleDetails.payment_method || 'Efectivo',
+                                                    notes: lastSaleDetails.notes,
+                                                    items: (lastSaleItems || []).map((it: any) => ({
+                                                        name: it.product_name || 'Producto',
+                                                        quantity: Number(it.quantity || 1),
+                                                        unitPrice: Number(it.price || 0)
+                                                    }))
+                                                });
+                                            }}
+                                            className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-black uppercase rounded-xl transition flex items-center justify-center gap-1.5 shadow-md shadow-emerald-500/10 cursor-pointer whitespace-nowrap"
+                                        >
+                                            <MessageCircle size={13} />
+                                            WhatsApp
+                                        </button>
+                                        <button
+                                            onClick={() => generatePastTicketPDF(lastSaleDetails, lastSaleItems)}
+                                            className="flex-1 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white text-xs font-black uppercase rounded-xl transition flex items-center justify-center gap-1.5 shadow-lg shadow-indigo-500/10 cursor-pointer whitespace-nowrap"
+                                        >
+                                            <Printer size={12} />
+                                            Re-Imprimir PDF
+                                        </button>
+                                    </>
                                 )}
                             </div>
                         </motion.div>
@@ -4386,6 +4637,48 @@ export default function POS() {
                                         </div>
                                     )}
 
+                                    {paymentMethod === 'Mixto' && (
+                                        <div className="p-3 bg-slate-50 dark:bg-black/15 border border-indigo-500/20 rounded-xl flex flex-col gap-2.5 animate-in fade-in duration-200">
+                                            <div className="flex items-center gap-1.5 text-indigo-600 dark:text-indigo-400">
+                                                <Coins size={14} />
+                                                <span className="text-[9px] font-black uppercase tracking-widest">Pago Mixto en Bolivianos (Bs.)</span>
+                                            </div>
+
+                                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                                                <div className="flex flex-col gap-1 p-2.5 rounded-xl bg-emerald-500/5 border border-emerald-500/20">
+                                                    <span className="text-[8.5px] font-black uppercase tracking-wider text-emerald-600 dark:text-emerald-400 flex items-center justify-between">
+                                                        <span>Efectivo (Bs.)</span>
+                                                        <Coins size={11} />
+                                                    </span>
+                                                    <input
+                                                        type="text"
+                                                        inputMode="decimal"
+                                                        autoFocus
+                                                        value={splitCashInput}
+                                                        onChange={(e) => handleSplitCashChange(e.target.value)}
+                                                        placeholder="Cuánto pagó en Efectivo"
+                                                        className="p-2 bg-white dark:bg-[#0c111e] border border-emerald-500/30 rounded-lg text-sm font-mono font-black text-emerald-700 dark:text-emerald-300 tabular-nums focus:outline-none focus:border-emerald-500"
+                                                    />
+                                                </div>
+
+                                                <div className="flex flex-col gap-1 p-2.5 rounded-xl bg-indigo-500/5 border border-indigo-500/20">
+                                                    <span className="text-[8.5px] font-black uppercase tracking-wider text-indigo-600 dark:text-indigo-400 flex items-center justify-between">
+                                                        <span>QR Bancario (Bs.)</span>
+                                                        <QrCode size={11} />
+                                                    </span>
+                                                    <input
+                                                        type="text"
+                                                        inputMode="decimal"
+                                                        value={splitQrInput}
+                                                        onChange={(e) => handleSplitQrChange(e.target.value)}
+                                                        placeholder="Cuánto pagó por QR"
+                                                        className="p-2 bg-white dark:bg-[#0c111e] border border-indigo-500/30 rounded-lg text-sm font-mono font-black text-indigo-700 dark:text-indigo-300 tabular-nums focus:outline-none focus:border-indigo-500"
+                                                    />
+                                                </div>
+                                            </div>
+                                        </div>
+                                    )}
+
                                     {paymentMethod === 'Crédito' && (
                                         <div className="p-3 bg-slate-50 dark:bg-black/10 border border-amber-500/10 rounded-xl flex flex-col gap-2.5 animate-in fade-in duration-200">
                                             <div className="flex items-center gap-1.5 text-amber-600 dark:text-amber-400">
@@ -4566,8 +4859,9 @@ export default function POS() {
                                         <div className="grid grid-cols-2 gap-1">
                                             {[
                                                 { id: 'Efectivo', label: 'Efectivo', icon: Coins },
-                                                { id: 'Tarjeta', label: 'Tarjeta', icon: CreditCard },
                                                 { id: 'Transferencia', label: 'QR Bancario', icon: QrCode },
+                                                { id: 'Mixto', label: 'Efectivo + QR', icon: Sparkles },
+                                                { id: 'Tarjeta', label: 'Tarjeta', icon: CreditCard },
                                                 { id: 'Crédito', label: 'Crédito', icon: ArrowLeftRight }
                                             ].map((m) => {
                                                 const IconComp = m.icon;
@@ -4578,11 +4872,13 @@ export default function POS() {
                                                         type="button"
                                                         onClick={() => {
                                                             setPaymentMethod(m.id as any);
-                                                            if (m.id !== 'Efectivo') {
+                                                            if (m.id !== 'Efectivo' && m.id !== 'Mixto') {
                                                                 setCashReceived("");
                                                             }
                                                         }}
                                                         className={`p-2 rounded-lg border flex items-center justify-center gap-1.5 transition-all duration-150 active:scale-95 text-[9px] font-extrabold uppercase tracking-wide cursor-pointer select-none ${
+                                                            m.id === 'Mixto' ? 'col-span-2' : ''
+                                                        } ${
                                                             isActive
                                                             ? `bg-indigo-650 text-white border-indigo-650 shadow-sm`
                                                             : `bg-white dark:bg-[#0c111e] border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400 hover:bg-slate-50 dark:hover:bg-slate-900`

@@ -250,7 +250,7 @@ export default function Dashboard() {
     }, [dateRange, sellerId, paymentMethodFilter]);
 
     useEffect(() => {
-        if (user?.role !== 'admin') return;
+        if (user?.role !== 'admin' && user?.role !== 'propietario') return;
 
         const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
         const wsUrl = `${protocol}//${window.location.host}/alerts`;
@@ -421,6 +421,7 @@ export default function Dashboard() {
                             <option value="Efectivo">Efectivo</option>
                             <option value="Tarjeta">Tarjeta / POS</option>
                             <option value="Transferencia">Transferencia / QR</option>
+                            <option value="Mixto">Mixto (Efectivo + QR)</option>
                             <option value="Crédito">Venta a Crédito</option>
                         </select>
                     </div>
@@ -477,7 +478,7 @@ export default function Dashboard() {
                 </div>
 
                 {/* 2. Total Net Profit & Margin */}
-                {user?.role === 'admin' ? (
+                {(user?.role === 'admin' || user?.role === 'propietario') ? (
                     <div className="bg-white dark:bg-[#0c111e] p-3.5 sm:p-5 rounded-2xl sm:rounded-3xl border border-slate-200/70 dark:border-slate-850 shadow-xs relative overflow-hidden group hover:border-blue-500/40 transition-all">
                         <div className="flex items-center justify-between mb-1.5 sm:mb-2 gap-1">
                             <span className="text-[9px] sm:text-[10px] font-black text-slate-400 uppercase tracking-wider sm:tracking-widest leading-tight">Utilidad Estimada</span>

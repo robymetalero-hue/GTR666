@@ -40,6 +40,7 @@ import http from "http";
 import net from "net";
 import { EventEmitter } from "events";
 import nodemailer from "nodemailer";
+import webpush from "web-push";
 
 // Handle process-wide unhandled async rejections and errors gracefully to prevent platform-reported socket crashes
 process.on("unhandledRejection", (reason: any) => {
@@ -676,7 +677,8 @@ async function startServer() {
     }
   });
 
-  alertsWss.on("connection", (ws) => {
+  alertsWss.on("connection", (ws, request) => {
+    (ws as any).verifiedUser = (request as any)?.verifiedUser || null;
     connectedAlertClients.add(ws);
     console.log("Client connected to GTR POS alerts WebSocket. Active clients:", connectedAlertClients.size);
     ws.on("close", () => {
@@ -696,6 +698,18 @@ async function startServer() {
           client.send(message);
         } catch (err: any) {
           console.warn("Failed to send alert to client:", err?.message || String(err));
+        }
+      }
+    }
+  }
+
+  function broadcastAdminAlert(message: string) {
+    for (const client of connectedAlertClients) {
+      if (client.readyState === 1 && (client as any).verifiedUser?.isAdmin) {
+        try {
+          client.send(message);
+        } catch (err: any) {
+          console.warn("Failed to send admin alert to client:", err?.message || String(err));
         }
       }
     }
@@ -831,7 +845,7 @@ async function startServer() {
         });
 
         const versionRow = db.prepare("SELECT value FROM settings WHERE key = ?").get("app_version") as any;
-        const currentServerVersion = versionRow ? versionRow.value : "2.4.0";
+        const currentServerVersion = versionRow ? versionRow.value : "2.4.2";
 
         res.json({ 
           token, 
@@ -871,7 +885,7 @@ async function startServer() {
 
       const permissions = user.permissions || {};
       const versionRow = db.prepare("SELECT value FROM settings WHERE key = ?").get("app_version") as any;
-      const currentServerVersion = versionRow ? versionRow.value : "2.4.0";
+      const currentServerVersion = versionRow ? versionRow.value : "2.4.2";
       res.json({ 
         id: user.id, 
         username: user.username, 
@@ -976,27 +990,90 @@ async function startServer() {
     }
   });
 
+  // Synchronize SQLite app_version with public/version.json on server startup so build & DB never conflict
+  const syncVersionManifestOnDisk = (targetVersion?: string, targetReleaseNotes?: string) => {
+    const publicVerPath = path.resolve(process.cwd(), "public/version.json");
+    const distVerPath = path.resolve(process.cwd(), "dist/version.json");
+    let manifestVer = "2.4.2";
+    let manifestBuildTime = Date.now();
+    let manifestReleaseName = "GTR POS Enterprise — Push Ventas PWA & Sincronización Unificada";
+
+    try {
+      if (fs.existsSync(publicVerPath)) {
+        const parsed = JSON.parse(fs.readFileSync(publicVerPath, "utf-8"));
+        if (parsed.version) manifestVer = String(parsed.version);
+        if (parsed.buildTime) manifestBuildTime = Number(parsed.buildTime);
+        if (parsed.releaseName) manifestReleaseName = String(parsed.releaseName);
+      }
+    } catch {}
+
+    if (targetVersion) {
+      manifestVer = String(targetVersion).trim().replace(/^v/i, "");
+      manifestBuildTime = Date.now();
+      if (targetReleaseNotes) manifestReleaseName = String(targetReleaseNotes);
+      const updatedPayload = JSON.stringify({
+        version: manifestVer,
+        buildTime: manifestBuildTime,
+        releaseName: manifestReleaseName
+      }, null, 2) + "\n";
+      try {
+        fs.writeFileSync(publicVerPath, updatedPayload, "utf-8");
+      } catch {}
+      try {
+        if (fs.existsSync(path.dirname(distVerPath))) {
+          fs.writeFileSync(distVerPath, updatedPayload, "utf-8");
+        }
+      } catch {}
+    } else {
+      try {
+        const dbVerRow = db.prepare("SELECT value FROM settings WHERE key = 'app_version'").get() as any;
+        const parseSemver = (v: string) => String(v || "0.0.0").replace(/^v/i, "").split(".").map(n => parseInt(n, 10) || 0);
+        const cmpSemver = (a: string, b: string) => {
+          const pa = parseSemver(a);
+          const pb = parseSemver(b);
+          for (let i = 0; i < 3; i++) {
+            if ((pa[i] || 0) < (pb[i] || 0)) return -1;
+            if ((pa[i] || 0) > (pb[i] || 0)) return 1;
+          }
+          return 0;
+        };
+        if (!dbVerRow || !dbVerRow.value || cmpSemver(dbVerRow.value, manifestVer) < 0) {
+          db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('app_version', ?)").run(manifestVer);
+        } else if (cmpSemver(dbVerRow.value, manifestVer) > 0) {
+          manifestVer = String(dbVerRow.value);
+        }
+      } catch {}
+    }
+
+    return { version: manifestVer, buildTime: manifestBuildTime, releaseName: manifestReleaseName };
+  };
+
+  syncVersionManifestOnDisk();
+
   // REST API: App Version sync service to trigger mandatory updates on client devices
   app.get("/api/app-version", (req, res) => {
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate, max-age=0');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
     try {
+      const manifest = syncVersionManifestOnDisk();
       const versionRow = db.prepare("SELECT value FROM settings WHERE key = ?").get("app_version") as any;
       const notesRow = db.prepare("SELECT value FROM settings WHERE key = ?").get("app_release_notes") as any;
       
-      const version = versionRow ? versionRow.value : "2.4.1";
-      const release_notes = notesRow ? notesRow.value : "Optimización de caché PWA, actualización transparente de clientes instalados y prevención de errores de conexión fiscal.";
+      const version = versionRow ? versionRow.value : manifest.version;
+      const release_notes = notesRow ? notesRow.value : manifest.releaseName;
       
       res.json({
         version,
+        buildTime: manifest.buildTime,
         release_notes,
         force_reload: true
       });
     } catch (e) {
       res.json({
-        version: "2.4.1",
-        release_notes: "Optimización de caché PWA, actualización transparente de clientes instalados y prevención de errores de conexión fiscal.",
+        version: "2.4.2",
+        buildTime: Date.now(),
+        release_notes: "Optimización de caché PWA, notificaciones Push de ventas en tiempo real y sincronización unificada.",
         force_reload: true
       });
     }
@@ -1056,8 +1133,10 @@ async function startServer() {
     }
 
     try {
-      db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('app_version', version);
+      const cleanVersion = String(version).trim().replace(/^v/i, "");
+      db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('app_version', cleanVersion);
       db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('app_release_notes', release_notes || "");
+      const manifest = syncVersionManifestOnDisk(cleanVersion, release_notes || "");
       
       // Sync cloud databases too if applicable
       syncAfterWrite("settings");
@@ -1065,10 +1144,12 @@ async function startServer() {
       // Broadcast update message to all connected clients!
       const pushMsg = JSON.stringify({
         type: 'app_update',
-        version: version,
+        version: cleanVersion,
+        buildTime: manifest.buildTime,
         release_notes: release_notes || ""
       });
 
+      broadcastAlert(pushMsg);
       wss.clients.forEach((client: any) => {
         if (client.readyState === 1) { // OPEN
           try {
@@ -1079,7 +1160,372 @@ async function startServer() {
         }
       });
 
-      res.json({ success: true, version, release_notes });
+      res.json({ success: true, version: cleanVersion, buildTime: manifest.buildTime, release_notes });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // ============================================================================
+  // WEB PUSH NOTIFICATIONS FOR SALES (PWA — RESTRICTED TO OWNER & ADMINS)
+  // ============================================================================
+  let vapidKeysCache: { publicKey: string; privateKey: string } | null = null;
+
+  function ensureVapidConfiguration(): { publicKey: string; privateKey: string } {
+    if (vapidKeysCache) return vapidKeysCache;
+    try {
+      const pubRow = db.prepare("SELECT value FROM settings WHERE key = 'vapid_public_key'").get() as any;
+      const privRow = db.prepare("SELECT value FROM settings WHERE key = 'vapid_private_key'").get() as any;
+      let publicKey = pubRow?.value || process.env.VAPID_PUBLIC_KEY || "";
+      let privateKey = privRow?.value || process.env.VAPID_PRIVATE_KEY || "";
+
+      if (!publicKey || !privateKey) {
+        const generated = webpush.generateVAPIDKeys();
+        publicKey = generated.publicKey;
+        privateKey = generated.privateKey;
+        const nowIso = getBoliviaISOString();
+        db.prepare("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('vapid_public_key', ?, ?)").run(publicKey, nowIso);
+        db.prepare("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('vapid_private_key', ?, ?)").run(privateKey, nowIso);
+        console.log("[WebPush] Generated and persisted new VAPID keypair in SQLite settings.");
+      }
+
+      webpush.setVapidDetails(
+        "mailto:admin@gtrpos.bo",
+        publicKey,
+        privateKey
+      );
+      vapidKeysCache = { publicKey, privateKey };
+      return vapidKeysCache;
+    } catch (err: any) {
+      console.warn("[WebPush] Warning initializing VAPID keys:", err?.message || String(err));
+      const fallback = webpush.generateVAPIDKeys();
+      webpush.setVapidDetails("mailto:admin@gtrpos.bo", fallback.publicKey, fallback.privateKey);
+      vapidKeysCache = fallback;
+      return fallback;
+    }
+  }
+
+  ensureVapidConfiguration();
+
+  interface SalePushNotificationInput {
+    eventType: 'venta_pos' | 'pedido_anticipo' | 'pedido_abono' | 'pedido_liquidado' | 'cxc_abono' | 'cxc_liquidado' | 'venta_offline';
+    referenceId: string | number;
+    amount: number;
+    currency?: string;
+    exchangeRate?: number;
+    paymentMethod?: string;
+    splitPayment?: { cash_amount?: number; qr_amount?: number } | null;
+    sellerUsername?: string;
+    sellerId?: number;
+    clientName?: string | null;
+    remainingAmountBob?: number | null;
+  }
+
+  async function notifyAdminsOfSaleEvent(input: SalePushNotificationInput): Promise<{ sentCount: number; totalTargets: number }> {
+    try {
+      ensureVapidConfiguration();
+      const rateRow = db.prepare("SELECT value FROM settings WHERE key = 'exchange_rate'").get() as any;
+      const defaultRate = rateRow?.value ? parseFloat(rateRow.value) : 6.96;
+      const safeRate = (input.exchangeRate && Number.isFinite(input.exchangeRate) && input.exchangeRate > 0)
+        ? Number(input.exchangeRate)
+        : (Number.isFinite(defaultRate) && defaultRate > 0 ? defaultRate : 6.96);
+
+      const rawAmount = Math.max(0, Number(input.amount || 0));
+      const isUsd = String(input.currency || 'BOB').toUpperCase() === 'USD';
+      const amountBob = isUsd ? Number((rawAmount * safeRate).toFixed(2)) : Number(rawAmount.toFixed(2));
+      const amountUsd = isUsd ? Number(rawAmount.toFixed(2)) : Number((rawAmount / safeRate).toFixed(2));
+
+      // Resolve seller username
+      let sellerName = input.sellerUsername ? String(input.sellerUsername).trim() : '';
+      if (!sellerName && input.sellerId) {
+        const uRow = db.prepare("SELECT username FROM users WHERE id = ?").get(input.sellerId) as any;
+        if (uRow?.username) sellerName = String(uRow.username).trim();
+      }
+      if (!sellerName) sellerName = 'cajero';
+      const cleanSeller = sellerName.replace(/^@/, '');
+
+      // Format payment method (with split breakdown when Mixto)
+      let paymentLabel = input.paymentMethod ? String(input.paymentMethod).trim() : 'Efectivo';
+      if (paymentLabel === 'Mixto' && input.splitPayment) {
+        const rawCash = Math.max(0, Number(input.splitPayment.cash_amount || 0));
+        const rawQr = Math.max(0, Number(input.splitPayment.qr_amount || 0));
+        if (rawCash > 0 || rawQr > 0) {
+          const cashBob = isUsd ? rawCash * safeRate : rawCash;
+          const qrBob = isUsd ? rawQr * safeRate : rawQr;
+          paymentLabel = `Mixto (Efec. Bs. ${cashBob.toFixed(2)} + QR Bs. ${qrBob.toFixed(2)})`;
+        }
+      }
+
+      let title = `💰 Nueva Venta #${input.referenceId}`;
+      let targetView = 'historial_ventas';
+      switch (input.eventType) {
+        case 'venta_pos':
+          title = `💰 Venta POS #${input.referenceId} — Bs. ${amountBob.toFixed(2)} ($${amountUsd.toFixed(2)} USD)`;
+          targetView = 'historial_ventas';
+          break;
+        case 'pedido_anticipo':
+          title = `📦 Pedido #${input.referenceId} (Anticipo) — Bs. ${amountBob.toFixed(2)} ($${amountUsd.toFixed(2)} USD)`;
+          targetView = 'ventas_pendientes';
+          break;
+        case 'pedido_abono':
+          title = `📦 Abono Pedido #${input.referenceId} — Bs. ${amountBob.toFixed(2)} ($${amountUsd.toFixed(2)} USD)`;
+          targetView = 'ventas_pendientes';
+          break;
+        case 'pedido_liquidado':
+          title = `✅ Pedido Liquidado #${input.referenceId} — Bs. ${amountBob.toFixed(2)} ($${amountUsd.toFixed(2)} USD)`;
+          targetView = 'historial_ventas';
+          break;
+        case 'cxc_abono':
+          title = `💳 Abono CxC #${input.referenceId} — Bs. ${amountBob.toFixed(2)} ($${amountUsd.toFixed(2)} USD)`;
+          targetView = 'cuentas_por_cobrar';
+          break;
+        case 'cxc_liquidado':
+          title = `✅ Deuda Liquidada CxC #${input.referenceId} — Bs. ${amountBob.toFixed(2)} ($${amountUsd.toFixed(2)} USD)`;
+          targetView = 'cuentas_por_cobrar';
+          break;
+        case 'venta_offline':
+          title = `📲 Venta Offline #${input.referenceId} — Bs. ${amountBob.toFixed(2)} ($${amountUsd.toFixed(2)} USD)`;
+          targetView = 'historial_ventas';
+          break;
+      }
+
+      const clientSuffix = input.clientName ? ` • Cliente: ${input.clientName}` : '';
+      const remainingSuffix = (input.remainingAmountBob !== undefined && input.remainingAmountBob !== null && input.remainingAmountBob > 0)
+        ? ` • Saldo: Bs. ${Number(input.remainingAmountBob).toFixed(2)}`
+        : '';
+
+      const body = `Monto: Bs. ${amountBob.toFixed(2)} ($${amountUsd.toFixed(2)} USD) • Pago: ${paymentLabel} • Vendedor: @${cleanSeller}${clientSuffix}${remainingSuffix}`;
+      const tag = `gtr-sale-${input.eventType}-${input.referenceId}-${Date.now()}`;
+      const timestamp = getBoliviaISOString();
+
+      const notificationPayload = {
+        title,
+        body,
+        icon: '/icon.svg',
+        badge: '/icon.svg',
+        tag,
+        data: {
+          url: '/',
+          targetView,
+          eventType: input.eventType,
+          referenceId: input.referenceId,
+          amountBob,
+          amountUsd,
+          paymentMethod: paymentLabel,
+          seller: cleanSeller,
+          timestamp
+        }
+      };
+
+      // 1. Broadcast over WebSocket strictly to connected Owner/Admin clients
+      broadcastAdminAlert(JSON.stringify({
+        type: 'sale_push_notification',
+        ...notificationPayload
+      }));
+
+      // 2. Deliver encrypted Web Push notifications to all subscribed Owner/Admin PWA devices
+      const subs = db.prepare(`
+        SELECT ps.*
+        FROM push_subscriptions ps
+        LEFT JOIN users u ON u.id = ps.user_id
+        WHERE LOWER(COALESCE(u.role, ps.user_role, '')) IN ('propietario', 'admin', 'administrador')
+           OR LOWER(COALESCE(u.username, ps.username, '')) IN ('admin', 'roby')
+      `).all() as any[];
+
+      let sentCount = 0;
+      await Promise.allSettled(
+        subs.map(async (sub) => {
+          const pushSub = {
+            endpoint: sub.endpoint,
+            keys: {
+              p256dh: sub.p256dh,
+              auth: sub.auth
+            }
+          };
+          try {
+            await webpush.sendNotification(pushSub, JSON.stringify(notificationPayload), {
+              TTL: 86400,
+              urgency: 'high'
+            });
+            sentCount++;
+          } catch (pushErr: any) {
+            const statusCode = pushErr?.statusCode;
+            if (statusCode === 404 || statusCode === 410) {
+              try {
+                db.prepare("DELETE FROM push_subscriptions WHERE endpoint = ?").run(sub.endpoint);
+              } catch {}
+            } else {
+              console.warn("[WebPush] Delivery warning for endpoint:", pushErr?.message || String(pushErr));
+            }
+          }
+        })
+      );
+
+      return { sentCount, totalTargets: subs.length };
+    } catch (err: any) {
+      console.warn("[WebPush] notifyAdminsOfSaleEvent error:", err?.message || String(err));
+      return { sentCount: 0, totalTargets: 0 };
+    }
+  }
+
+  app.get("/api/push/vapid-public-key", (req, res) => {
+    try {
+      const { publicKey } = ensureVapidConfiguration();
+      res.json({ publicKey });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get("/api/push/status", (req, res) => {
+    try {
+      const verifiedUser = (req as any).verifiedUser;
+      if (!verifiedUser) {
+        return res.status(401).json({ error: "Sesión requerida." });
+      }
+      const uRole = String(verifiedUser.role || '').toLowerCase();
+      const isOwnerOrAdmin = ['propietario', 'admin', 'administrador'].includes(uRole) || isMainAdmin(verifiedUser);
+      if (!isOwnerOrAdmin) {
+        return res.status(403).json({ error: "Las notificaciones push de ventas están reservadas exclusivamente para Propietario y Administradores." });
+      }
+
+      const { publicKey } = ensureVapidConfiguration();
+      const totalRow = db.prepare("SELECT COUNT(*) as count FROM push_subscriptions").get() as any;
+      const userRow = db.prepare("SELECT COUNT(*) as count FROM push_subscriptions WHERE user_id = ?").get(verifiedUser.id) as any;
+
+      res.json({
+        supported: true,
+        publicKey,
+        adminSubscriptionsCount: Number(totalRow?.count || 0),
+        userSubscriptionsCount: Number(userRow?.count || 0)
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/push/subscribe", (req, res) => {
+    try {
+      const verifiedUser = (req as any).verifiedUser;
+      if (!verifiedUser) {
+        return res.status(401).json({ error: "Sesión requerida para suscribir notificaciones Push." });
+      }
+      const uRole = String(verifiedUser.role || '').toLowerCase();
+      const isOwnerOrAdmin = ['propietario', 'admin', 'administrador'].includes(uRole) || isMainAdmin(verifiedUser);
+      if (!isOwnerOrAdmin) {
+        return res.status(403).json({
+          error: "Acceso restringido: Solo el Propietario y los Administradores pueden recibir notificaciones Push de ventas."
+        });
+      }
+
+      const subscription = req.body?.subscription || req.body;
+      const endpoint = subscription?.endpoint;
+      const p256dh = subscription?.keys?.p256dh;
+      const auth = subscription?.keys?.auth;
+
+      if (!endpoint || !p256dh || !auth) {
+        return res.status(400).json({ error: "Suscripción Web Push incompleta (faltan endpoint o llaves criptográficas p256dh/auth)." });
+      }
+
+      const nowIso = getBoliviaISOString();
+      const userAgent = String(req.headers['user-agent'] || '').slice(0, 250);
+
+      db.prepare(`
+        INSERT INTO push_subscriptions (user_id, username, user_role, endpoint, p256dh, auth, user_agent, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(endpoint) DO UPDATE SET
+          user_id = excluded.user_id,
+          username = excluded.username,
+          user_role = excluded.user_role,
+          p256dh = excluded.p256dh,
+          auth = excluded.auth,
+          user_agent = excluded.user_agent,
+          updated_at = excluded.updated_at
+      `).run(
+        verifiedUser.id,
+        verifiedUser.username || 'admin',
+        verifiedUser.role || 'admin',
+        String(endpoint),
+        String(p256dh),
+        String(auth),
+        userAgent,
+        nowIso,
+        nowIso
+      );
+
+      const totalRow = db.prepare("SELECT COUNT(*) as count FROM push_subscriptions").get() as any;
+      res.json({
+        success: true,
+        adminSubscriptionsCount: Number(totalRow?.count || 0),
+        message: "Dispositivo PWA vinculado exitosamente para recibir alertas Push de ventas en tiempo real."
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/push/unsubscribe", (req, res) => {
+    try {
+      const verifiedUser = (req as any).verifiedUser;
+      if (!verifiedUser) {
+        return res.status(401).json({ error: "Sesión requerida." });
+      }
+      const endpoint = req.body?.endpoint;
+      if (endpoint) {
+        db.prepare("DELETE FROM push_subscriptions WHERE endpoint = ?").run(String(endpoint));
+      } else {
+        db.prepare("DELETE FROM push_subscriptions WHERE user_id = ?").run(verifiedUser.id);
+      }
+      const totalRow = db.prepare("SELECT COUNT(*) as count FROM push_subscriptions").get() as any;
+      res.json({
+        success: true,
+        adminSubscriptionsCount: Number(totalRow?.count || 0),
+        message: "Suscripción Push desactivada en este dispositivo."
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.post("/api/push/test", async (req, res) => {
+    try {
+      const verifiedUser = (req as any).verifiedUser;
+      if (!verifiedUser) {
+        return res.status(401).json({ error: "Sesión requerida." });
+      }
+      const uRole = String(verifiedUser.role || '').toLowerCase();
+      const isOwnerOrAdmin = ['propietario', 'admin', 'administrador'].includes(uRole) || isMainAdmin(verifiedUser);
+      if (!isOwnerOrAdmin) {
+        return res.status(403).json({ error: "Solo el Propietario y Administradores pueden enviar notificaciones Push de prueba." });
+      }
+
+      const rateRow = db.prepare("SELECT value FROM settings WHERE key = 'exchange_rate'").get() as any;
+      const currentRate = rateRow?.value ? parseFloat(rateRow.value) : 6.96;
+      const sampleBob = Number((50 * currentRate).toFixed(2));
+
+      const result = await notifyAdminsOfSaleEvent({
+        eventType: 'venta_pos',
+        referenceId: 'PRUEBA',
+        amount: sampleBob,
+        currency: 'BOB',
+        exchangeRate: currentRate,
+        paymentMethod: 'Mixto',
+        splitPayment: {
+          cash_amount: Number((sampleBob * 0.6).toFixed(2)),
+          qr_amount: Number((sampleBob * 0.4).toFixed(2))
+        },
+        sellerUsername: verifiedUser.username || 'admin',
+        sellerId: verifiedUser.id
+      });
+
+      res.json({
+        success: true,
+        sentCount: result.sentCount,
+        totalTargets: result.totalTargets,
+        message: result.totalTargets > 0
+          ? `Notificación Push enviada a ${result.sentCount}/${result.totalTargets} dispositivo(s) de Propietario/Administrador.`
+          : "Alerta enviada en vivo (activa las notificaciones Push en este dispositivo para recibirlas también con la pantalla bloqueada)."
+      });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -4254,6 +4700,177 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     app._router.handle(req, res, next);
   });
 
+  // Unified Kardex + 30-day rotation KPIs endpoint for a single product
+  app.get("/api/products/:id/kardex", (req, res) => {
+    const { id } = req.params;
+    try {
+      const product = db.prepare('SELECT * FROM products WHERE id = ?').get(id) as any;
+      if (!product) {
+        return res.status(404).json({ error: "Producto no encontrado" });
+      }
+      const cutoff30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+      const sales30dRow = db.prepare(`
+        SELECT COALESCE(SUM(si.quantity), 0) as sold_qty, COUNT(DISTINCT s.id) as tx_count
+        FROM sale_items si
+        JOIN sales s ON si.sale_id = s.id
+        WHERE si.product_id = ? AND s.created_at >= ?
+      `).get(id, cutoff30d) as any;
+
+      const returns30dRow = db.prepare(`
+        SELECT COALESCE(SUM(sr.quantity), 0) as ret_qty
+        FROM sale_returns sr
+        WHERE sr.product_id = ? AND sr.created_at >= ?
+      `).get(id, cutoff30d) as any;
+
+      const arrivals30dRow = db.prepare(`
+        SELECT COALESCE(SUM(sa.quantity), 0) as arr_qty
+        FROM stock_arrivals sa
+        WHERE sa.product_id = ? AND sa.created_at >= ?
+      `).get(id, cutoff30d) as any;
+
+      const sold30d = Math.max(0, Number(sales30dRow?.sold_qty || 0) - Number(returns30dRow?.ret_qty || 0));
+      const dailyVelocity = Number((sold30d / 30).toFixed(2));
+      const currentStock = Number(product.stock || 0);
+      const coverageDays = dailyVelocity > 0 ? Math.round(currentStock / dailyVelocity) : (currentStock > 0 ? 999 : 0);
+      const targetStock30d = Math.max(Number(product.stock_alarm || 5), Math.ceil(dailyVelocity * 30));
+      const suggestedOrderQty = Math.max(0, targetStock30d - currentStock);
+
+      res.json({
+        product: {
+          id: product.id,
+          name: product.name,
+          sku: product.sku,
+          category: product.category,
+          stock: currentStock,
+          stock_alarm: Number(product.stock_alarm || 5),
+          price_unit: Number(product.price_unit || 0),
+          price_bulk: Number(product.price_bulk || 0)
+        },
+        kpis: {
+          unitsSold30d: sold30d,
+          txCount30d: Number(sales30dRow?.tx_count || 0),
+          unitsReturned30d: Number(returns30dRow?.ret_qty || 0),
+          unitsArrived30d: Number(arrivals30dRow?.arr_qty || 0),
+          dailyVelocity,
+          coverageDays,
+          suggestedOrderQty
+        }
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Intelligent Restock & Low-Stock Alerts based on 30-day sales velocity
+  app.get("/api/inventory/restock-alerts", (req, res) => {
+    try {
+      const verifiedUser = (req as any).verifiedUser;
+      const uRole = String(verifiedUser?.role || '').toLowerCase();
+      const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+      const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
+      const canViewCosts = isAdmin || !!userPerms.view_costs || !!userPerms.financial_reports;
+
+      const rateRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('exchange_rate') as any;
+      const exchangeRate = rateRow ? parseFloat(rateRow.value) || 6.96 : 6.96;
+      const cutoff30d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+      const rows = db.prepare(`
+        SELECT 
+          p.id,
+          p.name,
+          p.sku,
+          p.category,
+          p.stock,
+          p.stock_alarm,
+          p.price_unit,
+          p.price_bulk,
+          p.price_cost,
+          COALESCE((
+            SELECT SUM(si.quantity)
+            FROM sale_items si
+            JOIN sales s ON si.sale_id = s.id
+            WHERE si.product_id = p.id AND s.created_at >= ?
+          ), 0) as gross_sold_30d,
+          COALESCE((
+            SELECT SUM(sr.quantity)
+            FROM sale_returns sr
+            WHERE sr.product_id = p.id AND sr.created_at >= ?
+          ), 0) as returned_30d,
+          (
+            SELECT MAX(s.created_at)
+            FROM sale_items si
+            JOIN sales s ON si.sale_id = s.id
+            WHERE si.product_id = p.id
+          ) as last_sale_at
+        FROM products p
+        ORDER BY p.stock ASC, gross_sold_30d DESC
+      `).all(cutoff30d, cutoff30d) as any[];
+
+      const items = rows.map(r => {
+        const stock = Number(r.stock || 0);
+        const alarm = Math.max(1, Number(r.stock_alarm || 5));
+        const netSold30d = Math.max(0, Number(r.gross_sold_30d || 0) - Number(r.returned_30d || 0));
+        const dailyVelocity = Number((netSold30d / 30).toFixed(2));
+        const coverageDays = dailyVelocity > 0 ? Math.round(stock / dailyVelocity) : (stock > 0 ? 999 : 0);
+
+        // Target stock covers at least 30 days of rotation OR 2x the alarm threshold if low/out of stock
+        const velocityTarget = Math.ceil(dailyVelocity * 30);
+        const alarmTarget = stock <= alarm ? Math.max(alarm * 2, alarm + 5) : alarm;
+        const targetStock = Math.max(velocityTarget, alarmTarget);
+        const suggestedOrderQty = Math.max(0, targetStock - stock);
+
+        let urgency: 'agotado' | 'critico' | 'preventivo' | 'optimo' = 'optimo';
+        if (stock <= 0) {
+          urgency = 'agotado';
+        } else if (stock <= alarm || (dailyVelocity > 0 && coverageDays <= 7)) {
+          urgency = 'critico';
+        } else if (dailyVelocity > 0 && coverageDays <= 15) {
+          urgency = 'preventivo';
+        }
+
+        const unitCostUsd = canViewCosts ? Number(r.price_cost || 0) : null;
+        const estimatedOrderCostUsd = unitCostUsd !== null ? Number((suggestedOrderQty * unitCostUsd).toFixed(2)) : null;
+        const estimatedOrderCostBob = estimatedOrderCostUsd !== null ? Number((estimatedOrderCostUsd * exchangeRate).toFixed(2)) : null;
+
+        return {
+          id: r.id,
+          name: r.name,
+          sku: r.sku,
+          category: r.category || 'General',
+          stock,
+          stock_alarm: alarm,
+          price_unit: Number(r.price_unit || 0),
+          price_cost: unitCostUsd,
+          unitsSold30d: netSold30d,
+          dailyVelocity,
+          coverageDays,
+          suggestedOrderQty,
+          estimatedOrderCostUsd,
+          estimatedOrderCostBob,
+          urgency,
+          lastSaleAt: r.last_sale_at || null
+        };
+      });
+
+      const alertsOnly = items.filter(i => i.urgency !== 'optimo' || i.suggestedOrderQty > 0);
+      res.json({
+        exchangeRate,
+        summary: {
+          totalCatalog: items.length,
+          outOfStockCount: items.filter(i => i.urgency === 'agotado').length,
+          criticalCount: items.filter(i => i.urgency === 'critico').length,
+          preventiveCount: items.filter(i => i.urgency === 'preventivo').length,
+          totalSuggestedUnits: alertsOnly.reduce((acc, i) => acc + i.suggestedOrderQty, 0),
+          totalEstimatedCostUsd: canViewCosts ? Number(alertsOnly.reduce((acc, i) => acc + (i.estimatedOrderCostUsd || 0), 0).toFixed(2)) : null,
+          totalEstimatedCostBob: canViewCosts ? Number(alertsOnly.reduce((acc, i) => acc + (i.estimatedOrderCostBob || 0), 0).toFixed(2)) : null
+        },
+        alerts: alertsOnly
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // Helper to deeply sanitize cost and purchase price fields in audit logs for non-financial users
   function sanitizeAuditLogCosts(log: any) {
     if (!log) return log;
@@ -7003,7 +7620,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   });
 
   app.post("/api/sales", enforcePermission('create_sales'), (req, res) => {
-    const { total, discount, payment_method, user_id, client_id, items, initial_abono, due_date, redeemed_points, currency, exchange_rate, notes } = req.body;
+    const { total, discount, payment_method, user_id, client_id, items, initial_abono, due_date, redeemed_points, currency, exchange_rate, notes, split_payment } = req.body;
     const clientOpId = req.body.clientOperationId || req.body.client_operation_id || null;
 
     if (!items || !Array.isArray(items) || items.length === 0) {
@@ -7212,6 +7829,57 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           return { status: 'none' };
         };
 
+        const reconcilePendingOfflineByOpId = (opIdToReconcile: string | null, resolvedSaleId: any) => {
+          if (!opIdToReconcile || !resolvedSaleId) return;
+          try {
+            db.prepare(`
+              UPDATE offline_pending_sales
+              SET status = 'approved', resolved_sale_id = ?, approved_at = COALESCE(approved_at, ?)
+              WHERE (client_operation_id = ? OR id = ?) AND status = 'pending'
+            `).run(resolvedSaleId, getBoliviaISOString(), opIdToReconcile, opIdToReconcile);
+          } catch (_) {}
+        };
+
+        // Commercial fingerprint check for POS checkouts to block double-tap or network-flicker duplicates within 90s even if opId was rotated
+        const findRecentPosFingerprintMatch = (): any | null => {
+          if (req.headers['x-pos-checkout'] !== 'true') return null;
+          try {
+            const recentSales = db.prepare(`
+              SELECT id, total, discount, payment_method, client_id, currency, created_at
+              FROM sales
+              WHERE user_id = ? AND ABS(total - ?) < 0.01 AND payment_method = ?
+              ORDER BY id DESC LIMIT 8
+            `).all(effectiveUserId, safeTotal, payment_method || 'Efectivo') as any[];
+
+            const nowMs = Date.now();
+            for (const cand of recentSales) {
+              if (Number(cand.client_id || 0) !== Number(client_id || 0)) continue;
+              if (Math.abs(Number(cand.discount || 0) - safeDiscount) >= 0.01) continue;
+              if (String(cand.currency || 'BOB') !== String(safeCurrency)) continue;
+              const createdMs = cand.created_at ? new Date(cand.created_at).getTime() : 0;
+              if (createdMs && Math.abs(nowMs - createdMs) > 90000) continue;
+
+              const dbItems = db.prepare('SELECT product_id, quantity, price FROM sale_items WHERE sale_id = ? ORDER BY id ASC').all(cand.id) as any[];
+              if (dbItems.length !== normalizedItemsForHash.length) continue;
+              let allMatch = true;
+              for (let i = 0; i < dbItems.length; i++) {
+                if (
+                  Number(dbItems[i].product_id) !== normalizedItemsForHash[i].product_id ||
+                  Number(dbItems[i].quantity) !== normalizedItemsForHash[i].quantity ||
+                  Math.abs(Number(dbItems[i].price) - normalizedItemsForHash[i].price) >= 0.01
+                ) {
+                  allMatch = false;
+                  break;
+                }
+              }
+              if (allMatch) {
+                return cand;
+              }
+            }
+          } catch (_) {}
+          return null;
+        };
+
         // Pre-validation idempotency check (handles D03, D04, Y10, T18 before price/exchange_rate/points checks)
         if (clientOpId) {
           const preCheck = checkSaleIdempotency();
@@ -7222,8 +7890,20 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
             return res.status(409).json({ error: "Conflicto: la clave de operación ya fue utilizada con datos comerciales diferentes.", client_operation_id: clientOpId });
           }
           if (preCheck.status === 'duplicate') {
+            reconcilePendingOfflineByOpId(clientOpId, preCheck.payload?.saleId);
             return res.status(200).json(preCheck.payload);
           }
+        }
+
+        const fingerprintMatch = findRecentPosFingerprintMatch();
+        if (fingerprintMatch) {
+          reconcilePendingOfflineByOpId(clientOpId, fingerprintMatch.id);
+          return res.status(200).json({
+            success: true,
+            saleId: fingerprintMatch.id,
+            total: Number(fingerprintMatch.total),
+            isDuplicate: true
+          });
         }
 
         // Security check: validate discount permissions
@@ -7359,7 +8039,17 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
           const nowIso = getBoliviaISOString();
           ensureSafeAutoincrementSequence(db, ['sales', 'sale_items', 'cash_movements', 'accounts_receivable', 'credit_payments']);
-          const result = saleInsert.run(safeTotal, safeDiscount, payment_method || 'Efectivo', effectiveUserId, client_id || null, currentRate, safeCurrency, notes || null, clientOpId, nowIso);
+          const currSym = safeCurrency === 'USD' ? '$' : 'Bs.';
+          let effectiveNotes = notes || null;
+          if (payment_method === 'Mixto' && split_payment) {
+            const cAmt = Math.max(0, Number(split_payment.cash_amount || 0));
+            const qAmt = Math.max(0, Number(split_payment.qr_amount || 0));
+            const splitTag = `[Pago Mixto: Efectivo ${currSym} ${cAmt.toFixed(2)} + QR ${currSym} ${qAmt.toFixed(2)}]`;
+            if (!effectiveNotes || !String(effectiveNotes).includes('Pago Mixto')) {
+              effectiveNotes = effectiveNotes ? `${effectiveNotes} | ${splitTag}` : splitTag;
+            }
+          }
+          const result = saleInsert.run(safeTotal, safeDiscount, payment_method || 'Efectivo', effectiveUserId, client_id || null, currentRate, safeCurrency, effectiveNotes, clientOpId, nowIso);
           const saleId = result.lastInsertRowid;
           const itemIds: any[] = [];
           const productIds: any[] = [];
@@ -7461,19 +8151,44 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           const receivedAmount = payment_method === 'Crédito' ? Math.min(safeTotal, Math.max(0, Number(initial_abono || 0))) : safeTotal;
           const receivedAmountInBs = safeCurrency === 'USD' ? (receivedAmount * currentRate) : receivedAmount;
 
-          // Record cash movement (pending settlement)
-          const movResult = db.prepare(`
-            INSERT INTO cash_movements (seller_id, sale_id, type, amount, currency, payment_method, status, notes)
-            VALUES (?, ?, 'venta', ?, ?, ?, 'pendiente', ?)
-          `).run(
-            activeUserId,
-            saleId,
-            receivedAmount,
-            safeCurrency,
-            payment_method || 'Efectivo',
-            `Venta registrada #${saleId}`
-          );
-          const movId = movResult.lastInsertRowid;
+          // Record cash movement(s) (pending settlement) — supports split Efectivo + QR when payment_method === 'Mixto'
+          const movIds: any[] = [];
+          if (payment_method === 'Mixto' && split_payment) {
+            const rawCash = Math.max(0, Number(split_payment.cash_amount || 0));
+            const rawQr = Math.max(0, Number(split_payment.qr_amount || 0));
+            const sumSplit = rawCash + rawQr;
+            const normCash = sumSplit > 0 ? Number(((rawCash / sumSplit) * receivedAmount).toFixed(2)) : Number((receivedAmount / 2).toFixed(2));
+            const normQr = Math.max(0, Number((receivedAmount - normCash).toFixed(2)));
+
+            if (normCash > 0) {
+              const movCash = db.prepare(`
+                INSERT INTO cash_movements (seller_id, sale_id, type, amount, currency, payment_method, status, notes)
+                VALUES (?, ?, 'venta', ?, ?, 'Efectivo', 'pendiente', ?)
+              `).run(activeUserId, saleId, normCash, safeCurrency, `Venta registrada #${saleId} (Efectivo - Pago Mixto)`);
+              if (movCash.lastInsertRowid) movIds.push(movCash.lastInsertRowid);
+            }
+            if (normQr > 0) {
+              const movQr = db.prepare(`
+                INSERT INTO cash_movements (seller_id, sale_id, type, amount, currency, payment_method, status, notes)
+                VALUES (?, ?, 'venta', ?, ?, 'Transferencia', 'pendiente', ?)
+              `).run(activeUserId, saleId, normQr, safeCurrency, `Venta registrada #${saleId} (QR/Transferencia - Pago Mixto)`);
+              if (movQr.lastInsertRowid) movIds.push(movQr.lastInsertRowid);
+            }
+          } else {
+            const movResult = db.prepare(`
+              INSERT INTO cash_movements (seller_id, sale_id, type, amount, currency, payment_method, status, notes)
+              VALUES (?, ?, 'venta', ?, ?, ?, 'pendiente', ?)
+            `).run(
+              activeUserId,
+              saleId,
+              receivedAmount,
+              safeCurrency,
+              payment_method || 'Efectivo',
+              `Venta registrada #${saleId}`
+            );
+            if (movResult.lastInsertRowid) movIds.push(movResult.lastInsertRowid);
+          }
+          const movId = movIds[0] || null;
 
           // Update seller's cash account balance (always in BOB/Bs)
           db.prepare(`
@@ -7530,15 +8245,17 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
               INSERT INTO processed_operations (client_operation_id, operation_type, payload_hash, response_body, status, created_at)
               VALUES (?, 'sale', ?, ?, 'completed', ?)
             `).run(clientOpId, canonicalSaleHash, JSON.stringify({ success: true, saleId, total: safeTotal }), nowIso);
+            reconcilePendingOfflineByOpId(clientOpId, saleId);
           }
-          return { saleId, itemIds, productIds, arId, cpId, accId, movId, inventoryAuditLogIds, isDuplicate: false };
+          return { saleId, itemIds, productIds, arId, cpId, accId, movId, movIds, inventoryAuditLogIds, isDuplicate: false };
         });
 
         const txResult = transaction() as any;
         if (txResult.isDuplicate) {
+          reconcilePendingOfflineByOpId(clientOpId, txResult.saleId);
           return res.json(txResult);
         }
-        const { saleId, itemIds, productIds, arId, cpId, accId, movId, inventoryAuditLogIds } = txResult;
+        const { saleId, itemIds, productIds, arId, cpId, accId, movId, movIds, inventoryAuditLogIds } = txResult;
 
         // Write advanced audit logs for each sold product item
         const systemAuditLogIds: any[] = [];
@@ -7608,7 +8325,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           sale_items: itemIds,
           products: productIds,
           cash_accounts: accId ? [accId] : [],
-          cash_movements: movId ? [movId] : [],
+          cash_movements: Array.isArray(movIds) && movIds.length > 0 ? movIds : (movId ? [movId] : []),
           inventory_audit_logs: inventoryAuditLogIds,
           system_audit_logs: systemAuditLogIds
         };
@@ -7624,6 +8341,20 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
         syncAfterWrite(syncMap);
         incrementInventoryVersion();
+
+        // Dispatch real-time Web Push notification to Owner and Administrators
+        notifyAdminsOfSaleEvent({
+          eventType: 'venta_pos',
+          referenceId: saleId,
+          amount: safeTotal,
+          currency: safeCurrency,
+          exchangeRate: currentRate,
+          paymentMethod: payment_method || 'Efectivo',
+          splitPayment: split_payment || null,
+          sellerUsername: uName,
+          sellerId: effectiveUserId
+        }).catch(() => {});
+
         res.json({
           success: true,
           saleId,
@@ -7842,18 +8573,50 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           VALUES (?, ?, 0.0)
         `).run(currentActiveUserId, sName);
 
-        // Record the cash movement in actual received currency
-        const movResult = db.prepare(`
-          INSERT INTO cash_movements (seller_id, sale_id, type, amount, currency, payment_method, status, notes)
-          VALUES (?, ?, 'ingreso_manual', ?, ?, ?, 'pendiente', ?)
-        `).run(
-          currentActiveUserId,
-          record.sale_id,
-          actualPayReceived,
-          payCurrency,
-          payment_method || 'Efectivo',
-          notes || `Abono a Cuenta por Cobrar de Venta #${record.sale_id} (${actualPayReceived} ${payCurrency})`
-        );
+        // Record the cash movement in actual received currency (split into Efectivo + Transferencia when Mixto)
+        const movIds: any[] = [];
+        const splitPay = req.body?.split_payment;
+        if (payment_method === 'Mixto' && splitPay && (Number(splitPay.cash_amount) > 0 || Number(splitPay.qr_amount) > 0)) {
+          const splitCash = Math.max(0, Math.round((Number(splitPay.cash_amount) || 0) * 100) / 100);
+          const splitQr = Math.max(0, Math.round((Number(splitPay.qr_amount) || 0) * 100) / 100);
+          if (splitCash > 0) {
+            const resCash = db.prepare(`
+              INSERT INTO cash_movements (seller_id, sale_id, type, amount, currency, payment_method, status, notes)
+              VALUES (?, ?, 'ingreso_manual', ?, 'BOB', 'Efectivo', 'pendiente', ?)
+            `).run(
+              currentActiveUserId,
+              record.sale_id,
+              splitCash,
+              notes ? `${notes} (Efectivo Mixto: Bs. ${splitCash.toFixed(2)})` : `Abono CxC Venta #${record.sale_id} (Efectivo Mixto: Bs. ${splitCash.toFixed(2)})`
+            );
+            movIds.push(resCash.lastInsertRowid);
+          }
+          if (splitQr > 0) {
+            const resQr = db.prepare(`
+              INSERT INTO cash_movements (seller_id, sale_id, type, amount, currency, payment_method, status, notes)
+              VALUES (?, ?, 'ingreso_manual', ?, 'BOB', 'Transferencia', 'pendiente', ?)
+            `).run(
+              currentActiveUserId,
+              record.sale_id,
+              splitQr,
+              notes ? `${notes} (QR Mixto: Bs. ${splitQr.toFixed(2)})` : `Abono CxC Venta #${record.sale_id} (QR Mixto: Bs. ${splitQr.toFixed(2)})`
+            );
+            movIds.push(resQr.lastInsertRowid);
+          }
+        } else {
+          const movResult = db.prepare(`
+            INSERT INTO cash_movements (seller_id, sale_id, type, amount, currency, payment_method, status, notes)
+            VALUES (?, ?, 'ingreso_manual', ?, ?, ?, 'pendiente', ?)
+          `).run(
+            currentActiveUserId,
+            record.sale_id,
+            actualPayReceived,
+            payCurrency,
+            payment_method || 'Efectivo',
+            notes || `Abono a Cuenta por Cobrar de Venta #${record.sale_id} (${actualPayReceived} ${payCurrency})`
+          );
+          movIds.push(movResult.lastInsertRowid);
+        }
 
         // Update seller's cash account balance (always in BOB)
         db.prepare(`
@@ -7889,7 +8652,8 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           paymentId: result.lastInsertRowid, 
           activeUserId: currentActiveUserId, 
           accId: accRow?.id, 
-          movId: movResult.lastInsertRowid,
+          movId: movIds[0] || null,
+          movIds,
           ...responsePayload,
           isDuplicate: false
         };
@@ -7899,24 +8663,45 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         return res.json(txPay);
       }
 
-      const { paymentId, accId, movId, actualPayment: resPayment, newRemainingAmount: resRemaining, newStatus: resStatus } = txPay as any;
+      const { paymentId, accId, movId, movIds, actualPayment: resPayment, newRemainingAmount: resRemaining, newStatus: resStatus } = txPay as any;
 
       syncAfterWrite({
         accounts_receivable: [id],
         credit_payments: [paymentId],
         cash_accounts: accId ? [accId] : [],
-        cash_movements: movId ? [movId] : []
+        cash_movements: Array.isArray(movIds) && movIds.length > 0 ? movIds : (movId ? [movId] : [])
       });
+
+      const finalStatus = resStatus ?? newStatus;
+      const finalRemaining = resRemaining ?? newRemainingAmount;
+      const finalPayment = resPayment ?? actualPayReceived;
+      const arClientRow = record.client_id ? (db.prepare('SELECT name FROM clients WHERE id = ?').get(record.client_id) as any) : null;
+      const remBob = saleCurrency === 'USD' ? Number((finalRemaining * payRate).toFixed(2)) : Number(finalRemaining);
+
+      notifyAdminsOfSaleEvent({
+        eventType: finalStatus === 'pagado' ? 'cxc_liquidado' : 'cxc_abono',
+        referenceId: record.sale_id || id,
+        amount: finalPayment,
+        currency: payCurrency,
+        exchangeRate: payRate,
+        paymentMethod: payment_method || 'Efectivo',
+        splitPayment: req.body?.split_payment || null,
+        sellerUsername: verifiedUser?.username,
+        sellerId: Number(req.headers['x-user-id']) || Number(user_id) || verifiedUser?.id || 1,
+        clientName: arClientRow?.name || null,
+        remainingAmountBob: remBob
+      }).catch(() => {});
+
       res.json({ 
         success: true, 
-        actualPayment: resPayment ?? actualPayReceived, 
+        actualPayment: finalPayment, 
         actualDebtReduction,
         debtReduction: actualDebtReduction,
         debtCurrency: saleCurrency,
         paymentCurrency: payCurrency,
         exchangeRate: payRate,
-        newRemainingAmount: resRemaining ?? newRemainingAmount, 
-        newStatus: resStatus ?? newStatus 
+        newRemainingAmount: finalRemaining, 
+        newStatus: finalStatus 
       });
     } catch (e: any) {
       if (e.message === 'CONFLICT_409' || e.statusCode === 409) {
@@ -8168,6 +8953,23 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       });
       if (shouldReserveStock === 1) {
         incrementInventoryVersion();
+      }
+
+      if (safePaid > 0) {
+        const remOrder = Math.max(0, Number((safeTotal - safePaid).toFixed(2)));
+        const remOrderBob = safeCurrency === 'USD' ? Number((remOrder * currentRate).toFixed(2)) : remOrder;
+        notifyAdminsOfSaleEvent({
+          eventType: 'pedido_anticipo',
+          referenceId: pendingSaleId,
+          amount: safePaid,
+          currency: safeCurrency,
+          exchangeRate: currentRate,
+          paymentMethod: req.body.payment_method || 'Efectivo',
+          sellerUsername: verifiedUser?.username,
+          sellerId: verifiedUser?.id || 1,
+          clientName: String(client_name).trim(),
+          remainingAmountBob: remOrderBob
+        }).catch(() => {});
       }
       
       res.json({ success: true, pendingSaleId, itemIds });
@@ -8554,6 +9356,24 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       }
       
       syncAfterWrite(['pending_sales', 'pending_sale_payments']);
+
+      const saleRate = Number(sale.exchange_rate || 6.96) > 0 ? Number(sale.exchange_rate || 6.96) : 6.96;
+      const saleCurr = sale.currency || 'BOB';
+      const remOrderBob = saleCurr === 'USD' ? Number((newRemainingAmount * saleRate).toFixed(2)) : newRemainingAmount;
+
+      notifyAdminsOfSaleEvent({
+        eventType: 'pedido_abono',
+        referenceId: id,
+        amount: actualAccepted,
+        currency: saleCurr,
+        exchangeRate: saleRate,
+        paymentMethod: payment_method || 'Efectivo',
+        sellerUsername: verifiedUser?.username,
+        sellerId: effectiveOperatorId,
+        clientName: sale.client_name || null,
+        remainingAmountBob: remOrderBob
+      }).catch(() => {});
+
       res.json({ success: true, actualPayment: actualAccepted, newPaidAmount, newRemainingAmount });
     } catch (e: any) {
       if (e.message === 'CONFLICT_409' || e.statusCode === 409) {
@@ -8889,11 +9709,31 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
         if (cashReceivedNow > 0) {
           const cashInBs = safeCurrency === 'USD' ? (cashReceivedNow * safeRate) : cashReceivedNow;
-          const movRes = db.prepare(`
-            INSERT INTO cash_movements (seller_id, sale_id, type, amount, currency, payment_method, status, notes)
-            VALUES (?, ?, 'venta', ?, ?, ?, 'pendiente', ?)
-          `).run(activeUserId, finalSaleId, cashReceivedNow, safeCurrency, payment_method || 'Efectivo', `Liquidación de pedido pendiente #${id}`);
-          cashMovId = movRes.lastInsertRowid;
+          const splitPay = req.body?.split_payment;
+          if (payment_method === 'Mixto' && splitPay && (Number(splitPay.cash_amount) > 0 || Number(splitPay.qr_amount) > 0)) {
+            const splitCash = Math.max(0, Math.round((Number(splitPay.cash_amount) || 0) * 100) / 100);
+            const splitQr = Math.max(0, Math.round((Number(splitPay.qr_amount) || 0) * 100) / 100);
+            if (splitCash > 0) {
+              const movResCash = db.prepare(`
+                INSERT INTO cash_movements (seller_id, sale_id, type, amount, currency, payment_method, status, notes)
+                VALUES (?, ?, 'venta', ?, 'BOB', 'Efectivo', 'pendiente', ?)
+              `).run(activeUserId, finalSaleId, splitCash, `Liquidación pedido #${id} (Efectivo Mixto: Bs. ${splitCash.toFixed(2)})`);
+              cashMovId = movResCash.lastInsertRowid;
+            }
+            if (splitQr > 0) {
+              const movResQr = db.prepare(`
+                INSERT INTO cash_movements (seller_id, sale_id, type, amount, currency, payment_method, status, notes)
+                VALUES (?, ?, 'venta', ?, 'BOB', 'Transferencia', 'pendiente', ?)
+              `).run(activeUserId, finalSaleId, splitQr, `Liquidación pedido #${id} (QR Mixto: Bs. ${splitQr.toFixed(2)})`);
+              if (!cashMovId) cashMovId = movResQr.lastInsertRowid;
+            }
+          } else {
+            const movRes = db.prepare(`
+              INSERT INTO cash_movements (seller_id, sale_id, type, amount, currency, payment_method, status, notes)
+              VALUES (?, ?, 'venta', ?, ?, ?, 'pendiente', ?)
+            `).run(activeUserId, finalSaleId, cashReceivedNow, safeCurrency, payment_method || 'Efectivo', `Liquidación de pedido pendiente #${id}`);
+            cashMovId = movRes.lastInsertRowid;
+          }
 
           db.prepare(`
             UPDATE cash_accounts
@@ -8991,6 +9831,20 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       
       syncAfterWrite(syncMap);
       incrementInventoryVersion();
+
+      notifyAdminsOfSaleEvent({
+        eventType: 'pedido_liquidado',
+        referenceId: finalSaleId,
+        amount: safeTotal,
+        currency: safeCurrency,
+        exchangeRate: safeRate,
+        paymentMethod: payment_method || 'Efectivo',
+        splitPayment: req.body?.split_payment || null,
+        sellerUsername: verifiedUser?.username,
+        sellerId: effectiveOperatorId,
+        clientName: sale.client_name || null
+      }).catch(() => {});
+
       res.json({ success: true, saleId: finalSaleId });
     } catch (e: any) {
       if (e.message === 'CONFLICT_409' || e.statusCode === 409) {
@@ -9080,25 +9934,35 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         items
       } = req.body || {};
 
-      // 1. Check if this sale was already approved or recorded in sales
+      // 1. Check if this sale was already approved or recorded in sales by client_operation_id
       const existingSale = db.prepare('SELECT id FROM sales WHERE client_operation_id = ?').get(safeOpId) as any;
       if (existingSale) {
+        try {
+          db.prepare(`
+            UPDATE offline_pending_sales
+            SET status = 'approved', resolved_sale_id = ?, approved_at = COALESCE(approved_at, ?)
+            WHERE (id = ? OR client_operation_id = ?) AND status = 'pending'
+          `).run(existingSale.id, getBoliviaISOString(), safeId, safeOpId);
+        } catch (_) {}
         return res.json({
           success: true,
           status: 'already_approved',
           saleId: existingSale.id,
-          message: 'Esta venta ya fue aprobada y registrada formalmente.'
+          isDuplicate: true,
+          message: 'Esta venta ya fue aprobada y registrada formalmente en línea.'
         });
       }
 
       // 2. Check if already in offline_pending_sales
-      const existingPending = db.prepare('SELECT id, status FROM offline_pending_sales WHERE id = ? OR client_operation_id = ?').get(safeId, safeOpId) as any;
+      const existingPending = db.prepare('SELECT id, status, resolved_sale_id FROM offline_pending_sales WHERE id = ? OR client_operation_id = ?').get(safeId, safeOpId) as any;
       if (existingPending) {
         return res.json({
           success: true,
           status: existingPending.status === 'approved' ? 'already_approved' : 'already_queued',
           id: existingPending.id,
-          message: 'Venta ya se encuentra en la cola del servidor.'
+          saleId: existingPending.resolved_sale_id || undefined,
+          isDuplicate: true,
+          message: 'Venta ya se encuentra registrada en el servidor.'
         });
       }
 
@@ -9114,6 +9978,50 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         : Number(user_id || verifiedUser?.id || 1);
       const userRow = db.prepare('SELECT username FROM users WHERE id = ?').get(effectiveUserId) as any;
       const userName = userRow?.username || verifiedUser?.username || 'Vendedor';
+
+      // 3. Commercial Fingerprint Reconciliation: Check if this exact sale was already recorded online in `sales` (e.g. during a network flicker)
+      const numSubmittedTotal = Math.max(0, Number(total || 0));
+      const numSubmittedDiscount = Math.max(0, Number(discount || 0));
+      try {
+        const recentOnlineSales = db.prepare(`
+          SELECT id, total, discount, payment_method, client_id, currency, created_at
+          FROM sales
+          WHERE user_id = ? AND ABS(total - ?) < 0.01 AND payment_method = ?
+          ORDER BY id DESC LIMIT 10
+        `).all(effectiveUserId, numSubmittedTotal, payment_method || 'Efectivo') as any[];
+
+        const nowMs = Date.now();
+        for (const cand of recentOnlineSales) {
+          if (client_id && Number(cand.client_id || 0) !== Number(client_id || 0)) continue;
+          if (Math.abs(Number(cand.discount || 0) - numSubmittedDiscount) >= 0.01) continue;
+          if (String(cand.currency || 'BOB') !== String(currency || 'BOB')) continue;
+          const createdMs = cand.created_at ? new Date(cand.created_at).getTime() : 0;
+          if (createdMs && Math.abs(nowMs - createdMs) > 600000) continue; // 10-minute window for offline sync after network flicker
+
+          const dbItems = db.prepare('SELECT product_id, quantity, price FROM sale_items WHERE sale_id = ? ORDER BY id ASC').all(cand.id) as any[];
+          if (dbItems.length !== items.length) continue;
+          let itemsMatch = true;
+          for (let i = 0; i < dbItems.length; i++) {
+            if (
+              Number(dbItems[i].product_id) !== Number(items[i].product_id) ||
+              Number(dbItems[i].quantity) !== Number(items[i].quantity) ||
+              Math.abs(Number(dbItems[i].price) - Number(items[i].price)) >= 0.01
+            ) {
+              itemsMatch = false;
+              break;
+            }
+          }
+          if (itemsMatch) {
+            return res.json({
+              success: true,
+              status: 'already_approved',
+              saleId: cand.id,
+              isDuplicate: true,
+              message: 'Esta venta ya había ingresado en línea antes del corte de red; duplicado descartado automáticamente.'
+            });
+          }
+        }
+      } catch (_) {}
 
       // Enrich items with current product metadata
       const enrichedItems = items.map((it: any) => {
@@ -9386,6 +10294,25 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const auditPayloads: any[] = [];
 
       const txResult = db.transaction(() => {
+        // Atomic inside-transaction guard: verify pendingSale is still 'pending' and not already in `sales`
+        const freshPending = db.prepare('SELECT status, resolved_sale_id, client_operation_id FROM offline_pending_sales WHERE id = ?').get(id) as any;
+        if (freshPending && freshPending.status !== 'pending' && freshPending.resolved_sale_id) {
+          return { saleId: freshPending.resolved_sale_id, itemIds: [], productIds: [], invAuditIds: [], movId: null, accId: null, arId: null, isDuplicate: true };
+        }
+
+        const effectiveOpId = pendingSale.client_operation_id || pendingSale.id;
+        if (effectiveOpId) {
+          const existingOnlineSale = db.prepare('SELECT id FROM sales WHERE client_operation_id = ?').get(effectiveOpId) as any;
+          if (existingOnlineSale) {
+            db.prepare(`
+              UPDATE offline_pending_sales
+              SET status = 'approved', approved_by = ?, approved_at = ?, resolved_sale_id = ?
+              WHERE id = ?
+            `).run(adminId, nowIso, existingOnlineSale.id, id);
+            return { saleId: existingOnlineSale.id, itemIds: [], productIds: [], invAuditIds: [], movId: null, accId: null, arId: null, isDuplicate: true };
+          }
+        }
+
         ensureSafeAutoincrementSequence(db, ['sales', 'sale_items', 'cash_movements', 'accounts_receivable', 'credit_payments']);
         // 1. Insert into sales
         const notesWithAudit = `${pendingSale.notes ? pendingSale.notes + ' | ' : ''}[Offline Autorizado por ${adminName}]`;
@@ -9398,7 +10325,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           currentRate,
           safeCurrency,
           notesWithAudit,
-          pendingSale.client_operation_id || pendingSale.id,
+          effectiveOpId,
           nowIso
         );
         const saleId = sRes.lastInsertRowid;
@@ -9525,7 +10452,16 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         return { saleId, itemIds, productIds, invAuditIds, movId, accId, arId };
       });
 
-      const txExecution = txResult();
+      const txExecution = txResult() as any;
+
+      if (txExecution.isDuplicate) {
+        return res.json({
+          success: true,
+          saleId: txExecution.saleId,
+          isDuplicate: true,
+          message: `Esta venta ya había sido registrada previamente como Ticket #${txExecution.saleId}. Se descartó el duplicado automáticamente.`
+        });
+      }
 
       // Outside TX: system audit logs
       for (const payload of auditPayloads) {
@@ -9568,6 +10504,18 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       if (txExecution.arId) syncMap.accounts_receivable = [txExecution.arId];
 
       syncAfterWrite(syncMap);
+
+      notifyAdminsOfSaleEvent({
+        eventType: 'venta_offline',
+        referenceId: txExecution.saleId,
+        amount: safeTotal,
+        currency: safeCurrency,
+        exchangeRate: currentRate,
+        paymentMethod: paymentMethod || 'Efectivo',
+        sellerUsername: pendingSale.user_name || adminName,
+        sellerId: sellerId,
+        clientName: pendingSale.client_name || null
+      }).catch(() => {});
 
       res.json({
         success: true,
@@ -12064,6 +13012,50 @@ DIRECTIVAS CRÍTICAS:
         selfHealCashAccounts(); // heals everyone
       }
 
+      const rateRow = db.prepare("SELECT value FROM settings WHERE key = 'exchange_rate'").get() as any;
+      const currentRate = rateRow ? parseFloat(rateRow.value) || 6.96 : 6.96;
+
+      const enrichAccountWithBreakdown = (acc: any) => {
+        if (!acc) return acc;
+        const pendingMovs = db.prepare(`
+          SELECT m.*, s.exchange_rate as sale_exchange_rate
+          FROM cash_movements m
+          LEFT JOIN sales s ON m.sale_id = s.id
+          WHERE m.seller_id = ? AND m.status = 'pendiente'
+        `).all(acc.seller_id) as any[];
+
+        let pendingCashBs = 0;
+        let pendingQrBs = 0;
+        let pendingOtherBs = 0;
+        let pendingTicketsCount = 0;
+
+        for (const m of pendingMovs) {
+          const rate = Number(m.sale_exchange_rate || currentRate) || 6.96;
+          const rawAmt = Number(m.amount) || 0;
+          const signedAmt = (m.type === 'devolucion' || m.type === 'retiro_manual') && rawAmt > 0 ? -rawAmt : rawAmt;
+          const amtInBs = m.currency === 'USD' ? (signedAmt * rate) : signedAmt;
+          const methodLower = String(m.payment_method || 'Efectivo').toLowerCase();
+
+          if (m.type === 'venta') pendingTicketsCount++;
+
+          if (methodLower === 'efectivo') {
+            pendingCashBs += amtInBs;
+          } else if (methodLower === 'transferencia' || methodLower === 'qr') {
+            pendingQrBs += amtInBs;
+          } else {
+            pendingOtherBs += amtInBs;
+          }
+        }
+
+        return {
+          ...acc,
+          pending_cash_bs: Math.round(pendingCashBs * 100) / 100,
+          pending_qr_bs: Math.round(pendingQrBs * 100) / 100,
+          pending_other_bs: Math.round(pendingOtherBs * 100) / 100,
+          pending_tickets_count: pendingTicketsCount
+        };
+      };
+
       if (!isAdmin) {
         // A seller can only see their own cash account!
         const account = db.prepare('SELECT * FROM cash_accounts WHERE seller_id = ?').get(userId);
@@ -12073,18 +13065,17 @@ DIRECTIVAS CRÍTICAS:
           const sName = sNameRow?.username || 'Cajero';
           db.prepare('INSERT OR IGNORE INTO cash_accounts (seller_id, seller_username, current_balance) VALUES (?, ?, 0.0)').run(userId, sName);
           const fresh = db.prepare('SELECT * FROM cash_accounts WHERE seller_id = ?').get(userId);
-          return res.json([fresh]);
+          return res.json([enrichAccountWithBreakdown(fresh)]);
         }
-        return res.json([account]);
+        return res.json([enrichAccountWithBreakdown(account)]);
       } else {
         // Admin or owner can see all seller cash accounts
-        // Let's ensure all users have cash accounts
-        const sellers = db.prepare("SELECT id, username FROM users WHERE role = 'vendedor' OR role = 'admin'").all() as any[];
+        const sellers = db.prepare("SELECT id, username FROM users WHERE role IN ('vendedor', 'admin', 'propietario', 'administrador')").all() as any[];
         for (const s of sellers) {
           db.prepare('INSERT OR IGNORE INTO cash_accounts (seller_id, seller_username, current_balance) VALUES (?, ?, 0.0)').run(s.id, s.username);
         }
-        const accounts = db.prepare('SELECT * FROM cash_accounts').all();
-        res.json(accounts);
+        const accounts = db.prepare('SELECT * FROM cash_accounts').all() as any[];
+        res.json(accounts.map(enrichAccountWithBreakdown));
       }
     } catch (e: any) {
       res.status(500).json({ error: e.message });

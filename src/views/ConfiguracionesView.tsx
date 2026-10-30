@@ -1,11 +1,20 @@
 import { backupDatabaseToDrive } from "../utils/driveBackup";
 import React, { useState, useEffect } from 'react';
 import { useAppContext } from '../context/AppContext';
-import { Settings, TrendingUp, History, ShieldAlert, Lock, Save, Cloud, Database, Download, Upload, FileJson, RefreshCw, DollarSign, Info, ShieldCheck, Receipt, Eye, Sliders, Type, RotateCcw, Printer, Users, Star, Trash2, Search, CloudUpload, CloudDownload, Activity, Smartphone, Sparkles, HardDrive, Archive, X } from 'lucide-react';
+import { Settings, TrendingUp, History, ShieldAlert, Lock, Save, Cloud, Database, Download, Upload, FileJson, RefreshCw, DollarSign, Info, ShieldCheck, Receipt, Eye, Sliders, Type, RotateCcw, Printer, Users, Star, Trash2, Search, CloudUpload, CloudDownload, Activity, Smartphone, Sparkles, HardDrive, Archive, X, Bell, BellRing, BellOff, Send } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import RgbCustomizerPanel from '../components/RgbCustomizerPanel';
 import { saveOfflineAction, clearAllOfflineStorage, cacheAppState } from '../utils/offlineStorage';
 import { EmptyState, TableSkeleton } from '../components/UIStateFeedback';
+import { acknowledgeServerVersion } from '../utils/versionCheck';
+import {
+    getSalesPushStatus,
+    subscribeToSalesPush,
+    unsubscribeFromSalesPush,
+    triggerTestSalesPush,
+    isOwnerOrAdminForPush,
+    type PushStatusSummary
+} from '../utils/pushNotifications';
 
 interface AuditLog {
     id: number;
@@ -54,9 +63,26 @@ export default function ConfiguracionesView() {
     const [isUpdatingPoints, setIsUpdatingPoints] = useState(false);
 
     // Dynamic Server Version and Push Controls
-    const [pushVersion, setPushVersion] = useState("2.3.0");
+    const [pushVersion, setPushVersion] = useState("2.4.2");
     const [pushNotes, setPushNotes] = useState("");
     const [isPushingUpdate, setIsPushingUpdate] = useState(false);
+
+    // PWA Web Push Notification states (Owner & Admin)
+    const [pushStatus, setPushStatus] = useState<PushStatusSummary>({
+        supported: false,
+        permission: 'default',
+        subscribed: false,
+        eligibleRole: false,
+        serverCount: 0
+    });
+    const [isTogglingPush, setIsTogglingPush] = useState(false);
+    const [isSendingTestPush, setIsSendingTestPush] = useState(false);
+
+    const loadPushStatus = async () => {
+        if (!user) return;
+        const status = await getSalesPushStatus(user);
+        setPushStatus(status);
+    };
 
     const fetchAppVersion = async () => {
         try {
@@ -76,7 +102,8 @@ export default function ConfiguracionesView() {
     useEffect(() => {
         fetchClients();
         fetchAppVersion();
-    }, []);
+        loadPushStatus();
+    }, [user?.id, user?.role]);
 
     useEffect(() => {
         if (receiptTemplate) {
@@ -341,7 +368,7 @@ export default function ConfiguracionesView() {
     const [resetConfirmInput, setResetConfirmInput] = useState<string>("");
     const [isResettingDb, setIsResettingDb] = useState<boolean>(false);
 
-    const isAdmin = user?.role === 'admin';
+    const isAdmin = user?.role === 'admin' || user?.role === 'propietario';
 
     const getAuthHeaders = (extra: Record<string, string> = {}) => {
         const token = localStorage.getItem('auth_token');
@@ -781,17 +808,19 @@ export default function ConfiguracionesView() {
                 }
             }
 
-            // 4. Force Service Workers to unregister
+            // 4. Refresh Service Workers without unregistering so Web Push subscriptions remain intact
             await new Promise(resolve => setTimeout(resolve, 400));
             setCacheCleanStep("Reindexando conexiones y recargando terminal...");
             if ('serviceWorker' in navigator) {
                 try {
                     const registrations = await navigator.serviceWorker.getRegistrations();
                     for (const registration of registrations) {
-                        await registration.unregister();
+                        registration.active?.postMessage({ type: 'CLEAR_CACHES' });
+                        registration.waiting?.postMessage({ type: 'SKIP_WAITING' });
+                        await registration.update().catch(() => {});
                     }
                 } catch (swErr) {
-                    console.error("Service worker unregister failed:", swErr);
+                    console.error("Service worker refresh failed:", swErr);
                 }
             }
 
@@ -909,7 +938,9 @@ export default function ConfiguracionesView() {
                 body: JSON.stringify({ version: pushVersion, release_notes: pushNotes })
             });
             if (res.ok) {
-                showNotification?.(`✓ ¡Actualización v${pushVersion} empujada de forma exitosa en tiempo real a todos los dispositivos!`, "success");
+                acknowledgeServerVersion(pushVersion);
+                checkForPwaUpdates?.(true);
+                showNotification?.(`✓ ¡Actualización v${pushVersion} empujada y sincronizada en tiempo real a todos los dispositivos!`, "success");
             } else {
                 const data = await res.json();
                 showNotification?.(`Error al empujar actualización: ${data.error}`, "error");
@@ -918,6 +949,33 @@ export default function ConfiguracionesView() {
              showNotification?.(`Error de conexión: ${e.message}`, "error");
         } finally {
              setIsPushingUpdate(false);
+        }
+    };
+
+    const handleToggleSalesPush = async () => {
+        if (!user) return;
+        setIsTogglingPush(true);
+        try {
+            if (pushStatus.subscribed) {
+                const res = await unsubscribeFromSalesPush();
+                showNotification?.(res.message, res.ok ? "info" : "error");
+            } else {
+                const res = await subscribeToSalesPush(user);
+                showNotification?.(res.message, res.ok ? "success" : "error");
+            }
+            await loadPushStatus();
+        } finally {
+            setIsTogglingPush(false);
+        }
+    };
+
+    const handleSendTestSalesPush = async () => {
+        setIsSendingTestPush(true);
+        try {
+            const res = await triggerTestSalesPush();
+            showNotification?.(res.message, res.ok ? "success" : "error");
+        } finally {
+            setIsSendingTestPush(false);
         }
     };
 
@@ -2182,6 +2240,105 @@ export default function ConfiguracionesView() {
                     </div>
                 </div>
             </div>
+
+            {/* PWA Real-Time Sales Push Notifications Module (Owner & Admin Only) */}
+            {isOwnerOrAdminForPush(user) && (
+                <div className="bg-white dark:bg-[#0c111e] rounded-3xl border border-indigo-500/30 dark:border-indigo-500/20 p-6 flex flex-col gap-5 animate-in fade-in slide-in-from-bottom-3 duration-300">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 dark:border-slate-850/50 pb-4">
+                        <div className="flex items-center gap-3">
+                            <div className={`p-2.5 rounded-xl ${pushStatus.subscribed ? 'bg-emerald-500/15 text-emerald-500' : 'bg-indigo-500/10 text-indigo-500'}`}>
+                                {pushStatus.subscribed ? <BellRing size={20} className="animate-pulse" /> : <Bell size={20} />}
+                            </div>
+                            <div>
+                                <div className="flex items-center gap-2 flex-wrap">
+                                    <h2 className="text-sm font-extrabold text-slate-855 dark:text-white uppercase tracking-wider">
+                                        Notificaciones Push de Ventas en PWA
+                                    </h2>
+                                    <span className={`px-2 py-0.5 rounded-md text-[9.5px] font-black uppercase tracking-wider ${
+                                        pushStatus.subscribed
+                                            ? 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20'
+                                            : 'bg-slate-500/10 text-slate-500 border border-slate-500/20'
+                                    }`}>
+                                        {pushStatus.subscribed ? 'ACTIVO EN ESTE DISPOSITIVO' : 'INACTIVO EN ESTE DISPOSITIVO'}
+                                    </span>
+                                </div>
+                                <p className="text-[11px] text-slate-400 mt-1 font-semibold">
+                                    Exclusivo para Propietario y Administradores: recibe alertas nativas instantáneas en tu celular o PC con monto en Bs. y USD, método de pago y vendedor para ventas POS, pedidos cobrados, abonos/liquidaciones CxC y ventas offline aprobadas.
+                                </p>
+                            </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                            <button
+                                type="button"
+                                onClick={handleToggleSalesPush}
+                                disabled={isTogglingPush || !pushStatus.supported}
+                                className={`px-4 py-2.5 rounded-xl font-black text-[11px] uppercase tracking-wider flex items-center gap-2 transition-all cursor-pointer disabled:opacity-50 ${
+                                    pushStatus.subscribed
+                                        ? 'bg-rose-500/10 hover:bg-rose-500/20 text-rose-500 border border-rose-500/25'
+                                        : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/20'
+                                }`}
+                            >
+                                {pushStatus.subscribed ? <BellOff size={15} /> : <BellRing size={15} />}
+                                {isTogglingPush
+                                    ? 'Procesando...'
+                                    : pushStatus.subscribed
+                                        ? 'Desactivar en este equipo'
+                                        : 'Activar Notificaciones Push'}
+                            </button>
+
+                            {pushStatus.subscribed && (
+                                <button
+                                    type="button"
+                                    onClick={handleSendTestSalesPush}
+                                    disabled={isSendingTestPush}
+                                    className="px-3.5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-black text-[11px] uppercase tracking-wider flex items-center gap-1.5 shadow-md shadow-indigo-600/20 transition-all cursor-pointer disabled:opacity-50"
+                                    title="Enviar una notificación push de prueba de venta"
+                                >
+                                    <Send size={14} />
+                                    {isSendingTestPush ? 'Enviando...' : 'Probar Push'}
+                                </button>
+                            )}
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                        <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200/60 dark:border-slate-800/60">
+                            <span className="text-[9.5px] font-black uppercase tracking-wider text-slate-400 block">Estado del Permiso</span>
+                            <span className="text-xs font-extrabold text-slate-800 dark:text-white mt-1 block">
+                                {!pushStatus.supported
+                                    ? 'No soportado en este navegador'
+                                    : pushStatus.permission === 'granted'
+                                        ? 'Concedido (Permitido)'
+                                        : pushStatus.permission === 'denied'
+                                            ? 'Bloqueado en navegador'
+                                            : 'Pendiente de activar'}
+                            </span>
+                        </div>
+
+                        <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200/60 dark:border-slate-800/60">
+                            <span className="text-[9.5px] font-black uppercase tracking-wider text-slate-400 block">Eventos Monitoreados</span>
+                            <span className="text-xs font-extrabold text-slate-800 dark:text-white mt-1 block">
+                                POS, Pedidos, Abonos/Liquidaciones CxC
+                            </span>
+                        </div>
+
+                        <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200/60 dark:border-slate-800/60">
+                            <span className="text-[9.5px] font-black uppercase tracking-wider text-slate-400 block">Detalle del Mensaje</span>
+                            <span className="text-xs font-extrabold text-emerald-600 dark:text-emerald-400 mt-1 block">
+                                Monto Bs. + USD • Pago • Vendedor
+                            </span>
+                        </div>
+
+                        <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200/60 dark:border-slate-800/60">
+                            <span className="text-[9.5px] font-black uppercase tracking-wider text-slate-400 block">Tus Dispositivos Suscritos</span>
+                            <span className="text-xs font-extrabold text-indigo-600 dark:text-indigo-400 mt-1 block">
+                                {pushStatus.serverCount} {pushStatus.serverCount === 1 ? 'dispositivo activo' : 'dispositivos activos'}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* PWA Installation Module with Dynamic Detector */}
             {!isPwaInstalled ? (

@@ -11,6 +11,7 @@ import LowStockNotificationSystem from '../components/LowStockNotificationSystem
 import { useElasticScroll } from '../utils/touchScroll';
 import PhysicalCountManager from '../components/PhysicalCountManager';
 import { TableSkeleton, EmptyState } from '../components/UIStateFeedback';
+import { jsPDF } from 'jspdf';
 
 
 // --- Optimized Search Input with Live Suggestions ---
@@ -349,21 +350,182 @@ export default function Inventory() {
     const [showStockHistoryModal, setShowStockHistoryModal] = useState(false);
     const [stockHistoryProduct, setStockHistoryProduct] = useState<any | null>(null);
     const [modalAuditHistory, setModalAuditHistory] = useState<any[]>([]);
+    const [modalKardexKpis, setModalKardexKpis] = useState<any | null>(null);
     const [loadingModalHistory, setLoadingModalHistory] = useState(false);
     const [selectedModalHistoryTab, setSelectedModalHistoryTab] = useState<'todos' | 'ingresos' | 'salidas' | 'precios' | 'cantidades'>('todos');
+
+    // Intelligent Restock & 30d Rotation Sub-tab States
+    const [inventorySubTab, setInventorySubTab] = useState<'catalogo' | 'reposicion'>('catalogo');
+    const [restockData, setRestockData] = useState<{ summary: any; items: any[] } | null>(null);
+    const [loadingRestock, setLoadingRestock] = useState(false);
+    const [restockFilter, setRestockFilter] = useState<'todos' | 'agotado' | 'critico' | 'preventivo'>('todos');
+    const [restockPhoneInput, setRestockPhoneInput] = useState('');
+
+    const loadRestockAlerts = async () => {
+        setLoadingRestock(true);
+        try {
+            const res = await fetch('/api/inventory/restock-alerts');
+            if (res.ok) {
+                const data = await res.json();
+                setRestockData(data);
+            }
+        } catch (err) {
+            console.error("Error fetching restock alerts:", err);
+        } finally {
+            setLoadingRestock(false);
+        }
+    };
+
+    useEffect(() => {
+        if (inventorySubTab === 'reposicion') {
+            loadRestockAlerts();
+        }
+    }, [inventorySubTab, products.length]);
+
+    const handleDownloadKardexCSV = () => {
+        if (!stockHistoryProduct || modalAuditHistory.length === 0) return;
+        const headers = ['Fecha', 'Tipo', 'Referencia', 'Stock Antes', 'Cambio', 'Stock Despues', 'Precio/Costo USD', 'Usuario', 'Detalle'];
+        const rows = modalAuditHistory.map((log: any) => [
+            new Date(log.created_at).toLocaleString('es-BO'),
+            log.type || 'movimiento',
+            log.reference || '-',
+            log.quantity_before ?? '-',
+            log.quantity_changed ?? (log.quantity ?? 0),
+            log.quantity_after ?? '-',
+            log.price !== undefined && log.price !== null ? Number(log.price).toFixed(2) : '-',
+            log.username || 'admin',
+            String(log.notes || '').replace(/"/g, '""')
+        ]);
+        const csvContent = '\uFEFF' + [headers.join(','), ...rows.map(r => r.map(v => `"${v}"`).join(','))].join('\n');
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `Kardex_${stockHistoryProduct.sku || stockHistoryProduct.id}_${new Date().toISOString().split('T')[0]}.csv`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+        showNotification(`✓ Kardex CSV de "${stockHistoryProduct.name}" descargado.`, "success");
+    };
+
+    const handleExportRestockPDF = (itemsToExport: any[]) => {
+        if (!itemsToExport || itemsToExport.length === 0) return;
+        const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+        const rate = Number(exchangeRate) || 6.96;
+
+        doc.setFillColor(15, 23, 42);
+        doc.rect(0, 0, 210, 26, 'F');
+        doc.setTextColor(255, 255, 255);
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(13);
+        doc.text("GTR POS - ORDEN SUGERIDA DE REPOSICIÓN DE STOCK", 14, 12);
+        doc.setFontSize(8.5);
+        doc.setFont("helvetica", "normal");
+        doc.text(`Generado: ${new Date().toLocaleString('es-BO')}  |  T.C.: Bs. ${rate.toFixed(2)}  |  Ítems a reponer: ${itemsToExport.length}`, 14, 19);
+
+        let y = 34;
+        doc.setFillColor(241, 245, 249);
+        doc.rect(12, y - 4.5, 186, 7, 'F');
+        doc.setTextColor(30, 41, 59);
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(7.5);
+        doc.text("SKU", 14, y);
+        doc.text("PRODUCTO", 38, y);
+        doc.text("STOCK", 118, y, { align: 'right' });
+        doc.text("VENTAS 30D", 140, y, { align: 'right' });
+        doc.text("PEDIR", 162, y, { align: 'right' });
+        doc.text("COSTO EST. (Bs.)", 196, y, { align: 'right' });
+
+        y += 6;
+        doc.setFont("helvetica", "normal");
+        let totalOrderBs = 0;
+
+        itemsToExport.forEach((it: any, idx: number) => {
+            if (y > 272) {
+                doc.addPage();
+                y = 20;
+            }
+            if (idx % 2 === 1) {
+                doc.setFillColor(248, 250, 252);
+                doc.rect(12, y - 4, 186, 6, 'F');
+            }
+            const costBs = Number(it.estimated_order_cost_bob || (Number(it.suggested_order_qty || 0) * Number(it.price_cost || 0) * rate));
+            totalOrderBs += costBs;
+
+            doc.setTextColor(51, 65, 85);
+            doc.setFont("courier", "bold");
+            doc.text(String(it.sku || `#${it.id}`).slice(0, 12), 14, y);
+            doc.setFont("helvetica", "normal");
+            doc.text(String(it.name || '').slice(0, 42), 38, y);
+            doc.text(`${it.stock} / min ${it.stock_alarm}`, 118, y, { align: 'right' });
+            doc.text(`${it.units_sold_30d} u.`, 140, y, { align: 'right' });
+            doc.setFont("helvetica", "bold");
+            doc.text(`+${it.suggested_order_qty} u.`, 162, y, { align: 'right' });
+            doc.text(`Bs. ${costBs.toFixed(2)}`, 196, y, { align: 'right' });
+            y += 6;
+        });
+
+        y += 4;
+        doc.setDrawColor(203, 213, 225);
+        doc.line(12, y, 198, y);
+        y += 6;
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(9.5);
+        doc.setTextColor(15, 23, 42);
+        doc.text(`INVERSIÓN ESTIMADA DE REPOSICIÓN: Bs. ${totalOrderBs.toFixed(2)} ($${(totalOrderBs / rate).toFixed(2)} USD)`, 196, y, { align: 'right' });
+
+        doc.save(`Orden_Reposicion_GTR_POS_${new Date().toISOString().split('T')[0]}.pdf`);
+        showNotification("✓ Orden de reposición PDF descargada.", "success");
+    };
+
+    const handleSendRestockWhatsApp = (itemsToSend: any[]) => {
+        if (!itemsToSend || itemsToSend.length === 0) return;
+        const topItems = itemsToSend.slice(0, 30);
+        const lines = topItems.map((it: any) =>
+            `• *${it.suggested_order_qty} u.* - ${it.name} [${it.sku || `#${it.id}`}] (Stock actual: ${it.stock})`
+        ).join('\n');
+        const moreText = itemsToSend.length > 30 ? `\n_...y ${itemsToSend.length - 30} artículos adicionales en PDF._` : '';
+        const msg = `*GTR POS - SOLICITUD DE REPOSICIÓN DE INVENTARIO*\n` +
+                    `📅 *Fecha:* ${new Date().toLocaleDateString('es-BO')}\n` +
+                    `📦 *Artículos requeridos:* ${itemsToSend.length}\n\n` +
+                    `*DETALLE DE PEDIDO SUGERIDO:*\n${lines}${moreText}\n\n` +
+                    `Por favor confirmar disponibilidad y cotización.`;
+        const digits = String(restockPhoneInput || '').replace(/\D/g, '');
+        const normalizedPhone = digits.length === 8 ? `591${digits}` : digits;
+        const url = normalizedPhone
+            ? `https://wa.me/${normalizedPhone}?text=${encodeURIComponent(msg)}`
+            : `https://wa.me/?text=${encodeURIComponent(msg)}`;
+        const link = document.createElement('a');
+        link.href = url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        showNotification("✓ Abriendo WhatsApp con la orden de reposición.", "success");
+    };
 
     const handleOpenStockHistory = async (p: any) => {
         setStockHistoryProduct(p);
         setShowStockHistoryModal(true);
         setLoadingModalHistory(true);
+        setModalKardexKpis(null);
         setSelectedModalHistoryTab('todos');
         try {
-            const res = await fetch(`/api/products/${p.id}/audit-history`);
+            const [res, kardexRes] = await Promise.all([
+                fetch(`/api/products/${p.id}/audit-history`),
+                fetch(`/api/products/${p.id}/kardex`)
+            ]);
             if (res.ok) {
                 const data = await res.json();
                 setModalAuditHistory(data);
             } else {
                 setModalAuditHistory([]);
+            }
+            if (kardexRes.ok) {
+                const kData = await kardexRes.json();
+                setModalKardexKpis(kData.kpis || null);
             }
         } catch (err) {
             console.error("Error fetching stock history for modal:", err);
@@ -1066,7 +1228,7 @@ export default function Inventory() {
     };
 
     const downloadInventoryCSV = () => {
-        if (!user || user.role !== 'admin') {
+        if (!user || (user.role !== 'admin' && user.role !== 'propietario')) {
             showNotification("Acceso denegado: Solo los administradores pueden descargar reportes de inventario.", "error");
             return;
         }
@@ -1800,7 +1962,7 @@ export default function Inventory() {
                         >
                             {inventoryLock.activeCount?.status === 'completado' ? 'Revisar Variaciones y Aprobar' : 'Gestionar Control'}
                         </button>
-                        {user?.role === 'admin' && (
+                        {(user?.role === 'admin' || user?.role === 'propietario') && (
                             <button
                                 type="button"
                                 onClick={handleQuickUnlockInventory}
@@ -1844,7 +2006,7 @@ export default function Inventory() {
                                 >
                                     + Registrar Artículo
                                 </button>
-                                 {user?.role === 'admin' && (
+                                 {(user?.role === 'admin' || user?.role === 'propietario') && (
                                     <>
                                         <button 
                                             onClick={() => {
@@ -1923,11 +2085,11 @@ export default function Inventory() {
                                     <ClipboardCheck size={14} />
                                     <span>Control Físico (Checklist)</span>
                                 </button>
-                                {user?.role === 'admin' && (
+                                {(user?.role === 'admin' || user?.role === 'propietario') && (
                                     <button 
                                         onClick={downloadInventoryCSV}
                                         className="py-2.5 px-4.5 bg-emerald-600 hover:bg-emerald-500 hover:scale-[1.01] active:scale-95 text-white font-extrabold text-xs rounded-2xl shadow-md shadow-emerald-600/10 border border-emerald-600 transition-all cursor-pointer flex items-center gap-1.5"
-                                        title="Descargar Reporte de Inventario en formato CSV (Solo Administradores)"
+                                        title="Descargar Reporte de Inventario en formato CSV (Administradores y Propietario)"
                                     >
                                         <Download size={14} />
                                         <span>Reporte CSV</span>
@@ -1941,6 +2103,228 @@ export default function Inventory() {
 
             {/* Low Stock Notification Monitoring System for Admin */}
             <LowStockNotificationSystem />
+
+            {/* Sub-navigation Switcher: Catálogo vs Alertas y Reposición Inteligente (30d) */}
+            <div className="flex flex-wrap items-center justify-between gap-2.5 bg-white dark:bg-[#0c111e] p-2.5 rounded-2xl border border-slate-200/60 dark:border-slate-850/60 shadow-2xs">
+                <div className="flex items-center gap-1.5 bg-slate-100 dark:bg-[#070b13] p-1 rounded-xl border border-slate-200/50 dark:border-slate-800/80">
+                    <button
+                        type="button"
+                        onClick={() => setInventorySubTab('catalogo')}
+                        className={`px-3.5 py-1.5 rounded-lg text-[10.5px] font-black uppercase tracking-wider transition cursor-pointer flex items-center gap-1.5 ${
+                            inventorySubTab === 'catalogo'
+                                ? 'bg-indigo-600 text-white shadow-xs'
+                                : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+                        }`}
+                    >
+                        <Layers size={13} />
+                        <span>Catálogo y Existencias ({products.length})</span>
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setInventorySubTab('reposicion')}
+                        className={`px-3.5 py-1.5 rounded-lg text-[10.5px] font-black uppercase tracking-wider transition cursor-pointer flex items-center gap-1.5 ${
+                            inventorySubTab === 'reposicion'
+                                ? 'bg-amber-600 text-white shadow-xs'
+                                : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+                        }`}
+                    >
+                        <AlertTriangle size={13} className={inventorySubTab === 'reposicion' ? 'text-white' : 'text-amber-500'} />
+                        <span>Alertas y Reposición 30d ({products.filter(p => p.stock <= (p.stock_alarm || 5)).length})</span>
+                    </button>
+                </div>
+
+                {inventorySubTab === 'reposicion' && restockData && (
+                    <div className="flex flex-wrap items-center gap-2">
+                        <input
+                            type="tel"
+                            value={restockPhoneInput}
+                            onChange={(e) => setRestockPhoneInput(e.target.value)}
+                            placeholder="Celular proveedor (Opcional)"
+                            className="px-2.5 py-1.5 rounded-xl bg-slate-50 dark:bg-[#070b13] border border-slate-200 dark:border-slate-800 text-[11px] font-mono font-bold text-slate-800 dark:text-white w-44 focus:outline-none focus:border-emerald-500"
+                        />
+                        <button
+                            type="button"
+                            onClick={() => {
+                                const list = (restockData.items || []).filter((it: any) => restockFilter === 'todos' || it.urgency === restockFilter);
+                                handleExportRestockPDF(list);
+                            }}
+                            className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-[10px] font-black uppercase tracking-wider flex items-center gap-1.5 cursor-pointer transition"
+                        >
+                            <Download size={12} />
+                            <span>Orden PDF</span>
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => {
+                                const list = (restockData.items || []).filter((it: any) => restockFilter === 'todos' || it.urgency === restockFilter);
+                                handleSendRestockWhatsApp(list);
+                            }}
+                            className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] font-black uppercase tracking-wider flex items-center gap-1.5 cursor-pointer transition shadow-xs"
+                        >
+                            <ArrowUpRight size={12} />
+                            <span>WhatsApp Proveedor</span>
+                        </button>
+                    </div>
+                )}
+            </div>
+
+            {/* SUB-TAB: ALERTAS Y REPOSICIÓN INTELIGENTE (ROTACIÓN 30 DÍAS) */}
+            {inventorySubTab === 'reposicion' && (
+                <div className="bg-white dark:bg-[#0c111e] p-4 sm:p-5 rounded-3xl border border-amber-500/30 dark:border-amber-900/40 shadow-sm flex flex-col gap-4 animate-in fade-in duration-150">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                        <div className="p-3 rounded-2xl bg-rose-500/5 border border-rose-500/20 flex flex-col">
+                            <span className="text-[9px] font-black uppercase text-rose-500 tracking-wider">Agotados (Stock 0)</span>
+                            <span className="text-base font-black font-mono tabular-nums text-rose-600 dark:text-rose-400 mt-0.5">
+                                {restockData?.summary?.outOfStockCount ?? 0} SKU
+                            </span>
+                        </div>
+                        <div className="p-3 rounded-2xl bg-amber-500/5 border border-amber-500/20 flex flex-col">
+                            <span className="text-[9px] font-black uppercase text-amber-500 tracking-wider">Stock Crítico</span>
+                            <span className="text-base font-black font-mono tabular-nums text-amber-600 dark:text-amber-400 mt-0.5">
+                                {restockData?.summary?.criticalCount ?? 0} SKU
+                            </span>
+                        </div>
+                        <div className="p-3 rounded-2xl bg-blue-500/5 border border-blue-500/20 flex flex-col">
+                            <span className="text-[9px] font-black uppercase text-blue-500 tracking-wider">Preventivo (Rotación 30d)</span>
+                            <span className="text-base font-black font-mono tabular-nums text-blue-600 dark:text-blue-400 mt-0.5">
+                                {restockData?.summary?.preventiveCount ?? 0} SKU
+                            </span>
+                        </div>
+                        <div className="p-3 rounded-2xl bg-emerald-500/5 border border-emerald-500/20 flex flex-col">
+                            <span className="text-[9px] font-black uppercase text-emerald-600 dark:text-emerald-400 tracking-wider">Inversión Sugerida</span>
+                            <span className="text-sm sm:text-base font-black font-mono tabular-nums text-emerald-600 dark:text-emerald-400 mt-0.5">
+                                Bs. {Number(restockData?.summary?.estimatedRestockCostBob || 0).toLocaleString('es-BO', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            </span>
+                        </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap gap-1.5">
+                            {[
+                                { id: 'todos', label: `Todos (${restockData?.items?.length || 0})` },
+                                { id: 'agotado', label: `Agotados (${restockData?.summary?.outOfStockCount || 0})` },
+                                { id: 'critico', label: `Críticos (${restockData?.summary?.criticalCount || 0})` },
+                                { id: 'preventivo', label: `Alta Rotación 30d (${restockData?.summary?.preventiveCount || 0})` }
+                            ].map(tab => (
+                                <button
+                                    key={tab.id}
+                                    type="button"
+                                    onClick={() => setRestockFilter(tab.id as any)}
+                                    className={`px-3 py-1 rounded-xl text-[9.5px] font-extrabold uppercase tracking-wider cursor-pointer transition border ${
+                                        restockFilter === tab.id
+                                            ? 'bg-indigo-600 text-white border-indigo-500'
+                                            : 'bg-slate-50 dark:bg-[#070b13] text-slate-500 border-slate-200 dark:border-slate-800 hover:bg-slate-100'
+                                    }`}
+                                >
+                                    {tab.label}
+                                </button>
+                            ))}
+                        </div>
+                        <button
+                            type="button"
+                            onClick={loadRestockAlerts}
+                            disabled={loadingRestock}
+                            className="px-3 py-1 rounded-xl bg-slate-100 dark:bg-slate-850 text-slate-600 dark:text-slate-300 text-[9.5px] font-bold uppercase flex items-center gap-1 cursor-pointer"
+                        >
+                            <RefreshCw size={11} className={loadingRestock ? 'animate-spin' : ''} />
+                            <span>Recalcular Rotación</span>
+                        </button>
+                    </div>
+
+                    {loadingRestock ? (
+                        <div className="py-10 text-center text-xs font-bold text-slate-400 flex items-center justify-center gap-2">
+                            <Loader2 size={16} className="animate-spin text-indigo-500" />
+                            <span>Analizando rotación de los últimos 30 días...</span>
+                        </div>
+                    ) : (
+                        <div className="overflow-x-auto max-h-[420px] rounded-2xl border border-slate-150 dark:border-slate-850">
+                            <table className="w-full text-left border-collapse">
+                                <thead className="bg-slate-50 dark:bg-[#070b13] sticky top-0 z-10 text-[9px] font-black uppercase tracking-wider text-slate-400 border-b border-slate-200/70 dark:border-slate-850">
+                                    <tr>
+                                        <th className="p-2.5 pl-3">Producto / SKU</th>
+                                        <th className="p-2.5 text-center">Estado</th>
+                                        <th className="p-2.5 text-right">Stock / Alarma</th>
+                                        <th className="p-2.5 text-right">Ventas 30d</th>
+                                        <th className="p-2.5 text-right">Cobertura</th>
+                                        <th className="p-2.5 text-right">Sugerido Pedir</th>
+                                        <th className="p-2.5 text-center pr-3">Acciones</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-100 dark:divide-slate-850/60 text-[11px] font-bold tabular-nums">
+                                    {((restockData?.items || []).filter((it: any) => restockFilter === 'todos' || it.urgency === restockFilter)).map((item: any) => (
+                                        <tr key={item.id} className="hover:bg-slate-50/80 dark:hover:bg-slate-900/40 transition">
+                                            <td className="p-2.5 pl-3">
+                                                <div className="font-extrabold text-slate-800 dark:text-slate-100 uppercase truncate max-w-[220px]">{item.name}</div>
+                                                <div className="text-[9.5px] font-mono text-slate-400">{item.sku} • {item.category}</div>
+                                            </td>
+                                            <td className="p-2.5 text-center">
+                                                <span className={`px-2 py-0.5 rounded-md text-[8.5px] font-black uppercase ${
+                                                    item.urgency === 'agotado'
+                                                        ? 'bg-rose-500/15 text-rose-600 dark:text-rose-400'
+                                                        : item.urgency === 'critico'
+                                                        ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                                                        : 'bg-blue-500/15 text-blue-600 dark:text-blue-400'
+                                                }`}>
+                                                    {item.urgency}
+                                                </span>
+                                            </td>
+                                            <td className="p-2.5 text-right font-mono">
+                                                <span className={item.stock <= 0 ? 'text-rose-600 font-black' : 'text-slate-800 dark:text-slate-200 font-black'}>{item.stock}</span>
+                                                <span className="text-slate-400 text-[9.5px]"> / min {item.stock_alarm}</span>
+                                            </td>
+                                            <td className="p-2.5 text-right font-mono">
+                                                <span className="text-indigo-600 dark:text-indigo-400 font-black">{item.units_sold_30d} u.</span>
+                                                <span className="block text-[8.5px] text-slate-400">{item.daily_velocity}/día</span>
+                                            </td>
+                                            <td className="p-2.5 text-right font-mono">
+                                                {item.coverage_days !== null ? (
+                                                    <span className={item.coverage_days <= 7 ? 'text-rose-500 font-black' : 'text-slate-600 dark:text-slate-300'}>
+                                                        {item.coverage_days} días
+                                                    </span>
+                                                ) : (
+                                                    <span className="text-slate-400 text-[9.5px]">Sin rot.</span>
+                                                )}
+                                            </td>
+                                            <td className="p-2.5 text-right font-mono">
+                                                <span className="px-2 py-0.5 rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-black">
+                                                    +{item.suggested_order_qty} u.
+                                                </span>
+                                            </td>
+                                            <td className="p-2.5 pr-3 text-center">
+                                                <div className="flex items-center justify-center gap-1.5">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleOpenStockHistory(item)}
+                                                        className="px-2 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-200 text-[9px] font-black uppercase cursor-pointer"
+                                                        title="Ver Kardex y Rotación"
+                                                    >
+                                                        Kardex
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            const prod = products.find(p => p.id === item.id) || item;
+                                                            setSelectedProductForStockIn(prod);
+                                                            setStockInSearch(prod.name);
+                                                            setStockInQuantity(item.suggested_order_qty || 5);
+                                                            setActiveModalTab('form');
+                                                            setIsStockInModalOpen(true);
+                                                        }}
+                                                        className="px-2 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-[9px] font-black uppercase cursor-pointer"
+                                                        title="Registrar entrada rápida de stock"
+                                                    >
+                                                        + Reponer
+                                                    </button>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
+                </div>
+            )}
 
             {/* Main Warehouse Filters portion */}
             <div className="bg-white dark:bg-[#0c111e] p-5 rounded-3xl border border-slate-200/60 dark:border-slate-850/40 flex flex-col md:flex-row shadow-sm gap-4 items-center justify-between">
@@ -2010,7 +2394,26 @@ export default function Inventory() {
                             ))}
                         </div>
 
-                        <div className="flex items-center gap-2 shrink-0">
+                        <div className="flex flex-wrap items-center gap-2 shrink-0">
+                            {products.some(p => p.stock <= (p.stock_alarm || 5)) && (
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        const lowItems = products
+                                            .filter(p => p.stock <= (p.stock_alarm || 5))
+                                            .map(p => ({
+                                                ...p,
+                                                suggested_order_qty: Math.max(5, ((p.stock_alarm || 5) * 2) - p.stock)
+                                            }));
+                                        handleSendRestockWhatsApp(lowItems);
+                                    }}
+                                    className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-[9px] font-black uppercase tracking-wider transition-colors cursor-pointer flex items-center gap-1 shadow-2xs"
+                                    title="Enviar por WhatsApp la lista de productos agotados o con stock bajo para reposición"
+                                >
+                                    <ArrowUpRight size={11} />
+                                    <span>WhatsApp Reposición ({products.filter(p => p.stock <= (p.stock_alarm || 5)).length})</span>
+                                </button>
+                            )}
                             <span className="text-[10px] font-mono font-bold text-slate-400 dark:text-slate-500 bg-slate-100 dark:bg-slate-900 px-2 py-0.5 rounded-md">
                                 {finalFilteredProducts.length} de {products.length} productos
                             </span>
@@ -2082,7 +2485,7 @@ export default function Inventory() {
                                         >
                                             ✓ Sel.
                                         </button>
-                                        {user?.role === 'admin' && (
+                                        {(user?.role === 'admin' || user?.role === 'propietario') && (
                                             <button
                                                 type="button"
                                                 onClick={() => handleDeleteGroup(grp.id, grp.name)}
@@ -2095,7 +2498,7 @@ export default function Inventory() {
                                     </div>
                                 );
                             })}
-                            {user?.role === 'admin' && (
+                            {(user?.role === 'admin' || user?.role === 'propietario') && (
                                 <button
                                     type="button"
                                     onClick={() => {
@@ -2203,7 +2606,7 @@ export default function Inventory() {
                                                     </span>
                                                 </div>
                                             </div>
-                                            {user?.role === 'admin' && (
+                                            {(user?.role === 'admin' || user?.role === 'propietario') && (
                                                 <button
                                                     type="button"
                                                     onClick={handleQuickUnlockInventory}
@@ -3866,29 +4269,43 @@ export default function Inventory() {
                 <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-2.5 sm:p-4 overflow-y-auto">
                     <div className="bg-white dark:bg-[#0c111e] rounded-3xl border border-slate-200 dark:border-slate-850 w-full max-w-3xl overflow-hidden shadow-2xl animate-in zoom-in-95 duration-200 flex flex-col max-h-[92dvh] modal-landscape-compact">
                         {/* Header */}
-                        <div className="px-6 py-4 border-b border-slate-100 dark:border-slate-850 flex items-center justify-between bg-slate-50 dark:bg-[#070c14]/30">
-                            <div className="flex items-center gap-2">
-                                <History className="text-indigo-600 dark:text-indigo-400" size={18} />
-                                <span className="font-black text-xs uppercase tracking-wider text-slate-800 dark:text-slate-100">
-                                    Historial de Cambios de Stock: {stockHistoryProduct.name}
+                        <div className="px-6 py-4 border-b border-slate-100 dark:border-slate-850 flex items-center justify-between bg-slate-50 dark:bg-[#070c14]/30 gap-2">
+                            <div className="flex items-center gap-2 min-w-0">
+                                <History className="text-indigo-600 dark:text-indigo-400 shrink-0" size={18} />
+                                <span className="font-black text-xs uppercase tracking-wider text-slate-800 dark:text-slate-100 truncate">
+                                    Kárdex y Rotación de Stock: {stockHistoryProduct.name}
                                 </span>
                             </div>
-                            <button 
-                                onClick={() => {
-                                    setShowStockHistoryModal(false);
-                                    setStockHistoryProduct(null);
-                                    setModalAuditHistory([]);
-                                }}
-                                className="p-1.5 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer transition-all"
-                            >
-                                <X size={16} />
-                            </button>
+                            <div className="flex items-center gap-2 shrink-0">
+                                {modalAuditHistory.length > 0 && (
+                                    <button
+                                        type="button"
+                                        onClick={handleDownloadKardexCSV}
+                                        className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-[9.5px] font-black uppercase tracking-wider flex items-center gap-1.5 cursor-pointer transition shadow-2xs"
+                                        title="Exportar Kárdex de este producto en CSV"
+                                    >
+                                        <Download size={12} />
+                                        <span>Exportar CSV</span>
+                                    </button>
+                                )}
+                                <button 
+                                    onClick={() => {
+                                        setShowStockHistoryModal(false);
+                                        setStockHistoryProduct(null);
+                                        setModalAuditHistory([]);
+                                        setModalKardexKpis(null);
+                                    }}
+                                    className="p-1.5 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 cursor-pointer transition-all"
+                                >
+                                    <X size={16} />
+                                </button>
+                            </div>
                         </div>
 
                         {/* Body */}
                         <div className="p-6 overflow-y-auto flex-1 flex flex-col gap-5">
                             {/* Product Quick Info Card */}
-                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-slate-50 dark:bg-[#070c14]/40 border border-slate-150 dark:border-slate-850/60 p-4 rounded-2xl text-xs font-bold text-slate-600 dark:text-slate-350">
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-slate-50 dark:bg-[#070c14]/40 border border-slate-150 dark:border-slate-850/60 p-4 rounded-2xl text-xs font-bold text-slate-600 dark:text-slate-350 tabular-nums">
                                 <div className="flex flex-col gap-0.5">
                                     <span className="text-[8.5px] uppercase text-slate-400 tracking-wider font-semibold">Código SKU</span>
                                     <span className="text-slate-800 dark:text-slate-200 font-mono font-black">{stockHistoryProduct.sku}</span>
@@ -3906,6 +4323,36 @@ export default function Inventory() {
                                     <span className="text-emerald-600 dark:text-emerald-400 font-mono font-black">${(Number(stockHistoryProduct.price_unit) || 0).toFixed(2)} USD</span>
                                 </div>
                             </div>
+
+                            {/* 30-Day Kardex Rotation KPIs */}
+                            {modalKardexKpis && (
+                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 bg-indigo-50/40 dark:bg-indigo-950/15 border border-indigo-200/60 dark:border-indigo-900/40 p-3.5 rounded-2xl tabular-nums">
+                                    <div className="flex flex-col">
+                                        <span className="text-[8.5px] font-extrabold uppercase text-slate-400 tracking-wider">Salidas 30 Días</span>
+                                        <span className="text-xs font-black font-mono text-indigo-600 dark:text-indigo-400 mt-0.5">
+                                            {modalKardexKpis.unitsSold30d} pz ({modalKardexKpis.txCount30d} ventas)
+                                        </span>
+                                    </div>
+                                    <div className="flex flex-col">
+                                        <span className="text-[8.5px] font-extrabold uppercase text-slate-400 tracking-wider">Rotación Diaria</span>
+                                        <span className="text-xs font-black font-mono text-slate-800 dark:text-slate-200 mt-0.5">
+                                            {modalKardexKpis.dailyVelocity} pz / día
+                                        </span>
+                                    </div>
+                                    <div className="flex flex-col">
+                                        <span className="text-[8.5px] font-extrabold uppercase text-slate-400 tracking-wider">Días de Cobertura</span>
+                                        <span className={`text-xs font-black font-mono mt-0.5 ${modalKardexKpis.coverageDays !== null && modalKardexKpis.coverageDays <= 10 ? 'text-rose-500' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                                            {modalKardexKpis.coverageDays !== null ? `${modalKardexKpis.coverageDays} días` : 'Suficiente'}
+                                        </span>
+                                    </div>
+                                    <div className="flex flex-col">
+                                        <span className="text-[8.5px] font-extrabold uppercase text-slate-400 tracking-wider">Reposición Sugerida</span>
+                                        <span className="text-xs font-black font-mono text-amber-600 dark:text-amber-400 mt-0.5">
+                                            {modalKardexKpis.suggestedOrderQty > 0 ? `+${modalKardexKpis.suggestedOrderQty} unidades` : 'Stock Óptimo'}
+                                        </span>
+                                    </div>
+                                </div>
+                            )}
 
                             {/* Filters Tab Inside Modal */}
                             <div className="flex flex-wrap gap-1 bg-slate-100 dark:bg-slate-900/90 p-1 rounded-2xl border border-slate-200/50 dark:border-slate-800/80 w-fit">
@@ -4159,7 +4606,7 @@ export default function Inventory() {
                         <span className="text-xs font-extrabold uppercase tracking-wider">Seleccionados</span>
                     </div>
 
-                    {user?.role === 'admin' && (
+                    {(user?.role === 'admin' || user?.role === 'propietario') && (
                         <>
                             <button
                                 type="button"

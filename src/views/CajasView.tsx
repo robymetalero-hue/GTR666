@@ -15,6 +15,10 @@ interface CashAccount {
   current_balance: number;
   last_settlement_at: string | null;
   updated_at: string;
+  pending_cash_bs?: number;
+  pending_qr_bs?: number;
+  pending_other_bs?: number;
+  pending_tickets_count?: number;
 }
 
 interface CashMovement {
@@ -31,6 +35,8 @@ interface CashMovement {
   sale_total?: number;
   sale_discount?: number;
   sale_payment?: string;
+  sale_exchange_rate?: number;
+  exchange_rate?: number;
 }
 
 interface CashSettlement {
@@ -308,7 +314,7 @@ export default function CajasView() {
     }
   };
 
-  // Desglosar movimientos para Vendedor o Admin
+  // Desglosar movimientos para Vendedor o Admin (separando Efectivo físico vs QR bancario)
   const calculateMethodTotals = () => {
     const totals: Record<string, number> = {
       'Efectivo': 0,
@@ -323,8 +329,10 @@ export default function CajasView() {
     movements.forEach(m => {
       if (m.status === 'pendiente') {
         const method = m.payment_method || 'Efectivo';
-        const rate = Number(m.sale_exchange_rate || m.exchange_rate || 6.96);
-        const amtInBs = m.currency === 'USD' ? (m.amount * rate) : m.amount;
+        const rate = Number(m.sale_exchange_rate || m.exchange_rate || exchangeRate || 6.96);
+        const rawAmt = Number(m.amount) || 0;
+        const signedAmt = (m.type === 'devolucion' || m.type === 'retiro_manual') && rawAmt > 0 ? -rawAmt : rawAmt;
+        const amtInBs = m.currency === 'USD' ? (signedAmt * rate) : signedAmt;
         totalPending += amtInBs;
 
         if (totals[method] !== undefined) {
@@ -335,10 +343,13 @@ export default function CajasView() {
       }
     });
 
-    return { totals, totalPending };
+    const physicalCashBs = totals['Efectivo'] || 0;
+    const qrBankBs = (totals['Transferencia'] || 0) + (totals['QR'] || 0);
+
+    return { totals, totalPending, physicalCashBs, qrBankBs };
   };
 
-  const { totals: methodTotals, totalPending: computedPendingBalance } = calculateMethodTotals();
+  const { totals: methodTotals, totalPending: computedPendingBalance, physicalCashBs, qrBankBs } = calculateMethodTotals();
 
   // Filtros de liquidaciones históricas
   const filteredSettlements = settlements.filter(s => {
@@ -422,12 +433,28 @@ export default function CajasView() {
                 </div>
 
                 <div className="my-2">
-                  <span className="text-[9px] uppercase font-black tracking-widest text-indigo-200">Total pendiente de entrega al administrador</span>
-                  <div className="flex items-baseline gap-2 mt-1.5">
-                    <span className="text-4xl font-mono font-black tracking-tight">{selectedAccount.current_balance.toFixed(2)}</span>
-                    <span className="text-sm font-black">Bs.</span>
+                  <span className="text-[9px] uppercase font-black tracking-widest text-indigo-200">Efectivo físico a entregar en mano</span>
+                  <div className="flex items-baseline gap-2 mt-1">
+                    <span className="text-4xl font-mono font-black tracking-tight text-emerald-300">
+                      {(selectedAccount.pending_cash_bs ?? physicalCashBs).toFixed(2)}
+                    </span>
+                    <span className="text-sm font-black text-emerald-200">Bs.</span>
                   </div>
-                  <p className="text-[10px] text-indigo-100 font-bold mt-2 flex items-center gap-1.5">
+                  <div className="grid grid-cols-2 gap-2 mt-3 p-2.5 rounded-xl bg-black/20 border border-white/15 text-[10px]">
+                    <div>
+                      <span className="text-[8.5px] uppercase font-black text-indigo-200 block">QR / Banco Registrado</span>
+                      <span className="font-mono font-black text-cyan-300 text-xs">
+                        {(selectedAccount.pending_qr_bs ?? qrBankBs).toFixed(2)} Bs.
+                      </span>
+                    </div>
+                    <div className="border-l border-white/15 pl-2">
+                      <span className="text-[8.5px] uppercase font-black text-indigo-200 block">Saldo Total Acumulado</span>
+                      <span className="font-mono font-black text-white text-xs">
+                        {selectedAccount.current_balance.toFixed(2)} Bs.
+                      </span>
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-indigo-100 font-bold mt-2.5 flex items-center gap-1.5">
                     <Clock size={11} /> 
                     Desde: {selectedAccount.last_settlement_at ? new Date(selectedAccount.last_settlement_at).toLocaleString() : 'Inicio del comercio'}
                   </p>
@@ -589,18 +616,39 @@ export default function CajasView() {
                       <span className={`h-2.5 w-2.5 rounded-full ${acc.current_balance > 0 ? 'bg-indigo-500 animate-pulse' : 'bg-slate-300'}`}></span>
                     </div>
 
-                    <div className="flex flex-col gap-1.5 my-1">
-                      <span className="text-[9px] font-black text-slate-450 uppercase tracking-widest pl-1">Saldo acumulado por entregar</span>
-                      <div className="flex justify-between items-baseline p-3 bg-slate-50/50 dark:bg-black/25 border border-slate-150/40 dark:border-slate-850/80 rounded-xl">
-                        <div className="flex items-baseline gap-1">
-                          <span className="text-xl font-mono font-black text-slate-800 dark:text-indigo-400">
-                            {acc.current_balance.toFixed(2)}
-                          </span>
-                          <span className="text-[10px] font-black text-slate-400">Bs.</span>
+                    <div className="flex flex-col gap-2 my-1">
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="p-2.5 bg-emerald-500/10 dark:bg-emerald-950/30 border border-emerald-500/25 rounded-xl flex flex-col justify-between">
+                          <span className="text-[8.5px] font-black text-emerald-700 dark:text-emerald-400 uppercase tracking-wider">Efectivo Físico a Entregar</span>
+                          <div className="flex items-baseline gap-1 mt-1">
+                            <span className="text-base font-mono font-black text-emerald-600 dark:text-emerald-400">
+                              {(acc.pending_cash_bs ?? 0).toFixed(2)}
+                            </span>
+                            <span className="text-[9px] font-black text-emerald-600/80 dark:text-emerald-400/80">Bs.</span>
+                          </div>
                         </div>
-                        <span className="text-[9px] font-mono text-slate-400 font-bold">
-                          ~ ${(acc.current_balance / exchangeRate).toFixed(2)} USD
-                        </span>
+
+                        <div className="p-2.5 bg-cyan-500/10 dark:bg-cyan-950/30 border border-cyan-500/25 rounded-xl flex flex-col justify-between">
+                          <span className="text-[8.5px] font-black text-cyan-700 dark:text-cyan-400 uppercase tracking-wider">QR Bancario</span>
+                          <div className="flex items-baseline gap-1 mt-1">
+                            <span className="text-base font-mono font-black text-cyan-600 dark:text-cyan-400">
+                              {(acc.pending_qr_bs ?? 0).toFixed(2)}
+                            </span>
+                            <span className="text-[9px] font-black text-cyan-600/80 dark:text-cyan-400/80">Bs.</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex justify-between items-baseline px-3 py-2 bg-slate-50/70 dark:bg-black/25 border border-slate-150/50 dark:border-slate-850/80 rounded-xl">
+                        <span className="text-[9px] font-black text-slate-400 uppercase tracking-wider">Total Acumulado:</span>
+                        <div className="flex items-baseline gap-1.5">
+                          <span className="text-sm font-mono font-black text-slate-800 dark:text-indigo-400">
+                            {acc.current_balance.toFixed(2)} Bs.
+                          </span>
+                          <span className="text-[8.5px] font-mono text-slate-400 font-bold">
+                            (~${(acc.current_balance / exchangeRate).toFixed(2)})
+                          </span>
+                        </div>
                       </div>
                     </div>
 
@@ -744,24 +792,44 @@ export default function CajasView() {
             </div>
 
             {/* Panel de Control de Saldo y Ajustes Manuales */}
-            <div className="px-5 grid grid-cols-1 sm:grid-cols-4 gap-4">
-              <div className="p-4 bg-indigo-50/50 dark:bg-black/25 rounded-xl border border-indigo-100/40 dark:border-slate-800/80 flex flex-col justify-between sm:col-span-2">
+            <div className="px-5 grid grid-cols-1 sm:grid-cols-4 gap-3">
+              <div className="p-3.5 bg-emerald-500/10 dark:bg-emerald-950/25 rounded-xl border border-emerald-500/25 flex flex-col justify-between">
                 <div>
-                  <span className="text-[8.5px] font-black uppercase text-slate-400 tracking-wider">Saldo calculado en sistema:</span>
+                  <span className="text-[8.5px] font-black uppercase text-emerald-700 dark:text-emerald-400 tracking-wider">Efectivo Físico a Entregar:</span>
                   <div className="flex items-baseline gap-1 mt-1">
-                    <span className="text-2xl font-black font-mono text-indigo-650 dark:text-indigo-400">{selectedAccount.current_balance.toFixed(2)}</span>
-                    <span className="text-xs font-black text-slate-400">Bs.</span>
+                    <span className="text-xl font-black font-mono text-emerald-600 dark:text-emerald-400">
+                      {physicalCashBs.toFixed(2)}
+                    </span>
+                    <span className="text-[10px] font-black text-emerald-600/80 dark:text-emerald-400/80">Bs.</span>
                   </div>
                 </div>
-                <div className="text-[9.5px] font-semibold text-slate-400 mt-2">
-                  Periodo acumulado desde {selectedAccount.last_settlement_at ? new Date(selectedAccount.last_settlement_at).toLocaleString() : 'el origen del comercio'}.
+                <div className="text-[9px] font-semibold text-emerald-700/80 dark:text-emerald-300/80 mt-1.5">
+                  Billetes/monedas en gaveta
+                </div>
+              </div>
+
+              <div className="p-3.5 bg-cyan-500/10 dark:bg-cyan-950/25 rounded-xl border border-cyan-500/25 flex flex-col justify-between">
+                <div>
+                  <span className="text-[8.5px] font-black uppercase text-cyan-700 dark:text-cyan-400 tracking-wider">QR / Transferencias Banco:</span>
+                  <div className="flex items-baseline gap-1 mt-1">
+                    <span className="text-xl font-black font-mono text-cyan-600 dark:text-cyan-400">
+                      {qrBankBs.toFixed(2)}
+                    </span>
+                    <span className="text-[10px] font-black text-cyan-600/80 dark:text-cyan-400/80">Bs.</span>
+                  </div>
+                </div>
+                <div className="text-[9px] font-semibold text-cyan-700/80 dark:text-cyan-300/80 mt-1.5">
+                  Total Acumulado: {selectedAccount.current_balance.toFixed(2)} Bs.
                 </div>
               </div>
 
               {/* Acciones Rápidas de Ajuste */}
               {isAdminOrPropietario && (
-                <div className="p-4 bg-slate-50/50 dark:bg-black/25 rounded-xl border border-slate-100 dark:border-slate-800/80 sm:col-span-2 flex flex-col justify-between gap-3">
-                  <span className="text-[8.5px] font-black uppercase text-slate-400 tracking-wider">Movimiento de Caja Manual Auxiliar</span>
+                <div className="p-3.5 bg-slate-50/50 dark:bg-black/25 rounded-xl border border-slate-100 dark:border-slate-800/80 sm:col-span-2 flex flex-col justify-between gap-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[8.5px] font-black uppercase text-slate-400 tracking-wider">Movimiento de Caja Manual Auxiliar</span>
+                    <span className="text-[9px] font-mono font-bold text-indigo-500">Total: {selectedAccount.current_balance.toFixed(2)} Bs.</span>
+                  </div>
                   <div className="flex gap-2">
                     <button
                       onClick={() => handleOpenAdjust('ingreso_manual')}
@@ -966,30 +1034,73 @@ export default function CajasView() {
               </label>
             </div>
 
-            {/* Saldo Esperado en Sistema (Oculto o Visible) */}
-            <div className="bg-slate-50 dark:bg-black/20 p-3.5 rounded-xl border border-slate-100 dark:border-slate-850 flex justify-between items-center">
-              <span className="text-[9.5px] uppercase font-black text-slate-400">Saldo Esperado en Sistema:</span>
-              <span className="text-base font-black font-mono text-slate-800 dark:text-white">
-                {isBlindCashSettlement && !showBlindResult ? (
-                  <span className="text-indigo-500 dark:text-indigo-400 font-bold text-xs uppercase tracking-widest bg-indigo-500/10 px-2 py-1 rounded">
+            {/* Saldo Esperado en Sistema: Desglose Efectivo Físico vs QR Bancario */}
+            <div className="bg-slate-50 dark:bg-black/20 p-3.5 rounded-xl border border-slate-100 dark:border-slate-850 flex flex-col gap-2.5">
+              <div className="flex justify-between items-center">
+                <span className="text-[9.5px] uppercase font-black text-slate-400">Desglose de Arqueo del Vendedor:</span>
+                {isBlindCashSettlement && !showBlindResult && (
+                  <span className="text-indigo-500 dark:text-indigo-400 font-bold text-[10px] uppercase tracking-widest bg-indigo-500/10 px-2 py-0.5 rounded">
                     ***.** Bs. (Oculto a Ciegas)
                   </span>
-                ) : (
-                  `${selectedAccount.current_balance.toFixed(2)} Bs.`
                 )}
-              </span>
+              </div>
+
+              {(!isBlindCashSettlement || showBlindResult) && (
+                <div className="grid grid-cols-3 gap-2 pt-1">
+                  <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/25 flex flex-col">
+                    <span className="text-[8px] font-black uppercase text-emerald-700 dark:text-emerald-400">Efectivo Físico a Entregar</span>
+                    <span className="text-sm font-black font-mono text-emerald-600 dark:text-emerald-400 mt-0.5">
+                      {physicalCashBs.toFixed(2)} Bs.
+                    </span>
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-cyan-500/10 border border-cyan-500/25 flex flex-col">
+                    <span className="text-[8px] font-black uppercase text-cyan-700 dark:text-cyan-400">QR Bancario</span>
+                    <span className="text-sm font-black font-mono text-cyan-600 dark:text-cyan-400 mt-0.5">
+                      {qrBankBs.toFixed(2)} Bs.
+                    </span>
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-indigo-500/10 border border-indigo-500/25 flex flex-col">
+                    <span className="text-[8px] font-black uppercase text-indigo-700 dark:text-indigo-400">Total a Liquidar</span>
+                    <span className="text-sm font-black font-mono text-indigo-600 dark:text-indigo-400 mt-0.5">
+                      {selectedAccount.current_balance.toFixed(2)} Bs.
+                    </span>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Entrada del Monto Entregado */}
             <div className="flex flex-col gap-1.5">
-              <label className="text-[9px] font-extrabold uppercase tracking-widest text-slate-450 pl-1">
-                Monto Entregado Físicamente en Caja (Bs.)
-              </label>
+              <div className="flex items-center justify-between">
+                <label className="text-[9px] font-extrabold uppercase tracking-widest text-slate-450 pl-1">
+                  Monto Recibido / Liquidado (Bs.)
+                </label>
+                {(!isBlindCashSettlement || showBlindResult) && (
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setDeliveredAmount(physicalCashBs.toFixed(2))}
+                      className="px-2 py-0.5 rounded-md bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 text-[8.5px] font-black uppercase cursor-pointer transition"
+                      title="Autocompletar con el efectivo físico en mano"
+                    >
+                      Usar Efectivo ({physicalCashBs.toFixed(2)})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDeliveredAmount(selectedAccount.current_balance.toFixed(2))}
+                      className="px-2 py-0.5 rounded-md bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-600 dark:text-indigo-400 text-[8.5px] font-black uppercase cursor-pointer transition"
+                      title="Autocompletar con el total acumulado (Efectivo + QR verificado)"
+                    >
+                      Usar Total ({selectedAccount.current_balance.toFixed(2)})
+                    </button>
+                  </div>
+                )}
+              </div>
               <input 
                 type="number"
                 step="0.01"
                 className="w-full text-base font-extrabold font-mono p-3 rounded-xl border border-slate-250 dark:border-slate-800 dark:bg-black/50 text-slate-800 dark:text-white focus:outline-none focus:border-indigo-500"
-                placeholder="Ingresa el monto total contado..."
+                placeholder="Ingresa el monto total contado / verificado..."
                 value={deliveredAmount}
                 onChange={e => {
                   setDeliveredAmount(e.target.value);
@@ -999,22 +1110,29 @@ export default function CajasView() {
 
               {/* Resultado de Discrepancia si se reveló o si está en modo transparente */}
               {deliveredAmount && !isNaN(parseFloat(deliveredAmount)) && (!isBlindCashSettlement || showBlindResult) && (
-                <div className="p-3 bg-slate-100 dark:bg-black/40 border border-slate-200 dark:border-slate-800 rounded-xl flex justify-between items-center text-xs font-bold mt-1">
-                  <span className="text-slate-500 uppercase text-[10px]">Diferencia de Arqueo:</span>
-                  <span className={`font-mono text-sm font-black ${
-                    parseFloat(deliveredAmount) - selectedAccount.current_balance === 0 
-                      ? 'text-emerald-500' 
-                      : parseFloat(deliveredAmount) - selectedAccount.current_balance > 0 
-                        ? 'text-indigo-500' 
-                        : 'text-rose-500'
-                  }`}>
-                    {(parseFloat(deliveredAmount) - selectedAccount.current_balance) === 0
-                      ? '✓ Sin Discrepancia (0.00 Bs.)'
-                      : (parseFloat(deliveredAmount) - selectedAccount.current_balance) > 0
-                        ? `+${(parseFloat(deliveredAmount) - selectedAccount.current_balance).toFixed(2)} Bs. (Sobrante)`
-                        : `${(parseFloat(deliveredAmount) - selectedAccount.current_balance).toFixed(2)} Bs. (Faltante)`
-                    }
-                  </span>
+                <div className="p-3 bg-slate-100 dark:bg-black/40 border border-slate-200 dark:border-slate-800 rounded-xl flex flex-col gap-1 text-xs font-bold mt-1">
+                  <div className="flex justify-between items-center">
+                    <span className="text-slate-500 uppercase text-[10px]">Diferencia vs Total Acumulado:</span>
+                    <span className={`font-mono text-sm font-black ${
+                      Math.abs(parseFloat(deliveredAmount) - selectedAccount.current_balance) < 0.01
+                        ? 'text-emerald-500' 
+                        : parseFloat(deliveredAmount) - selectedAccount.current_balance > 0 
+                          ? 'text-indigo-500' 
+                          : 'text-rose-500'
+                    }`}>
+                      {Math.abs(parseFloat(deliveredAmount) - selectedAccount.current_balance) < 0.01
+                        ? '✓ Sin Discrepancia (0.00 Bs.)'
+                        : (parseFloat(deliveredAmount) - selectedAccount.current_balance) > 0
+                          ? `+${(parseFloat(deliveredAmount) - selectedAccount.current_balance).toFixed(2)} Bs. (Sobrante)`
+                          : `${(parseFloat(deliveredAmount) - selectedAccount.current_balance).toFixed(2)} Bs. (Faltante)`
+                      }
+                    </span>
+                  </div>
+                  {qrBankBs > 0 && Math.abs(parseFloat(deliveredAmount) - physicalCashBs) < 0.01 && (
+                    <div className="text-[10px] text-emerald-600 dark:text-emerald-400 font-semibold border-t border-slate-200 dark:border-slate-800 pt-1">
+                      ✓ Coincide exactamente con el Efectivo Físico ({physicalCashBs.toFixed(2)} Bs.). Si ya verificaste los {qrBankBs.toFixed(2)} Bs. de QR en banco, pulsa &ldquo;Usar Total ({selectedAccount.current_balance.toFixed(2)})&rdquo; para cerrar sin diferencia.
+                    </div>
+                  )}
                 </div>
               )}
             </div>

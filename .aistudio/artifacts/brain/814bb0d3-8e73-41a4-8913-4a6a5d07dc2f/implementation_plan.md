@@ -1,97 +1,88 @@
-# Plan de Restauración de Producción y Purga de Registros de Prueba de IA
+# Actualización Instantánea Estilo AI Studio + Blindaje Definitivo Anti-Duplicados de Ventas y Cola Offline
 
-Restauración íntegra y automática de la base de datos de producción (`gtr_pos.db`) a partir de los datos reales resguardados en Firestore (`ai-studio-remixgtrposaisma-814bb0d3-8e73-41a4-8913-4a6a5d07dc2f`), corrección definitiva del bloqueo de autenticación tras reinicios del contenedor (`Reset app`) y eliminación quirúrgica de todos los registros residuales creados durante las pruebas automatizadas de IA.
+Solución integral de ingeniería para resolver de raíz dos problemas críticos de operación en producción:
+1. **Actualizaciones que se aplican sí o sí sin problemas de caché y sin interrumpir ventas**, mediante una barra superior compacta estilo Google AI Studio con guardado y restauración automática (*Hot-Swap*) del carrito activo.
+2. **Eliminación definitiva de la doble sincronización de ventas Offline y del doble registro de ventas** causados por parpadeos de red, reintentos o residuos de caché entre `IndexedDB` y `localStorage`.
 
-## User Review & Critical Decisions
+---
+
+## Decisiones Confirmadas por el Usuario
 
 > [!IMPORTANT]
-> **Decisiones confirmadas por el usuario en la Fase 1:**
-> - **Alcance de Restauración**: Restaurar automáticamente el 100% de los datos reales desde Firestore hacia `gtr_pos.db` (399 ventas reales `#1–#398` + `#424`, 595 líneas de venta, 169 productos, 253 llegadas de stock, usuarios reales, cuentas de caja, liquidaciones, departamentos, configuración e historiales de auditoría).
-> - **Purga de Registros de Prueba de IA**: Eliminar definitivamente de Firestore y SQLite los siguientes registros ficticios detectados:
->   1. **12 pedidos pendientes ficticios (`pending_sales` `#1` al `#12`)** y sus **12 ítems (`pending_sale_items`)** a nombre de `"Cliente Deduplicado"` y `"Test Aggregate Edit"` (`Bs. 10`).
->   2. **7 ventas offline ficticias (`offline_pending_sales`)** con prefijo `off_test_*` (`off_test_1793100019585` a `off_test_1793117956520`), conservando únicamente `offline_1792864482494_a8j5eylih` (que originó la venta legítima `#424`).
->   3. **Cuenta de caja ficticia (`cash_accounts` ID `#7`)** perteneciente a `"vendedor_test"` (`seller_id: 7`) y cualquier usuario ficticio `"vendedor_test"` en `users`.
->   4. **Cliente ficticio (`clients` ID `#1`)** a nombre de `"Cliente Prueba Integridad"`.
-> - **Continuidad de Ventas Verificada**: Confirmado que las ventas reales llegan hasta la `#398` (26/10/2026) más la `#424` (27/10/2026 por Bs. 610 de `@maria`).
+> Este plan implementa exactamente las reglas de negocio que seleccionaste:
+
+1. **Actualización con Venta en Curso**: **Actualizar de inmediato guardando y restaurando el carrito automáticamente** (sin perder ni un artículo, pestaña ni cliente seleccionado).
+2. **Diseño Visual de Aviso de Nueva Versión**: **Barra superior compacta estilo AI Studio que no bloquea la caja**, eliminando el modal de pantalla completa que congelaba la terminal.
+3. **Datos Blindados al Limpiar Caché**:
+   - **Carrito activo, pestañas de venta en espera y cliente seleccionado**.
+   - **Sesión iniciada del usuario, modo Kiosco y suscripción de notificaciones Push**.
+   - **Ventas y acciones pendientes en cola Offline** (únicamente las genuinamente pendientes, nunca las ya procesadas).
+4. **Manejo de Fallos/Parpadeos de Red al Cobrar**: **Candado de ID único (`clientOperationId`) y huella en servidor**: registrar la venta **1 sola vez** y descartar duplicados automáticamente.
+5. **Reconciliación de Cola Offline vs. Ventas Online**: **Si una venta en cola Offline ya había entrado al servidor en línea, descartar el duplicado automáticamente y mantener solo la venta original ya registrada**.
 
 ---
 
-## 1. Overview & Core Concept
+## 1. Diagnóstico de Causa Raíz y Solución Definitiva Anti-Duplicados
 
-- **Qué resuelve**:
-  1. **Desbloqueo de Hidratación Automática post-Reset**: Cuando el contenedor se reinicia, `gtr_pos.db` requiere hidratarse desde Firestore. Actualmente `ensureServerAuth()` queda sin sesión si no existen variables de entorno manuales y `firestore.rules` rechaza la lectura de colecciones protegidas (`users`, `settings`, `inventory_audit_logs`, `system_audit_logs`), dejando `gtr_pos.db` vacío (`0 ventas`, `0 productos`).
-  2. **Limpieza Forense de Residuos de Pruebas en Firestore**: Aunque las ventas de prueba `#399–#423` y `#425–#428` ya fueron retiradas de `sales`, quedaron en Firestore 12 pedidos pendientes de prueba, 7 registros offline `off_test_*`, 1 cuenta de caja `vendedor_test` y 1 cliente `"Cliente Prueba Integridad"`.
-  3. **Blindaje de Tombstones y Secuencia (`sqlite_sequence`)**: Registra los tombstones de los registros de prueba purgados en `deleted_records` para impedir que cualquier cliente en caché los reintroduzca, y asegura que el contador de ventas continúe limpiamente a partir del siguiente ID disponible sin bloqueos de trigger.
-- **Valor Operativo**: El cajero y el administrador vuelven a ver inmediatamente sus **399 ventas reales, 169 productos con stock real, cajas cuadradas (`@maria` con Bs. 610, `@jenny`, `@admin`, `@roby`) y 0 registros basura de pruebas**, incluso si el servidor se reinicia en el futuro.
+### ¿Por qué ocurrían las ventas dobles y la doble sincronización Offline?
 
----
+1. **Causa 1 — Parpadeo de red al cobrar (`POS.tsx`)**:
+   - Cuando el cajero presionaba cobrar con internet lento o inestable, la petición `POST /api/sales` llegaba al servidor y registraba la venta, pero si la respuesta tardaba o se cortaba la conexión antes de recibir el `200 OK`, el navegador entraba al bloque `catch` y ejecutaba `saveOffline()`, guardando la misma venta en la cola Offline.
+   - **Solución**: Cada intento de cobro utiliza un `clientOperationId` único vinculado al carrito activo. Si la venta ya entró en `sales` y luego el cliente intenta enviarla por `/api/offline-sales/submit`, el servidor detecta que ya existe en `sales` (por `client_operation_id` o por huella comercial), responde `already_approved` y el navegador la borra silenciosamente de la cola Offline sin duplicarla.
 
-## 2. User Experience & Visual Design
+2. **Causa 2 — Resurrección de ventas borradas entre `IndexedDB` y `localStorage` (`offlineStorage.ts` y `appRefresh.ts`)**:
+   - Cuando `deleteOfflineSale(id)` borraba una venta ya sincronizada de `IndexedDB`, no limpiaba la clave de respaldo `gtr_offline_sales_queue` en `localStorage`. Al actualizar la versión o reiniciar la app, si `localStorage` tenía una copia vieja, la venta "revivía" y volvía a enviarse.
+   - **Solución**: `deleteOfflineSale` y `deleteOfflineAction` purgarán el registro **simultáneamente** en `IndexedDB`, en `localStorage` (`gtr_offline_sales_queue`) y en memoria, y registrarán el `clientOperationId` en una lista local de operaciones consumadas (`gtr_completed_operation_ids`) que bloquea cualquier intento de volver a encolar o re-enviar esa operación.
 
-- **Flujo de Usuario tras la Restauración**:
-  1. Al abrir la aplicación, el catálogo muestra los **169 productos reales** con sus existencias actualizadas (incluyendo los ingresos `#239–#257` de `@jenny`).
-  2. En **Historial de Ventas** y **Dashboard**, se visualizan las **399 ventas legítimas** (`#1` a `#398` y `#424` de Bs. 610), sin saltos de error ni registros ficticios.
-  3. En **Pedidos y Cuentas por Cobrar**, desaparecen los 12 pedidos falsos (`"Cliente Deduplicado"` y `"Test Aggregate Edit"`), quedando la bandeja limpia en `0` pedidos falsos.
-  4. En **Cajas y Liquidaciones**, solo aparecen los vendedores reales (`@maria` con saldo actual `Bs. 610.00`, `@jenny`, `@admin`, `@roby`), sin la caja fantasma `@vendedor_test`.
-  5. En **Clientes**, desaparece `"Cliente Prueba Integridad"`.
+3. **Causa 3 — Falta de candado cruzado en el servidor al aprobar o reintentar (`server.ts`)**:
+   - El endpoint `POST /api/offline-sales/:id/approve` insertaba la venta en `sales` sin verificar dentro de la transacción SQLite si ese `client_operation_id` ya había sido insertado previamente en `sales`. Además, si un cajero enviaba dos veces la misma venta con distinto ID por un recargado de caché, no había validación de huella comercial.
+   - **Solución**:
+     - En `POST /api/sales`: Candado transaccional por `client_operation_id` **más** detector de **Huella Comercial Reciente** (mismo vendedor, mismo cliente, mismo total, mismo método de pago y mismos productos/cantidades dentro de una ventana de seguridad de 90 segundos). Si coincide, devuelve la venta ya existente (`isDuplicate: true`) sin descontar stock ni sumar caja por segunda vez.
+     - En `POST /api/offline-sales/submit`: Verifica tanto por `client_operation_id` como por Huella Comercial contra la tabla `sales`. Si la venta ya fue registrada en línea, la descarta automáticamente devolviendo `status: 'already_approved'` para que el navegador limpie su cola local al instante.
+     - En `POST /api/offline-sales/:id/approve`: Dentro de `db.transaction`, verifica atómicamente que la venta no exista ya en `sales` y que `status === 'pending'`. Si ya existía en `sales`, marca el registro offline como resuelto sin crear otra venta.
 
----
-
-## 3. Key Product Decisions & Trade-Offs
-
-- **Decisión 1: Autenticación Determinística del Demonio de Sincronización (`ensureServerAuth` + `firestore.rules`)**
-  - *Enfoque Elegido*: Dotar a `ensureServerAuth()` de autenticación automática mediante la cuenta de servicio dedicada del servidor (`sync-daemon@gtrpos.internal`, UID `mPBz9Ze5GVaVC9sCSwnzMv2hCWp1`) cuando no se definan variables externas, y autorizar explícitamente ese UID/email de servicio en `isSyncDaemon()` dentro de `firestore.rules` (exigiendo siempre `hasValidIntegrityEnvelope()` en toda escritura).
-  - *Por qué*: Evita que un reinicio de contenedor (`Reset app`) deje al servidor sin permisos para descargar `users`, `settings`, `products` y `sales` desde Firestore, manteniendo bloqueado cualquier acceso anónimo o sin sobre de integridad criptográfica.
-- **Decisión 2: Purga Quirúrgica con Tombstones en `deleted_records`**
-  - *Enfoque Elegido*: Eliminar los registros ficticios tanto en Firestore como en `gtr_pos.db` e insertar sus IDs en `deleted_records` (`pending_sales` `#1–#12`, `pending_sale_items` `#1–#12`, `offline_pending_sales` `off_test_*`, `cash_accounts` `#7`, `clients` `#1` y `users` `#7` si existiera).
-  - *Por qué*: Si algún navegador tenía abierta una pestaña antigua antes de la limpieza, el escudo de `deleted_records` impide que esos registros de prueba vuelvan a sincronizarse hacia la nube.
+4. **Causa 4 — Sincronización concurrente (`AppContext.tsx`)**:
+   - El monitor de salud cada 15s y el evento `online` podían invocar `syncOfflineSales` al mismo tiempo.
+   - **Solución**: Se añade un registro en memoria de ventas en tránsito (`inFlightSaleIdsRef`) que garantiza que cada ID de venta offline solo pueda enviarse una vez, incluso si hay múltiples eventos de reconexión o clics manuales.
 
 ---
 
-## 4. Technical Architecture & Data Strategy *(Technical Reference)*
+## 2. Arquitectura de Actualización Instantánea Estilo AI Studio (Cero Problemas de Caché)
 
-### Diagrama de Arquitectura del Proceso de Restauración y Limpieza
+1. **Detección Infalible (Versión Semántica + `buildTime`)**:
+   - El cliente compara tanto el número de versión (`vX.Y.Z`) como la marca de tiempo de compilación (`buildTime`) devueltos por `/api/app-version` (sin caché) y por WebSocket (`/alerts`). Así, cualquier cambio o nueva versión se detecta al 100%.
+2. **Barra Superior Compacta No Bloqueante (Estilo AI Studio)**:
+   - Se elimina el modal de pantalla completa (`showUpdateWarning`) que bloqueaba la caja.
+   - En su lugar, se muestra una barra superior compacta con cuenta regresiva automática de 3 segundos y botón **"Actualizar ahora"**.
+3. **Resguardo "Hot-Swap" y Purga Quirúrgica de Caché**:
+   - Antes de recargar, guarda una instantánea exacta del carrito (`cart`), pestañas (`tabs`), cliente (`clientName`, `clientPhone`), descuentos, método de pago y vista actual en `localStorage` e `IndexedDB`.
+   - Limpia todos los cachés de código (`window.caches`), envía `CLEAR_CACHES` y `SKIP_WAITING` al Service Worker, fuerza la recarga de red del documento raíz con `fetch('/', { cache: 'reload' })` y recarga la página restaurando el carrito intacto con un aviso de confirmación.
+
+---
+
+## 3. Diagrama de Flujo Completo (Ventas + Sincronización + Actualización)
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                   FIRESTORE (Nube de Producción Real)                       │
-│  • sales (399 reales: #1..#398, #424)   • products (169 reales)             │
-│  • sale_items (595 reales)              • stock_arrivals (253 reales)       │
-│  • cash_movements (401 reales)          • cash_settlements (85 reales)      │
-│  • users / settings / departments       • audit_logs (Kárdex y Sistema)     │
-└───────────────────┬─────────────────────────────────────┬───────────────────┘
-                    │ 1. Purga Quirúrgica Remota          │ 2. Hidratación Completa
-                    ▼ (Elimina residuos de pruebas IA)    ▼ (pullFirestoreToLocal)
-┌───────────────────────────────────────┐ ┌───────────────────────────────────┐
-│   REGISTROS DE PRUEBA ELIMINADOS      │ │   SQLite Local (gtr_pos.db)       │
-│  ✕ pending_sales #1..#12              │ │  ✓ 399 Ventas (#1..#398 + #424)   │
-│  ✕ pending_sale_items #1..#12         │ │  ✓ 595 Ítems de venta             │
-│  ✕ offline_pending_sales off_test_*   │ │  ✓ 169 Productos con stock real   │
-│  ✕ cash_accounts #7 (vendedor_test)   │ │  ✓ 253 Entradas de stock          │
-│  ✕ users #7 (vendedor_test)           │ │  ✓ Cajas reales (@maria Bs. 610)  │
-│  ✕ clients #1 (Cliente Prueba Integ.) │ │  ✓ Secuencia autoincrement segura │
-└───────────────────────────────────────┘ └───────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                        COBRO DE VENTA EN POS.TSX                             │
+│  • Genera clientOperationId único vinculado al carrito activo                │
+│  • Envía POST /api/sales con clientOperationId                               │
+└───────────────────┬──────────────────────────────────────┬───────────────────┘
+                    │ Éxito en línea                       │ Corte/Timeout de red
+                    ▼                                      ▼
+┌───────────────────────────────────────┐  ┌───────────────────────────────────┐
+│ SERVIDOR: POST /api/sales             │  │ COLA LOCAL: saveOfflineSale()     │
+│ • Verifica clientOperationId + Huella │  │ • Guarda con el MISMO             │
+│   Comercial (90s) en transacción      │  │   clientOperationId               │
+│ • Registra 1 sola vez                 │  │ • Blinda contra doble encolado    │
+└───────────────────────────────────────┘  └─────────────────┬─────────────────┘
+                                                             │ Al volver internet
+                                                             ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                RECONCILIACIÓN AUTOMÁTICA: syncOfflineSales()                 │
+│  • Candado inFlightSaleIdsRef evita envíos paralelos                         │
+│  • Servidor (/api/offline-sales/submit) verifica si ya entró en `sales`      │
+│  • Si ya existía en línea -> Descarta duplicado automáticamente y limpia     │
+│    IndexedDB + localStorage + memoria para que jamás reviva                  │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
-
-### Mapeo de Operaciones y Verificación
-1. **Actualización y Despliegue de `firestore.rules`**:
-   - Autorizar la identidad del demonio de sincronización del servidor en `isSyncDaemon()` para lectura de las 26 colecciones de `SYNC_TABLES` y escritura validada con `hasValidIntegrityEnvelope()`.
-   - Desplegar las reglas actualizadas a Firestore mediante `DeployRules`.
-2. **Restauración de `ensureServerAuth()` en `firebaseSync.ts`**:
-   - Asegurar que el backend inicie sesión automáticamente con su identidad de sincronización al arrancar el servidor antes de ejecutar `pullFirestoreToLocal(true)`.
-3. **Ejecución de Purga de Registros de Prueba en Firestore y Sincronización Completa hacia `gtr_pos.db`**:
-   - Eliminar en Firestore:
-     - `pending_sales` (`1` al `12`) y `pending_sale_items` asociados.
-     - `offline_pending_sales` cuyo ID inicie con `off_test_`.
-     - `cash_accounts` doc `7` (`seller_username == 'vendedor_test'`) y cualquier usuario `vendedor_test` en `users`.
-     - `clients` doc `1` (`name == 'Cliente Prueba Integridad'`).
-   - Registrar los tombstones correspondientes en `deleted_records`.
-   - Ejecutar `pullFirestoreToLocal(true)` para hidratar todas las tablas en `gtr_pos.db`, verificar el checkpoint WAL (`wal_checkpoint(TRUNCATE)`) y recalcular `ensureSafeAutoincrementSequence(db)`.
-4. **Auditoría Post-Restauración de Solo Lectura**:
-   - Comprobar en `gtr_pos.db` y en Firestore que:
-     - `sales` = `399` registros exactos (`#1–#398` y `#424`), `0` ventas fantasma.
-     - `products` = `169` productos reales.
-     - `pending_sales` = `0` pedidos ficticios.
-     - `offline_pending_sales` = solo `offline_1792864482494_a8j5eylih` (resuelto en `#424`), `0` registros `off_test_*`.
-     - `cash_accounts` = solo cuentas reales (`@maria` = `Bs. 610`, `@jenny` = `0`, `@admin` = `0`, `@roby` = `0`), `0` cuentas `vendedor_test`.
-     - `clients` = `0` clientes `"Cliente Prueba Integridad"`.

@@ -59,7 +59,9 @@ export default function CuentasPorCobrarView() {
     const [selectedDebt, setSelectedDebt] = useState<AccountReceivable | null>(null);
     const [paymentAmount, setPaymentAmount] = useState('');
     const [paymentCurrency, setPaymentCurrency] = useState<'BOB' | 'USD'>('BOB');
-    const [paymentMethod, setPaymentMethod] = useState<'Efectivo' | 'Tarjeta' | 'Transferencia'>('Efectivo');
+    const [paymentMethod, setPaymentMethod] = useState<'Efectivo' | 'Tarjeta' | 'Transferencia' | 'Mixto'>('Efectivo');
+    const [debtMixtoCashBs, setDebtMixtoCashBs] = useState<string>('');
+    const [debtMixtoQrBs, setDebtMixtoQrBs] = useState<string>('');
     const [paymentNotes, setPaymentNotes] = useState('');
     const [paying, setPaying] = useState(false);
     const [creditPaymentOpId, setCreditPaymentOpId] = useState<string>('');
@@ -93,7 +95,9 @@ export default function CuentasPorCobrarView() {
 
     // Finalizing / Final-Checkout Pending Sale Modal State
     const [finalizingSale, setFinalizingSale] = useState<any | null>(null);
-    const [finalizePaymentMethod, setFinalizePaymentMethod] = useState<'Efectivo' | 'Tarjeta' | 'Transferencia' | 'Crédito'>('Efectivo');
+    const [finalizePaymentMethod, setFinalizePaymentMethod] = useState<'Efectivo' | 'Tarjeta' | 'Transferencia' | 'Mixto' | 'Crédito'>('Efectivo');
+    const [finalizeMixtoCashBs, setFinalizeMixtoCashBs] = useState<string>('');
+    const [finalizeMixtoQrBs, setFinalizeMixtoQrBs] = useState<string>('');
     const [selectedClientId, setSelectedClientId] = useState<string>('');
     const [finalizeInitialAbono, setFinalizeInitialAbono] = useState('');
     const [finalizeDueDate, setFinalizeDueDate] = useState('');
@@ -103,7 +107,9 @@ export default function CuentasPorCobrarView() {
     // States for Pending Sales Partial Payments
     const [payingPendingSale, setPayingPendingSale] = useState<any | null>(null);
     const [paymentPendingAmount, setPaymentPendingAmount] = useState('');
-    const [paymentPendingMethod, setPaymentPendingMethod] = useState<'Efectivo' | 'Tarjeta' | 'Transferencia'>('Efectivo');
+    const [paymentPendingMethod, setPaymentPendingMethod] = useState<'Efectivo' | 'Tarjeta' | 'Transferencia' | 'Mixto'>('Efectivo');
+    const [pendingMixtoCashBs, setPendingMixtoCashBs] = useState<string>('');
+    const [pendingMixtoQrBs, setPendingMixtoQrBs] = useState<string>('');
     const [paymentPendingNotes, setPaymentPendingNotes] = useState('');
     const [registeringPendingPayment, setRegisteringPendingPayment] = useState(false);
     const [pendingPaymentOpId, setPendingPaymentOpId] = useState<string>('');
@@ -255,11 +261,25 @@ export default function CuentasPorCobrarView() {
             return;
         }
 
+        const expectedBsForMixto = paymentCurrency === 'USD' ? Number((amount * effectiveRate).toFixed(2)) : amount;
+        const cashMix = Math.max(0, Number(debtMixtoCashBs) || 0);
+        const qrMix = Math.max(0, Number(debtMixtoQrBs) || 0);
+        if (paymentMethod === 'Mixto') {
+            if (Math.abs((cashMix + qrMix) - expectedBsForMixto) > 0.05) {
+                showToast(`En Pago Mixto, Efectivo (Bs. ${cashMix.toFixed(2)}) + QR (Bs. ${qrMix.toFixed(2)}) debe sumar Bs. ${expectedBsForMixto.toFixed(2)}`, 'error');
+                return;
+            }
+        }
+
         const opId = creditPaymentOpId || `ar_pay_${selectedDebt.id}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
         if (!creditPaymentOpId) setCreditPaymentOpId(opId);
 
         setPaying(true);
         try {
+            const defaultNote = paymentMethod === 'Mixto'
+                ? `Abono Mixto (Efectivo: Bs. ${cashMix.toFixed(2)} + QR: Bs. ${qrMix.toFixed(2)})`
+                : (paymentCurrency !== debtCurrency ? `Abono en ${paymentCurrency} (${paymentCurrency === 'USD' ? '$' : 'Bs.'}${amount.toFixed(2)} @ ${effectiveRate})` : 'Abono registrado en sistema');
+
             const res = await fetch(`/api/accounts-receivable/${selectedDebt.id}/pay`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -268,8 +288,9 @@ export default function CuentasPorCobrarView() {
                     currency: paymentCurrency,
                     exchange_rate: effectiveRate,
                     payment_method: paymentMethod,
+                    split_payment: paymentMethod === 'Mixto' ? { cash_amount: cashMix, qr_amount: qrMix } : undefined,
                     user_id: user?.id || 1,
-                    notes: paymentNotes.trim() || (paymentCurrency !== debtCurrency ? `Abono en ${paymentCurrency} (${paymentCurrency === 'USD' ? '$' : 'Bs.'}${amount.toFixed(2)} @ ${effectiveRate})` : 'Abono registrado en sistema'),
+                    notes: paymentNotes.trim() || defaultNote,
                     clientOperationId: opId
                 })
             });
@@ -282,6 +303,8 @@ export default function CuentasPorCobrarView() {
                 showToast(`✓ Abono aplicado por ${respDebtSymbol} ${appliedReduction.toFixed(2)} correctamente.`);
                 setSelectedDebt(null);
                 setPaymentAmount('');
+                setDebtMixtoCashBs('');
+                setDebtMixtoQrBs('');
                 setPaymentNotes('');
                 setCreditPaymentOpId('');
                 loadAccountsReceivable();
@@ -313,11 +336,23 @@ export default function CuentasPorCobrarView() {
             return;
         }
 
+        const pCashMix = Math.max(0, Number(pendingMixtoCashBs) || 0);
+        const pQrMix = Math.max(0, Number(pendingMixtoQrBs) || 0);
+        if (paymentPendingMethod === 'Mixto') {
+            if (Math.abs((pCashMix + pQrMix) - amount) > 0.05) {
+                showToast(`En Pago Mixto, Efectivo (Bs. ${pCashMix.toFixed(2)}) + QR (Bs. ${pQrMix.toFixed(2)}) debe sumar Bs. ${amount.toFixed(2)}`, 'error');
+                return;
+            }
+        }
+
         const opId = pendingPaymentOpId || `ps_pay_${payingPendingSale.id}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
         if (!pendingPaymentOpId) setPendingPaymentOpId(opId);
         
         setRegisteringPendingPayment(true);
         try {
+            const defaultPendingNote = paymentPendingMethod === 'Mixto'
+                ? `Abono Mixto (Efectivo: Bs. ${pCashMix.toFixed(2)} + QR: Bs. ${pQrMix.toFixed(2)})`
+                : 'Abono parcial registrado';
             const res = await fetch(`/api/pending-sales/${payingPendingSale.id}/pay`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -325,7 +360,7 @@ export default function CuentasPorCobrarView() {
                     amount,
                     payment_method: paymentPendingMethod,
                     user_id: user?.id || 1,
-                    notes: paymentPendingNotes.trim() || 'Abono parcial registrado',
+                    notes: paymentPendingNotes.trim() || defaultPendingNote,
                     clientOperationId: opId
                 })
             });
@@ -333,6 +368,8 @@ export default function CuentasPorCobrarView() {
                 showToast(`✓ Abono de Bs. ${amount.toFixed(2)} registrado correctamente.`);
                 setPayingPendingSale(null);
                 setPaymentPendingAmount('');
+                setPendingMixtoCashBs('');
+                setPendingMixtoQrBs('');
                 setPaymentPendingNotes('');
                 setPendingPaymentOpId('');
                 loadPendingSales();
@@ -572,16 +609,51 @@ export default function CuentasPorCobrarView() {
         message += `\n¡Gracias por su preferencia!`;
         
         const encodedMessage = encodeURIComponent(message);
-        const phone = sale.client_phone ? sale.client_phone.replace(/\D/g, '') : '';
-        const url = `https://api.whatsapp.com/send?phone=${phone ? '591' + phone : ''}&text=${encodedMessage}`;
-        
-        const win = window.open(url, '_blank');
-        if (!win) {
-            navigator.clipboard.writeText(message);
-            showToast('✓ Enlace bloqueado. Detalle copiado al portapapeles para pegar.');
-        } else {
-            showToast('✓ Abriendo WhatsApp para compartir.');
+        const digits = sale.client_phone ? String(sale.client_phone).replace(/\D/g, '') : '';
+        const normalizedPhone = digits.length === 8 ? `591${digits}` : digits;
+        const url = normalizedPhone
+            ? `https://wa.me/${normalizedPhone}?text=${encodedMessage}`
+            : `https://wa.me/?text=${encodedMessage}`;
+
+        const link = document.createElement('a');
+        link.href = url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        showToast('✓ Abriendo WhatsApp para compartir cotización/pedido.');
+    };
+
+    const handleShareDebtWhatsApp = (debt: AccountReceivable) => {
+        const debtSymbol = (debt.sale_currency || 'BOB') === 'USD' ? '$' : 'Bs.';
+        let message = `*ESTADO DE CUENTA / RECORDATORIO DE PAGO*\n`;
+        message += `_Ticket de Venta #${debt.sale_id} (${new Date(debt.created_at).toLocaleDateString('es-BO')})_\n\n`;
+        message += `👤 *Cliente:* ${debt.client_name}\n`;
+        if (debt.due_date) {
+            message += `📅 *Fecha de Vencimiento:* ${debt.due_date}\n`;
         }
+        message += `\n*Resumen de Cuenta:*\n`;
+        message += `• Total Original: ${debtSymbol} ${debt.total_amount.toFixed(2)}\n`;
+        message += `• Total Abonado: ${debtSymbol} ${debt.paid_amount.toFixed(2)}\n`;
+        message += `• *Saldo Pendiente:* *${debtSymbol} ${debt.remaining_amount.toFixed(2)}*\n\n`;
+        message += `Quedamos atentos a su confirmación. ¡Muchas gracias por su preferencia!`;
+
+        const encodedMessage = encodeURIComponent(message);
+        const digits = debt.client_phone ? String(debt.client_phone).replace(/\D/g, '') : '';
+        const normalizedPhone = digits.length === 8 ? `591${digits}` : digits;
+        const url = normalizedPhone
+            ? `https://wa.me/${normalizedPhone}?text=${encodedMessage}`
+            : `https://wa.me/?text=${encodedMessage}`;
+
+        const link = document.createElement('a');
+        link.href = url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        showToast('✓ Abriendo WhatsApp con el estado de cuenta del cliente.');
     };
 
     const handleToggleReserveStock = async (sale: any) => {
@@ -1317,15 +1389,16 @@ export default function CuentasPorCobrarView() {
         message += `📑 _El PDF oficial firmado por almacén se ha descargado de forma local._`;
         
         const encodedMessage = encodeURIComponent(message);
-        const url = `https://api.whatsapp.com/send?text=${encodedMessage}`;
-        
-        const win = window.open(url, '_blank');
-        if (!win) {
-            navigator.clipboard.writeText(message);
-            showToast('✓ PDF descargado y texto de orden copiado. Pegue en WhatsApp.');
-        } else {
-            showToast('✓ Abriendo WhatsApp para coordinar despacho con almacenes.');
-        }
+        const url = `https://wa.me/?text=${encodedMessage}`;
+
+        const link = document.createElement('a');
+        link.href = url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        showToast('✓ Abriendo WhatsApp para coordinar despacho con almacenes.');
     };
 
     // Opening Edit Modal and cloning existing sale values
@@ -1458,6 +1531,16 @@ export default function CuentasPorCobrarView() {
         e.preventDefault();
         if (!finalizingSale || isFinalizing) return;
 
+        const remainingToCollect = Math.max(0, Number(finalizingSale.total || 0) - Number(finalizingSale.paid_amount || 0));
+        const finCash = Math.max(0, Number(finalizeMixtoCashBs) || 0);
+        const finQr = Math.max(0, Number(finalizeMixtoQrBs) || 0);
+        if (finalizePaymentMethod === 'Mixto' && remainingToCollect > 0) {
+            if (Math.abs((finCash + finQr) - remainingToCollect) > 0.05) {
+                showToast(`En Pago Mixto, Efectivo (Bs. ${finCash.toFixed(2)}) + QR (Bs. ${finQr.toFixed(2)}) debe sumar el saldo a cobrar (Bs. ${remainingToCollect.toFixed(2)})`, 'error');
+                return;
+            }
+        }
+
         const opId = finalizePendingOpId || `ps_fin_${finalizingSale.id}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
         if (!finalizePendingOpId) setFinalizePendingOpId(opId);
 
@@ -1465,6 +1548,7 @@ export default function CuentasPorCobrarView() {
         try {
             const payload = {
                 payment_method: finalizePaymentMethod,
+                split_payment: finalizePaymentMethod === 'Mixto' ? { cash_amount: finCash, qr_amount: finQr } : undefined,
                 user_id: user?.id || 1,
                 client_id: selectedClientId ? Number(selectedClientId) : null,
                 initial_abono: finalizePaymentMethod === 'Crédito' ? Number(finalizeInitialAbono || 0) : 0,
@@ -1486,6 +1570,8 @@ export default function CuentasPorCobrarView() {
                 setFinalizeDueDate('');
                 setSelectedClientId('');
                 setFinalizePaymentMethod('Efectivo');
+                setFinalizeMixtoCashBs('');
+                setFinalizeMixtoQrBs('');
                 setFinalizePendingOpId('');
                 loadPendingSales();
                 loadAccountsReceivable();
@@ -2134,6 +2220,14 @@ export default function CuentasPorCobrarView() {
                                                     <td className="py-4 px-4 text-right">
                                                         <div className="flex gap-1.5 justify-end">
                                                             <button
+                                                                onClick={() => handleShareDebtWhatsApp(debt)}
+                                                                className="px-2.5 py-1.5 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/25 rounded-xl text-[10px] font-extrabold uppercase text-emerald-600 dark:text-emerald-400 flex items-center gap-1 transition cursor-pointer"
+                                                                title="Enviar recordatorio de estado de cuenta por WhatsApp"
+                                                            >
+                                                                <Phone size={11} />
+                                                                WhatsApp
+                                                            </button>
+                                                            <button
                                                                 onClick={() => loadPaymentHistory(debt)}
                                                                 className="px-2.5 py-1.5 bg-slate-50 hover:bg-slate-100 dark:bg-black/20 dark:hover:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl text-[10px] font-extrabold uppercase hover:text-indigo-500 dark:text-slate-350 flex items-center gap-1 transition cursor-pointer"
                                                                 title="Ver historial de abonos"
@@ -2146,6 +2240,9 @@ export default function CuentasPorCobrarView() {
                                                                     onClick={() => {
                                                                         setSelectedDebt(debt);
                                                                         setPaymentAmount(debt.remaining_amount.toFixed(2));
+                                                                        setPaymentMethod('Efectivo');
+                                                                        setDebtMixtoCashBs('');
+                                                                        setDebtMixtoQrBs('');
                                                                     }}
                                                                     className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-[10px] font-black uppercase flex items-center gap-1 shadow-md shadow-emerald-500/10 transition cursor-pointer"
                                                                 >
@@ -2505,26 +2602,79 @@ export default function CuentasPorCobrarView() {
                                 
                                 <div className="flex flex-col gap-1.5">
                                     <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Método de Pago</label>
-                                    <div className="grid grid-cols-2 gap-2">
-                                        {['Efectivo', 'Tarjeta', 'Transferencia', 'Crédito'].map((method) => {
+                                    <div className="grid grid-cols-3 sm:grid-cols-5 gap-1.5">
+                                        {['Efectivo', 'Tarjeta', 'Transferencia', 'Mixto', 'Crédito'].map((method) => {
                                             const isSelected = finalizePaymentMethod === method;
+                                            const remToPay = Math.max(0, Number(finalizingSale.total || 0) - Number(finalizingSale.paid_amount || 0));
                                             return (
                                                 <button
                                                     key={method}
                                                     type="button"
-                                                    onClick={() => setFinalizePaymentMethod(method as any)}
-                                                    className={`py-2 px-3 border rounded-xl font-bold uppercase text-[9.5px] transition ${
+                                                    onClick={() => {
+                                                        setFinalizePaymentMethod(method as any);
+                                                        if (method === 'Mixto') {
+                                                            setFinalizeMixtoCashBs('');
+                                                            setFinalizeMixtoQrBs(remToPay > 0 ? remToPay.toFixed(2) : '0.00');
+                                                        }
+                                                    }}
+                                                    className={`py-2 px-2 border rounded-xl font-bold uppercase text-[9px] transition cursor-pointer ${
                                                         isSelected 
                                                             ? 'bg-emerald-600 border-emerald-500 text-white font-black shadow-md'
-                                                            : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-805 text-slate-500 hover:bg-slate-5'
+                                                            : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-805 text-slate-500 hover:bg-slate-50'
                                                     }`}
                                                 >
-                                                    {method}
+                                                    {method === 'Transferencia' ? 'QR / Transf.' : method}
                                                 </button>
                                             );
                                         })}
                                     </div>
                                 </div>
+
+                                {finalizePaymentMethod === 'Mixto' && (() => {
+                                    const remToPay = Math.max(0, Number(finalizingSale.total || 0) - Number(finalizingSale.paid_amount || 0));
+                                    return (
+                                        <div className="grid grid-cols-2 gap-2.5 p-3 rounded-2xl bg-violet-500/5 border border-violet-500/25">
+                                            <div className="flex flex-col gap-1">
+                                                <label className="text-[9px] font-black text-emerald-600 dark:text-emerald-400 uppercase tracking-wider">Efectivo (Bs.)</label>
+                                                <input
+                                                    type="number"
+                                                    step="0.01"
+                                                    min="0"
+                                                    max={remToPay}
+                                                    placeholder="0.00"
+                                                    value={finalizeMixtoCashBs}
+                                                    onChange={(e) => {
+                                                        const raw = e.target.value;
+                                                        setFinalizeMixtoCashBs(raw);
+                                                        const num = Math.max(0, parseFloat(raw) || 0);
+                                                        const rest = Math.max(0, Math.round((remToPay - num) * 100) / 100);
+                                                        setFinalizeMixtoQrBs(rest.toFixed(2));
+                                                    }}
+                                                    className="bg-white dark:bg-black/40 border border-emerald-500/30 rounded-xl p-2 font-mono font-black text-xs text-emerald-600 dark:text-emerald-400 focus:outline-none focus:border-emerald-500"
+                                                />
+                                            </div>
+                                            <div className="flex flex-col gap-1">
+                                                <label className="text-[9px] font-black text-cyan-600 dark:text-cyan-400 uppercase tracking-wider">QR Bancario (Bs.)</label>
+                                                <input
+                                                    type="number"
+                                                    step="0.01"
+                                                    min="0"
+                                                    max={remToPay}
+                                                    placeholder="0.00"
+                                                    value={finalizeMixtoQrBs}
+                                                    onChange={(e) => {
+                                                        const raw = e.target.value;
+                                                        setFinalizeMixtoQrBs(raw);
+                                                        const num = Math.max(0, parseFloat(raw) || 0);
+                                                        const rest = Math.max(0, Math.round((remToPay - num) * 100) / 100);
+                                                        setFinalizeMixtoCashBs(rest.toFixed(2));
+                                                    }}
+                                                    className="bg-white dark:bg-black/40 border border-cyan-500/30 rounded-xl p-2 font-mono font-black text-xs text-cyan-600 dark:text-cyan-400 focus:outline-none focus:border-cyan-500"
+                                                />
+                                            </div>
+                                        </div>
+                                    );
+                                })()}
 
                                 {/* Link Client input for Accounts Receivable credits / customer points */}
                                 <div className="flex flex-col gap-1.5">
@@ -2739,26 +2889,85 @@ export default function CuentasPorCobrarView() {
 
                                 <div className="flex flex-col gap-1.5">
                                     <label className="font-extrabold text-slate-400 uppercase tracking-widest text-[9px] block">Método de Reintegro de Pago:</label>
-                                    <div className="grid grid-cols-3 gap-2">
-                                        {['Efectivo', 'Tarjeta', 'Transferencia'].map((method) => {
+                                    <div className="grid grid-cols-4 gap-1.5">
+                                        {['Efectivo', 'Tarjeta', 'Transferencia', 'Mixto'].map((method) => {
                                             const isSelected = paymentMethod === method;
+                                            const rate = Number(exchangeRate) > 0 ? Number(exchangeRate) : (Number(selectedDebt.sale_exchange_rate) > 0 ? Number(selectedDebt.sale_exchange_rate) : 6.96);
+                                            const totalBs = paymentCurrency === 'USD'
+                                                ? Math.max(0, Math.round((Number(paymentAmount) || 0) * rate * 100) / 100)
+                                                : Math.max(0, Number(paymentAmount) || 0);
                                             return (
                                                 <button
                                                     key={method}
                                                     type="button"
-                                                    onClick={() => setPaymentMethod(method as any)}
-                                                    className={`py-2 px-3 border rounded-xl font-bold uppercase text-[9.5px] transition ${
+                                                    onClick={() => {
+                                                        setPaymentMethod(method as any);
+                                                        if (method === 'Mixto') {
+                                                            setDebtMixtoCashBs('');
+                                                            setDebtMixtoQrBs(totalBs > 0 ? totalBs.toFixed(2) : '0.00');
+                                                        }
+                                                    }}
+                                                    className={`py-2 px-2 border rounded-xl font-bold uppercase text-[9px] transition cursor-pointer ${
                                                         isSelected 
                                                             ? 'bg-emerald-600 border-emerald-500 text-white font-black shadow-md shadow-emerald-500/15'
                                                             : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-805 text-slate-500 dark:text-slate-400 hover:bg-slate-50'
                                                     }`}
                                                 >
-                                                    {method}
+                                                    {method === 'Transferencia' ? 'QR / Transf.' : method}
                                                 </button>
                                             );
                                         })}
                                     </div>
                                 </div>
+
+                                {paymentMethod === 'Mixto' && (() => {
+                                    const rate = Number(exchangeRate) > 0 ? Number(exchangeRate) : (Number(selectedDebt.sale_exchange_rate) > 0 ? Number(selectedDebt.sale_exchange_rate) : 6.96);
+                                    const totalBs = paymentCurrency === 'USD'
+                                        ? Math.max(0, Math.round((Number(paymentAmount) || 0) * rate * 100) / 100)
+                                        : Math.max(0, Number(paymentAmount) || 0);
+                                    return (
+                                        <div className="grid grid-cols-2 gap-2.5 p-3 rounded-2xl bg-violet-500/5 border border-violet-500/25">
+                                            <div className="flex flex-col gap-1">
+                                                <label className="text-[9px] font-black text-emerald-600 dark:text-emerald-400 uppercase tracking-wider">Efectivo (Bs.)</label>
+                                                <input
+                                                    type="number"
+                                                    step="0.01"
+                                                    min="0"
+                                                    max={totalBs}
+                                                    placeholder="0.00"
+                                                    value={debtMixtoCashBs}
+                                                    onChange={(e) => {
+                                                        const raw = e.target.value;
+                                                        setDebtMixtoCashBs(raw);
+                                                        const num = Math.max(0, parseFloat(raw) || 0);
+                                                        const rest = Math.max(0, Math.round((totalBs - num) * 100) / 100);
+                                                        setDebtMixtoQrBs(rest.toFixed(2));
+                                                    }}
+                                                    className="bg-white dark:bg-black/40 border border-emerald-500/30 rounded-xl p-2 font-mono font-black text-xs text-emerald-600 dark:text-emerald-400 focus:outline-none focus:border-emerald-500"
+                                                />
+                                            </div>
+                                            <div className="flex flex-col gap-1">
+                                                <label className="text-[9px] font-black text-cyan-600 dark:text-cyan-400 uppercase tracking-wider">QR Bancario (Bs.)</label>
+                                                <input
+                                                    type="number"
+                                                    step="0.01"
+                                                    min="0"
+                                                    max={totalBs}
+                                                    placeholder="0.00"
+                                                    value={debtMixtoQrBs}
+                                                    onChange={(e) => {
+                                                        const raw = e.target.value;
+                                                        setDebtMixtoQrBs(raw);
+                                                        const num = Math.max(0, parseFloat(raw) || 0);
+                                                        const rest = Math.max(0, Math.round((totalBs - num) * 100) / 100);
+                                                        setDebtMixtoCashBs(rest.toFixed(2));
+                                                    }}
+                                                    className="bg-white dark:bg-black/40 border border-cyan-500/30 rounded-xl p-2 font-mono font-black text-xs text-cyan-600 dark:text-cyan-400 focus:outline-none focus:border-cyan-500"
+                                                />
+                                            </div>
+                                        </div>
+                                    );
+                                })()}
 
                                 <div className="flex flex-col gap-1.5">
                                     <label className="font-extrabold text-slate-400 uppercase tracking-widest text-[9px] block">Observaciones / Notas (Opcional):</label>
@@ -2968,13 +3177,68 @@ export default function CuentasPorCobrarView() {
                                     <select
                                         className="px-4 py-2.5 bg-slate-50/50 dark:bg-black/20 border border-slate-200 dark:border-slate-850 rounded-xl focus:outline-none focus:border-indigo-500 dark:text-white text-xs font-bold"
                                         value={paymentPendingMethod}
-                                        onChange={(e) => setPaymentPendingMethod(e.target.value as any)}
+                                        onChange={(e) => {
+                                            const nextMethod = e.target.value as any;
+                                            setPaymentPendingMethod(nextMethod);
+                                            if (nextMethod === 'Mixto') {
+                                                const amt = Math.max(0, Number(paymentPendingAmount) || 0);
+                                                setPendingMixtoCashBs('');
+                                                setPendingMixtoQrBs(amt > 0 ? amt.toFixed(2) : '0.00');
+                                            }
+                                        }}
                                     >
                                         <option value="Efectivo" className="dark:bg-[#0c111e]">Efectivo</option>
                                         <option value="Tarjeta" className="dark:bg-[#0c111e]">Tarjeta de Débito/Crédito</option>
                                         <option value="Transferencia" className="dark:bg-[#0c111e]">Transferencia Bancaria / QR</option>
+                                        <option value="Mixto" className="dark:bg-[#0c111e]">Mixto (Efectivo + QR)</option>
                                     </select>
                                 </div>
+
+                                {paymentPendingMethod === 'Mixto' && (() => {
+                                    const totalPendingAmt = Math.max(0, Number(paymentPendingAmount) || 0);
+                                    return (
+                                        <div className="grid grid-cols-2 gap-2.5 p-3 rounded-2xl bg-violet-500/5 border border-violet-500/25">
+                                            <div className="flex flex-col gap-1">
+                                                <label className="text-[9px] font-black text-emerald-600 dark:text-emerald-400 uppercase tracking-wider">Efectivo (Bs.)</label>
+                                                <input
+                                                    type="number"
+                                                    step="0.01"
+                                                    min="0"
+                                                    max={totalPendingAmt}
+                                                    placeholder="0.00"
+                                                    value={pendingMixtoCashBs}
+                                                    onChange={(e) => {
+                                                        const raw = e.target.value;
+                                                        setPendingMixtoCashBs(raw);
+                                                        const num = Math.max(0, parseFloat(raw) || 0);
+                                                        const rest = Math.max(0, Math.round((totalPendingAmt - num) * 100) / 100);
+                                                        setPendingMixtoQrBs(rest.toFixed(2));
+                                                    }}
+                                                    className="bg-white dark:bg-black/40 border border-emerald-500/30 rounded-xl p-2 font-mono font-black text-xs text-emerald-600 dark:text-emerald-400 focus:outline-none focus:border-emerald-500"
+                                                />
+                                            </div>
+                                            <div className="flex flex-col gap-1">
+                                                <label className="text-[9px] font-black text-cyan-600 dark:text-cyan-400 uppercase tracking-wider">QR Bancario (Bs.)</label>
+                                                <input
+                                                    type="number"
+                                                    step="0.01"
+                                                    min="0"
+                                                    max={totalPendingAmt}
+                                                    placeholder="0.00"
+                                                    value={pendingMixtoQrBs}
+                                                    onChange={(e) => {
+                                                        const raw = e.target.value;
+                                                        setPendingMixtoQrBs(raw);
+                                                        const num = Math.max(0, parseFloat(raw) || 0);
+                                                        const rest = Math.max(0, Math.round((totalPendingAmt - num) * 100) / 100);
+                                                        setPendingMixtoCashBs(rest.toFixed(2));
+                                                    }}
+                                                    className="bg-white dark:bg-black/40 border border-cyan-500/30 rounded-xl p-2 font-mono font-black text-xs text-cyan-600 dark:text-cyan-400 focus:outline-none focus:border-cyan-500"
+                                                />
+                                            </div>
+                                        </div>
+                                    );
+                                })()}
 
                                 <div className="flex flex-col gap-1.5">
                                     <label className="text-[9.5px] font-black uppercase text-slate-400 tracking-wider">Notas / Concepto de Abono</label>

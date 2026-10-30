@@ -2,12 +2,17 @@
  * Version Checking and Comparison Utilities for GTR POS
  * 
  * Ensures the running client is synchronized with the latest server build upon login
- * and during active operations, triggering cache purges or update prompts if outdated.
+ * and during active operations, triggering cache purges or update prompts if outdated
+ * without causing infinite reload loops between server settings and compiled bundles.
  */
 
 import { hardRefreshApp } from './appRefresh';
 
-export const CLIENT_VERSION = "2.4.1";
+declare const __APP_VERSION__: string | undefined;
+declare const __APP_BUILD_TIME__: number | undefined;
+
+export const CLIENT_VERSION: string = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : "2.4.2";
+export const CLIENT_BUILD_TIME: number = typeof __APP_BUILD_TIME__ !== 'undefined' ? Number(__APP_BUILD_TIME__) : 1771466000000;
 
 export interface VersionComparisonResult {
     clientVersion: string;
@@ -64,22 +69,91 @@ export function compareVersions(v1: string, v2: string): number {
 }
 
 /**
- * Compares the active client version with a server version.
+ * Returns the effective client version by taking the highest semantic version among:
+ * 1. The compiled bundle CLIENT_VERSION
+ * 2. localStorage 'pwa_acknowledged_server_version' (set when a terminal applies an update)
+ * 3. localStorage 'pwa_app_version'
+ */
+export function getEffectiveClientVersion(baseClientVer: string = CLIENT_VERSION): string {
+    let effective = (baseClientVer || CLIENT_VERSION).trim().replace(/^v/i, '');
+    if (typeof window !== 'undefined' && window.localStorage) {
+        try {
+            const ackVer = localStorage.getItem('pwa_acknowledged_server_version');
+            if (ackVer && compareVersions(ackVer, effective) > 0) {
+                effective = ackVer.trim().replace(/^v/i, '');
+            }
+            const storedAppVer = localStorage.getItem('pwa_app_version');
+            if (storedAppVer && compareVersions(storedAppVer, effective) > 0) {
+                effective = storedAppVer.trim().replace(/^v/i, '');
+            }
+        } catch {}
+    }
+    return effective;
+}
+
+/**
+ * Records that the client has acknowledged and applied the specified server version
+ * so it will not loop infinitely after reloading.
+ */
+export function acknowledgeServerVersion(serverVersion?: string | null, buildTime?: number): void {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    try {
+        const cleanVer = (serverVersion || CLIENT_VERSION).trim().replace(/^v/i, '');
+        if (cleanVer) {
+            localStorage.setItem('pwa_acknowledged_server_version', cleanVer);
+            localStorage.setItem('pwa_app_version', cleanVer);
+        }
+        if (buildTime && Number.isFinite(buildTime)) {
+            localStorage.setItem('pwa_build_timestamp', String(buildTime));
+        }
+    } catch {}
+}
+
+/**
+ * Returns the effective client build timestamp by taking the highest timestamp between
+ * CLIENT_BUILD_TIME and localStorage 'pwa_build_timestamp'.
+ */
+export function getEffectiveClientBuildTime(baseBuildTime: number = CLIENT_BUILD_TIME): number {
+    let effective = Number.isFinite(baseBuildTime) ? baseBuildTime : CLIENT_BUILD_TIME;
+    if (typeof window !== 'undefined' && window.localStorage) {
+        try {
+            const stored = localStorage.getItem('pwa_build_timestamp');
+            if (stored) {
+                const parsed = parseInt(stored, 10);
+                if (Number.isFinite(parsed) && parsed > effective) {
+                    effective = parsed;
+                }
+            }
+        } catch {}
+    }
+    return effective;
+}
+
+/**
+ * Compares the active client version (and optional build timestamp) with a server version.
  */
 export function compareClientWithServerVersion(
     serverVersion?: string | null,
-    clientVer: string = CLIENT_VERSION
+    clientVer: string = CLIENT_VERSION,
+    serverBuildTime?: number
 ): VersionComparisonResult {
+    const safeClientVer = getEffectiveClientVersion(clientVer);
     const safeServerVer = (serverVersion && typeof serverVersion === 'string' && serverVersion.trim())
         ? serverVersion.trim().replace(/^v/i, '')
-        : clientVer;
-    
-    const safeClientVer = clientVer.trim().replace(/^v/i, '');
+        : safeClientVer;
 
     const cmp = compareVersions(safeClientVer, safeServerVer);
-    const isOutdated = cmp < 0;
+    const effectiveClientBuild = getEffectiveClientBuildTime(CLIENT_BUILD_TIME);
+    const isBuildNewer = Boolean(
+        cmp === 0 &&
+        serverBuildTime &&
+        Number.isFinite(serverBuildTime) &&
+        serverBuildTime > effectiveClientBuild + 5000
+    );
+
+    const isOutdated = cmp < 0 || isBuildNewer;
     const isNewer = cmp > 0;
-    const isEqual = cmp === 0;
+    const isEqual = cmp === 0 && !isBuildNewer;
 
     const pClient = parseVersion(safeClientVer);
     const pServer = parseVersion(safeServerVer);
@@ -89,13 +163,13 @@ export function compareClientWithServerVersion(
         difference = 'major';
     } else if (pClient[1] !== pServer[1]) {
         difference = 'minor';
-    } else if (pClient[2] !== pServer[2]) {
+    } else if (pClient[2] !== pServer[2] || isBuildNewer) {
         difference = 'patch';
     }
 
     let message = `GTR POS v${safeClientVer} está al día con el servidor.`;
     if (isOutdated) {
-        message = `Versión obsoleta detectada: Cliente v${safeClientVer} vs Servidor v${safeServerVer}. Se requiere actualización.`;
+        message = `Nueva compilación detectada: Cliente v${safeClientVer} vs Servidor v${safeServerVer}. Se aplicará actualización.`;
     } else if (isNewer) {
         message = `Cliente v${safeClientVer} es más reciente que el servidor v${safeServerVer}.`;
     }
@@ -115,13 +189,14 @@ export function compareClientWithServerVersion(
  * Fetches the current application version from the backend or static version manifest.
  * Guarantees zero-cache headers so the response is never stale.
  */
-export async function fetchCurrentServerVersion(): Promise<{ version: string; releaseNotes?: string } | null> {
+export async function fetchCurrentServerVersion(): Promise<{ version: string; releaseNotes?: string; buildTime?: number } | null> {
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
         return null;
     }
 
     try {
         const res = await fetch(`/api/app-version?_t=${Date.now()}`, {
+            cache: 'no-store',
             headers: {
                 'Cache-Control': 'no-cache, no-store, must-revalidate',
                 'Pragma': 'no-cache',
@@ -133,7 +208,8 @@ export async function fetchCurrentServerVersion(): Promise<{ version: string; re
             if (data?.version) {
                 return {
                     version: String(data.version),
-                    releaseNotes: data.release_notes || ''
+                    releaseNotes: data.release_notes || '',
+                    buildTime: data.buildTime ? Number(data.buildTime) : undefined
                 };
             }
         }
@@ -144,6 +220,7 @@ export async function fetchCurrentServerVersion(): Promise<{ version: string; re
     // Fallback: Query static version.json
     try {
         const staticRes = await fetch(`/version.json?_t=${Date.now()}`, {
+            cache: 'no-store',
             headers: {
                 'Cache-Control': 'no-cache, no-store, must-revalidate',
                 'Pragma': 'no-cache',
@@ -155,7 +232,8 @@ export async function fetchCurrentServerVersion(): Promise<{ version: string; re
             if (staticData?.version) {
                 return {
                     version: String(staticData.version),
-                    releaseNotes: staticData.releaseName || ''
+                    releaseNotes: staticData.releaseName || '',
+                    buildTime: staticData.buildTime ? Number(staticData.buildTime) : undefined
                 };
             }
         }
@@ -168,10 +246,7 @@ export async function fetchCurrentServerVersion(): Promise<{ version: string; re
 
 /**
  * Validates the application version upon user login.
- * Compares CLIENT_VERSION with the version payload returned by /api/auth/login.
- * 
- * If a discrepancy is found and autoForceRefresh is true (or when forced),
- * initiates cache purging and updates state safely.
+ * Compares effective client version with the version payload returned by /api/auth/login.
  */
 export async function validateVersionOnLogin(
     loginPayload?: any,
@@ -200,7 +275,6 @@ export async function validateVersionOnLogin(
     if (result.isOutdated) {
         console.warn(`[validateVersionOnLogin] ${result.message}`);
         
-        // Dispatch global event for listeners (like App.tsx or AppContext)
         if (typeof window !== 'undefined') {
             window.dispatchEvent(new CustomEvent('app-update-available', {
                 detail: {
@@ -217,6 +291,7 @@ export async function validateVersionOnLogin(
 
         if (autoForceRefresh) {
             console.info("[validateVersionOnLogin] Auto-forcing application refresh for outdated client...");
+            acknowledgeServerVersion(result.serverVersion);
             await hardRefreshApp();
         }
     }

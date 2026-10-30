@@ -502,6 +502,20 @@ targetDb.exec(`
   CREATE INDEX IF NOT EXISTS idx_pending_sales_status ON pending_sales (status);
   CREATE INDEX IF NOT EXISTS idx_pending_sale_items_sale_id ON pending_sale_items (pending_sale_id);
   CREATE INDEX IF NOT EXISTS idx_pending_sale_items_prod_id ON pending_sale_items (product_id);
+
+  CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    username TEXT NOT NULL,
+    user_role TEXT NOT NULL,
+    endpoint TEXT UNIQUE NOT NULL,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    user_agent TEXT DEFAULT NULL,
+    created_at DATETIME DEFAULT (strftime('%Y-%m-%dT%H:%M:%S-04:00', 'now', '-4 hours')),
+    updated_at DATETIME DEFAULT (strftime('%Y-%m-%dT%H:%M:%S-04:00', 'now', '-4 hours'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_push_subscriptions_user_id ON push_subscriptions (user_id);
 `);
 
 // Seed default departments if they haven't been seeded yet

@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'gtr-pos-v5-cache';
+const CACHE_VERSION = 'gtr-pos-v2.4.2-cache';
 const CACHE_NAME = CACHE_VERSION;
 const ASSETS_TO_CACHE = [
   '/',
@@ -38,21 +38,23 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// Fetching network requests & intelligent caching
+// Fetching network requests & intelligent caching without web/PWA bundle conflicts
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
 
   const url = new URL(event.request.url);
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
 
-  // 1. ABSOLUTE BYPASS: Never intercept or cache Service Worker itself, API routes, WebSockets, or version manifest
+  // 1. ABSOLUTE BYPASS: Never intercept or cache Service Worker itself, registerSW, API routes, WebSockets, or version manifest
   if (
     url.pathname === '/sw.js' ||
+    url.pathname === '/registerSW.js' ||
     url.pathname === '/service-worker.js' ||
     url.pathname.endsWith('/sw.js') ||
     url.pathname.startsWith('/api') ||
     url.pathname.includes('socket') ||
     url.pathname.includes('/live') ||
+    url.pathname.includes('/alerts') ||
     url.pathname.endsWith('/version.json')
   ) {
     return; // Pass through straight to network
@@ -89,15 +91,11 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // 4. Immutable hashed production assets (/assets/name-[hash].js): Cache-First
-  const isHashedAsset = url.pathname.includes('/assets/') && /-[a-zA-Z0-9_-]{6,}\.(js|css|woff2|png|jpg)$/.test(url.pathname);
-  if (isHashedAsset) {
+  // 4. JavaScript & CSS Bundles: Network-First falling back to Cache (prevents stale JS/CSS conflicts between WebApp and PWA)
+  if (url.pathname.endsWith('.js') || url.pathname.endsWith('.css')) {
     event.respondWith(
-      caches.match(event.request).then((cachedResponse) => {
-        if (cachedResponse) {
-          return cachedResponse;
-        }
-        return fetch(event.request).then((networkResponse) => {
+      fetch(event.request)
+        .then((networkResponse) => {
           if (networkResponse && networkResponse.status === 200) {
             const responseClone = networkResponse.clone();
             caches.open(CACHE_NAME).then((cache) => {
@@ -105,16 +103,16 @@ self.addEventListener('fetch', (event) => {
             });
           }
           return networkResponse;
-        });
-      })
+        })
+        .catch(() => {
+          return caches.match(event.request);
+        })
     );
     return;
   }
 
-  // 5. General static assets (icons, manifest, fonts): Stale-While-Revalidate
+  // 5. Static visual & font assets (icons, manifest, fonts): Stale-While-Revalidate
   const isStaticAsset =
-    url.pathname.endsWith('.js') ||
-    url.pathname.endsWith('.css') ||
     url.pathname.endsWith('.svg') ||
     url.pathname.endsWith('.png') ||
     url.pathname.endsWith('.jpg') ||
@@ -135,7 +133,6 @@ self.addEventListener('fetch', (event) => {
           return networkResponse;
         }).catch(() => null);
 
-        // Return cached version immediately if available; fetch updates in the background
         return cachedResponse || fetchPromise;
       })
     );
@@ -157,6 +154,90 @@ self.addEventListener('fetch', (event) => {
       .catch(() => {
         return caches.match(event.request);
       })
+  );
+});
+
+// Native Web Push Notification Handler (for Installed PWA on Android/iOS/Desktop)
+self.addEventListener('push', (event) => {
+  let payload = {
+    title: 'GTR POS — Nueva Venta Registrada',
+    body: 'Se ha registrado una nueva operación de venta en el sistema.',
+    icon: '/icon.svg',
+    badge: '/icon.svg',
+    tag: 'gtr-pos-sale-' + Date.now(),
+    data: { url: '/', targetView: 'historial_ventas' }
+  };
+
+  if (event.data) {
+    try {
+      const parsed = event.data.json();
+      payload = {
+        ...payload,
+        ...parsed,
+        data: {
+          ...payload.data,
+          ...(parsed.data || {})
+        }
+      };
+    } catch (e) {
+      try {
+        payload.body = event.data.text();
+      } catch (_) {}
+    }
+  }
+
+  const notificationOptions = {
+    body: payload.body,
+    icon: payload.icon || '/icon.svg',
+    badge: payload.badge || '/icon.svg',
+    tag: payload.tag || ('gtr-pos-sale-' + Date.now()),
+    renotify: true,
+    requireInteraction: false,
+    vibrate: [200, 100, 200],
+    data: payload.data || { url: '/', targetView: 'historial_ventas' }
+  };
+
+  event.waitUntil(
+    self.registration.showNotification(payload.title, notificationOptions).then(() => {
+      return self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+        for (const client of clientList) {
+          client.postMessage({
+            type: 'PUSH_NOTIFICATION_DISPLAYED',
+            tag: notificationOptions.tag,
+            title: payload.title,
+            body: payload.body,
+            data: notificationOptions.data
+          });
+        }
+      });
+    })
+  );
+});
+
+// Notification Click Handler — Focuses or opens the installed PWA and navigates to the sale module
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const notifData = event.notification.data || {};
+  const targetUrl = notifData.url || '/';
+  const targetView = notifData.targetView || 'historial_ventas';
+
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+      for (const client of clientList) {
+        if ('focus' in client) {
+          client.focus();
+          client.postMessage({
+            type: 'NAVIGATE_FROM_PUSH',
+            view: targetView,
+            data: notifData
+          });
+          return;
+        }
+      }
+      if (self.clients.openWindow) {
+        return self.clients.openWindow(targetUrl);
+      }
+    })
   );
 });
 

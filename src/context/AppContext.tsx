@@ -15,8 +15,11 @@ import {
     hasOfflineSales, 
     cacheAppState, 
     getCachedAppState,
-    getOfflineStats
+    getOfflineStats,
+    markOperationCompleted,
+    isOperationCompleted
 } from '../utils/offlineStorage';
+import { saveHotUpdateSnapshot, hardRefreshApp } from '../utils/appRefresh';
 import {
     getCachedUserProfile,
     setCachedUserProfile,
@@ -24,6 +27,17 @@ import {
     setCachedMinimalProducts,
     purgeCostFieldsFromLocalCache
 } from '../utils/localForageCache';
+import {
+    CLIENT_VERSION,
+    CLIENT_BUILD_TIME,
+    compareVersions,
+    getEffectiveClientVersion,
+    acknowledgeServerVersion
+} from '../utils/versionCheck';
+import {
+    syncAdminPushSubscriptionIfGranted,
+    isOwnerOrAdminForPush
+} from '../utils/pushNotifications';
 
 // Initialize Client-Side Firebase SDK with auto-detect long polling to prevent stream timeouts
 const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
@@ -169,8 +183,8 @@ interface AppContextType {
     setDiscount: React.Dispatch<React.SetStateAction<number>>;
     discountType: 'monto' | 'porcentaje';
     setDiscountType: React.Dispatch<React.SetStateAction<'monto' | 'porcentaje'>>;
-    paymentMethod: 'Efectivo' | 'Tarjeta' | 'Transferencia' | 'Crédito';
-    setPaymentMethod: React.Dispatch<React.SetStateAction<'Efectivo' | 'Tarjeta' | 'Transferencia' | 'Crédito'>>;
+    paymentMethod: 'Efectivo' | 'Tarjeta' | 'Transferencia' | 'Crédito' | 'Mixto';
+    setPaymentMethod: React.Dispatch<React.SetStateAction<'Efectivo' | 'Tarjeta' | 'Transferencia' | 'Crédito' | 'Mixto'>>;
     theme: string;
     setTheme: React.Dispatch<React.SetStateAction<string>>;
     rgbSettings: RgbThemeSettings;
@@ -328,6 +342,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const [isOffline, setIsOffline] = useState(false);
     const [isSyncing, setIsSyncing] = useState(false);
     const syncRunningRef = useRef(false);
+    const inFlightSaleIdsRef = useRef<Set<string>>(new Set());
+    const inFlightActionIdsRef = useRef<Set<string>>(new Set());
     const [syncError, setSyncError] = useState<string | null>(null);
 
     // Offline & Sync Engine States
@@ -350,10 +366,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const [pwaUpdateStepMessage, setPwaUpdateStepMessage] = useState<string>('Iniciando...');
     const [pwaVersionInfo, setPwaVersionInfo] = useState<{ currentVersion: string; latestVersion: string; buildTime: number }>(() => {
         const storedBuild = localStorage.getItem('pwa_build_timestamp');
+        const effectiveVer = getEffectiveClientVersion(CLIENT_VERSION);
         return {
-            currentVersion: localStorage.getItem('pwa_app_version') || '2.4.0',
-            latestVersion: '2.4.0',
-            buildTime: storedBuild ? parseInt(storedBuild, 10) : 1771465200000
+            currentVersion: effectiveVer,
+            latestVersion: effectiveVer,
+            buildTime: storedBuild ? parseInt(storedBuild, 10) : CLIENT_BUILD_TIME
         };
     });
 
@@ -361,6 +378,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const checkForPwaUpdates = async (): Promise<boolean> => {
         let updateFound = false;
         try {
+            const effectiveCurrent = getEffectiveClientVersion(pwaVersionInfo.currentVersion);
+
             // 1. Service Worker update check
             if ('serviceWorker' in navigator && (window as any).__pwaServiceWorkerReg) {
                 const reg = (window as any).__pwaServiceWorkerReg;
@@ -381,13 +400,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
                 if (res && res.ok) {
                     const data = await res.json().catch(() => null);
-                    if (data && data.buildTime) {
-                        const localBuild = pwaVersionInfo.buildTime;
-                        if (data.buildTime > localBuild || (data.version && data.version !== pwaVersionInfo.currentVersion)) {
+                    if (data && data.version) {
+                        if (compareVersions(String(data.version), effectiveCurrent) > 0) {
                             setPwaVersionInfo(prev => ({
                                 ...prev,
-                                latestVersion: data.version || '2.4.0',
-                                buildTime: data.buildTime
+                                latestVersion: String(data.version),
+                                buildTime: Number(data.buildTime || prev.buildTime)
                             }));
                             setHasPwaUpdate(true);
                             updateFound = true;
@@ -396,13 +414,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 }
 
                 // Also check /api/app-version endpoint
-                const apiRes = await fetch(`/api/app-version?t=${Date.now()}`).catch(() => null);
+                const apiRes = await fetch(`/api/app-version?t=${Date.now()}`, {
+                    cache: 'no-store',
+                    headers: { 'Cache-Control': 'no-cache, no-store, must-revalidate' }
+                }).catch(() => null);
                 if (apiRes && apiRes.ok) {
                     const apiData = await apiRes.json().catch(() => null);
-                    if (apiData && apiData.version && apiData.version !== pwaVersionInfo.currentVersion) {
+                    if (apiData && apiData.version && compareVersions(String(apiData.version), effectiveCurrent) > 0) {
                         setPwaVersionInfo(prev => ({
                             ...prev,
-                            latestVersion: apiData.version
+                            latestVersion: String(apiData.version),
+                            buildTime: Number(apiData.buildTime || prev.buildTime)
                         }));
                         setHasPwaUpdate(true);
                         updateFound = true;
@@ -415,46 +437,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return updateFound;
     };
 
-    // Apply PWA update cleanly, purging old assets while preserving IndexedDB / business data
+    // Apply PWA update cleanly with Hot-Swap snapshot, purging old assets while preserving active cart, tabs, session, push & offline queues
     const applyPwaUpdate = async () => {
         setIsUpdatingPwa(true);
-        setPwaUpdateStepMessage('Iniciando actualización...');
+        setPwaUpdateStepMessage('Respaldando carrito y sesión...');
         if (showNotification) {
-            showNotification('Aplicando actualización a la última versión...', 'info');
+            showNotification('Actualizando a la última versión conservando tu carrito y sesión...', 'info');
         }
 
         try {
-            const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
-
-            await delay(250);
-            setPwaUpdateStepMessage('Limpiando caché...');
-            if (window.caches) {
-                const keys = await window.caches.keys();
-                await Promise.all(keys.map(k => window.caches.delete(k)));
-            }
-
-            await delay(300);
-            setPwaUpdateStepMessage('Desregistrando Service Worker...');
-            if ('serviceWorker' in navigator) {
-                const reg = (window as any).__pwaServiceWorkerReg || await navigator.serviceWorker.getRegistration();
-                if (reg && reg.waiting) {
-                    reg.waiting.postMessage({ type: 'SKIP_WAITING' });
-                    reg.waiting.postMessage('SKIP_WAITING');
-                }
-            }
-
-            await delay(300);
-            setPwaUpdateStepMessage(`Registrando nueva versión v${pwaVersionInfo.latestVersion}...`);
-            localStorage.setItem('pwa_app_version', pwaVersionInfo.latestVersion);
-            localStorage.setItem('pwa_build_timestamp', String(pwaVersionInfo.buildTime));
-
-            await delay(350);
-            setPwaUpdateStepMessage('Reiniciando terminal...');
-            await delay(250);
-
-            window.location.reload();
+            saveHotUpdateSnapshot({
+                cart,
+                tabs,
+                activeTabId,
+                clientName,
+                clientPhone,
+                discount,
+                discountType,
+                paymentMethod,
+                view,
+                targetVersion: pwaVersionInfo.latestVersion
+            });
+            acknowledgeServerVersion(pwaVersionInfo.latestVersion, pwaVersionInfo.buildTime);
+            await hardRefreshApp();
         } catch (e) {
             console.error('[PWA] Error applying update:', e);
+            acknowledgeServerVersion(pwaVersionInfo.latestVersion, pwaVersionInfo.buildTime);
             setPwaUpdateStepMessage('Recargando terminal...');
             window.location.reload();
         }
@@ -742,11 +750,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             console.error("Failed to parse rgb settings", e);
         }
         return {
-            effectType: 'neon',
-            speed: 20,
+            effectType: 'aiStudio',
+            speed: 14,
             glowIntensity: 'normal',
-            angle: -45,
-            customColors: ['#ff00ff', '#00f0ff', '#39ff14', '#0066ff', '#9900ff', '#ff7700'],
+            angle: 135,
+            customColors: ['#4285F4', '#8B5CF6', '#EC4899', '#06B6D4', '#3B82F6'],
             animationStyle: 'smooth'
         };
     });
@@ -803,7 +811,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const [clientPhone, setClientPhone] = useState(() => initialTab.clientPhone || "");
     const [discount, setDiscount] = useState(() => initialTab.discount || 0);
     const [discountType, setDiscountType] = useState<'monto' | 'porcentaje'>(() => initialTab.discountType || 'monto');
-    const [paymentMethod, setPaymentMethod] = useState<'Efectivo' | 'Tarjeta' | 'Transferencia' | 'Crédito'>(() => initialTab.paymentMethod || 'Efectivo');
+    const [paymentMethod, setPaymentMethod] = useState<'Efectivo' | 'Tarjeta' | 'Transferencia' | 'Crédito' | 'Mixto'>(() => initialTab.paymentMethod || 'Efectivo');
     const [cart, setCart] = useState<CartItem[]>(() => initialTab.cart || []);
 
     // Safety recall & recovery buffer states
@@ -1076,12 +1084,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
         themesToRemove.forEach(c => classes.remove(c));
         classes.add(`theme-${theme}`);
-        
-        if (theme === 'rgb') {
-            classes.add('gamer-rgb-glow');
-        } else {
-            classes.remove('gamer-rgb-glow');
-        }
+        // Ensure gamer-rgb-glow is never attached to the root <html> element
+        classes.remove('gamer-rgb-glow');
     }, [theme]);
 
     useEffect(() => {
@@ -1089,46 +1093,49 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         
         let colors: string[] = [];
         switch (rgbSettings.effectType) {
-            case 'rainbow':
-                colors = ['#ff0000', '#ffaa00', '#ffff00', '#00ff00', '#00ffff', '#0000ff', '#ff00ff', '#ff0000'];
+            case 'aiStudio':
+                colors = ['#4285F4', '#8B5CF6', '#EC4899', '#06B6D4', '#3B82F6', '#4285F4'];
                 break;
             case 'neon':
-                colors = ['#ff00ff', '#00f0ff', '#39ff14', '#ff0077', '#7000ff', '#ff00ff'];
+                colors = ['#4285F4', '#8B5CF6', '#D946EF', '#06B6D4', '#6366F1', '#4285F4'];
+                break;
+            case 'rainbow':
+                colors = ['#3B82F6', '#8B5CF6', '#EC4899', '#F43F5E', '#F59E0B', '#10B981', '#06B6D4', '#3B82F6'];
                 break;
             case 'fireIce':
-                colors = ['#ff2a00', '#ff9d00', '#00f0ff', '#0066ff', '#ff2a00'];
+                colors = ['#F43F5E', '#FB923C', '#38BDF8', '#6366F1', '#F43F5E'];
                 break;
             case 'aurora':
-                colors = ['#00ffcc', '#2efc3a', '#0d98ba', '#9900ff', '#39ff14', '#00ffcc'];
+                colors = ['#06B6D4', '#10B981', '#3B82F6', '#8B5CF6', '#06B6D4'];
                 break;
             case 'cyberpunk':
-                colors = ['#ff0055', '#9900ff', '#00ffcc', '#ff9900', '#ff00ff'];
+                colors = ['#F43F5E', '#A855F7', '#3B82F6', '#06B6D4', '#EC4899', '#F43F5E'];
                 break;
             case 'oceanic':
-                colors = ['#002244', '#005588', '#0088cc', '#00ffcc', '#00ffaa', '#002244'];
+                colors = ['#2563EB', '#0EA5E9', '#06B6D4', '#14B8A6', '#6366F1', '#2563EB'];
                 break;
             case 'sunset':
-                colors = ['#ff3300', '#ff6600', '#ff9900', '#cc0066', '#660066', '#ff3300'];
+                colors = ['#F43F5E', '#F97316', '#EC4899', '#8B5CF6', '#F43F5E'];
                 break;
             case 'pastel':
-                colors = ['#ffb7b2', '#ffdac1', '#e2f0cb', '#b5ead7', '#c7ceea', '#ffb7b2'];
+                colors = ['#818CF8', '#C084FC', '#F472B6', '#38BDF8', '#34D399', '#818CF8'];
                 break;
             case 'custom':
                 colors = rgbSettings.customColors && rgbSettings.customColors.length > 0
                     ? [...rgbSettings.customColors, rgbSettings.customColors[0]]
-                    : ['#ff00ff', '#00f0ff', '#ff00ff'];
+                    : ['#4285F4', '#8B5CF6', '#EC4899', '#06B6D4', '#4285F4'];
                 break;
             default:
-                colors = ['#ff00ff', '#00f0ff', '#39ff14', '#0066ff', '#9900ff', '#ff7700', '#ff00ff'];
+                colors = ['#4285F4', '#8B5CF6', '#EC4899', '#06B6D4', '#3B82F6', '#4285F4'];
         }
 
         const angleStr = `${rgbSettings.angle}deg`;
         const gradient = `linear-gradient(${angleStr}, ${colors.join(', ')})`;
         
-        let glowRadius = '15px';
-        let glowColor = 'rgba(0, 255, 204, 0.35)';
-        let glowHoverRadius = '25px';
-        let glowHoverColor = 'rgba(0, 255, 204, 0.65)';
+        let glowRadius = '14px';
+        let glowColor = 'rgba(99, 102, 241, 0.28)';
+        let glowHoverRadius = '22px';
+        let glowHoverColor = 'rgba(139, 92, 246, 0.48)';
 
         switch (rgbSettings.glowIntensity) {
             case 'none':
@@ -1138,22 +1145,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 glowHoverColor = 'rgba(0,0,0,0)';
                 break;
             case 'subtle':
-                glowRadius = '6px';
-                glowColor = 'rgba(0, 255, 204, 0.15)';
-                glowHoverRadius = '12px';
-                glowHoverColor = 'rgba(0, 255, 204, 0.3)';
+                glowRadius = '8px';
+                glowColor = 'rgba(99, 102, 241, 0.16)';
+                glowHoverRadius = '14px';
+                glowHoverColor = 'rgba(139, 92, 246, 0.30)';
                 break;
             case 'normal':
-                glowRadius = '15px';
-                glowColor = 'rgba(0, 255, 204, 0.35)';
-                glowHoverRadius = '25px';
-                glowHoverColor = 'rgba(0, 255, 204, 0.65)';
+                glowRadius = '14px';
+                glowColor = 'rgba(99, 102, 241, 0.28)';
+                glowHoverRadius = '22px';
+                glowHoverColor = 'rgba(139, 92, 246, 0.48)';
                 break;
             case 'intense':
-                glowRadius = '28px';
-                glowColor = 'rgba(0, 255, 204, 0.75)';
-                glowHoverRadius = '45px';
-                glowHoverColor = 'rgba(0, 255, 204, 0.95)';
+                glowRadius = '24px';
+                glowColor = 'rgba(139, 92, 246, 0.45)';
+                glowHoverRadius = '34px';
+                glowHoverColor = 'rgba(6, 182, 212, 0.65)';
                 break;
         }
 
@@ -1798,6 +1805,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             );
 
             for (const action of sortedActions) {
+                if (!action || !action.id) continue;
+                if (inFlightActionIdsRef.current.has(action.id)) continue;
+                if (isOperationCompleted(action.id, action.id)) {
+                    await deleteOfflineAction(action.id);
+                    continue;
+                }
+                inFlightActionIdsRef.current.add(action.id);
+
                 try {
                     // Replace temp IDs inside payload if needed
                     let payloadStr = JSON.stringify(action.payload);
@@ -1852,7 +1867,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                             break; // Stop loop until user re-authenticates
                         } else if (res.status === 409) {
                             // Idempotency conflict: action already accounted for on server
-                            console.warn(`[Offline Sync] Action ${action.id} reported 409 Conflict. Retaining for audit.`);
+                            console.warn(`[Offline Sync] Action ${action.id} reported 409 Conflict. Removing duplicate from queue.`);
+                            await deleteOfflineAction(action.id);
                         } else if (res.status === 400 || res.status === 404 || res.status === 422) {
                             // Retain problematic actions for operator review rather than silently dropping them
                             console.warn(`[Offline Sync] Action ${action.id} failed validation (${res.status}). Preserving for review.`);
@@ -1861,6 +1877,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 } catch (actionErr) {
                     console.error(`[Offline Sync] Network failed during sync of action ${action.id}:`, actionErr);
                     break; // Stop execution on connection loss
+                } finally {
+                    inFlightActionIdsRef.current.delete(action.id);
                 }
             }
 
@@ -1886,9 +1904,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             if (offlineSales.length === 0) return;
 
             console.log(`[Offline Sync] Found ${offlineSales.length} offline sales to synchronize.`);
-            let successCount = 0;
+            let newlyQueuedCount = 0;
+            let reconciledDuplicateCount = 0;
 
             for (const sale of offlineSales) {
+                if (!sale || !sale.id) continue;
+                const opId = sale.salePayload?.clientOperationId || sale.salePayload?.client_operation_id || sale.id;
+
+                // Prevent concurrent duplicate submission of the same offline sale
+                if (inFlightSaleIdsRef.current.has(sale.id) || inFlightSaleIdsRef.current.has(opId)) {
+                    continue;
+                }
+
+                // If already completed in local ledger, purge immediately without re-sending
+                if (isOperationCompleted(opId, sale.id)) {
+                    await deleteOfflineSale(sale.id, opId);
+                    continue;
+                }
+
+                inFlightSaleIdsRef.current.add(sale.id);
+                inFlightSaleIdsRef.current.add(opId);
+
                 try {
                     let clientId = sale.salePayload.client_id;
 
@@ -1925,10 +1961,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                         }
                     }
 
-                    // 2. Submit to Offline Quarantine Queue for Administrator Authorization (Prevents unverified stock deductions)
+                    // 2. Submit to Offline Quarantine Queue for Administrator Authorization (or automatic duplicate reconciliation if already recorded online)
                     const submitPayload = {
                         ...sale.salePayload,
                         id: sale.id,
+                        clientOperationId: opId,
                         client_name: sale.clientName,
                         client_phone: sale.clientPhone,
                         user_name: user?.username || sale.salePayload.user_name || 'Vendedor'
@@ -1945,9 +1982,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                     });
 
                     if (saleRes.ok) {
-                        // Success! Safely remove from local device queue as it is now in the server inbox
-                        await deleteOfflineSale(sale.id);
-                        successCount++;
+                        const resData = await saleRes.json().catch(() => ({}));
+                        markOperationCompleted(opId, sale.id);
+                        await deleteOfflineSale(sale.id, opId);
+
+                        if (resData.status === 'already_approved' || resData.status === 'already_queued' || resData.isDuplicate) {
+                            reconciledDuplicateCount++;
+                        } else {
+                            newlyQueuedCount++;
+                        }
                     } else {
                         const errText = await saleRes.text();
                         console.error(`[Offline Sync] Server rejected offline sale ${sale.id}:`, errText);
@@ -1955,16 +1998,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 } catch (saleErr) {
                     console.error(`[Offline Sync] Network failed during sync of sale ${sale.id}:`, saleErr);
                     break; // Stop syncing remaining if we are still offline or connection breaks
+                } finally {
+                    inFlightSaleIdsRef.current.delete(sale.id);
+                    inFlightSaleIdsRef.current.delete(opId);
                 }
             }
 
-            if (successCount > 0) {
-                safeDispatchEvent('triggerNotification', {
-                    detail: {
-                        message: `✓ Contingencia Offline: ${successCount} venta(s) enviada(s) a la Bandeja de Autorización del Administrador.`,
-                        type: 'info'
-                    }
-                });
+            if (newlyQueuedCount > 0 || reconciledDuplicateCount > 0) {
+                if (newlyQueuedCount > 0) {
+                    safeDispatchEvent('triggerNotification', {
+                        detail: {
+                            message: `✓ Contingencia Offline: ${newlyQueuedCount} venta(s) enviada(s) a la Bandeja de Autorización del Administrador.`,
+                            type: 'info'
+                        }
+                    });
+                } else if (reconciledDuplicateCount > 0) {
+                    safeDispatchEvent('triggerNotification', {
+                        detail: {
+                            message: `✓ Sincronización inteligente: ${reconciledDuplicateCount} venta(s) en cola ya estaban registradas en línea y se descartó el duplicado automáticamente.`,
+                            type: 'success'
+                        }
+                    });
+                }
                 // Refresh local lists with forced fresh fetch
                 sessionStorage.removeItem('last_inventory_version');
                 await fetchProducts(undefined, true);
@@ -2025,6 +2080,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     
+    // Automatically sync Web Push subscription for Owner/Admin if permission was already granted
+    // and handle navigation when clicking a native push notification
+    useEffect(() => {
+        if (user && isOwnerOrAdminForPush(user) && navigator.onLine) {
+            syncAdminPushSubscriptionIfGranted(user).catch(() => {});
+        }
+
+        const handleNavigateFromPush = (e: Event) => {
+            const detail = (e as CustomEvent).detail;
+            if (detail && detail.view) {
+                setView(detail.view as ViewType);
+            }
+        };
+        window.addEventListener('gtr-navigate-from-push', handleNavigateFromPush);
+        return () => {
+            window.removeEventListener('gtr-navigate-from-push', handleNavigateFromPush);
+        };
+    }, [user?.id, user?.role]);
+
     // Global WebSocket connection for settings/alerts
     useEffect(() => {
         if (!user || user.username === 'none') return;
@@ -2061,6 +2135,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                             localStorage.setItem('cached_exchange_rate', String(newRateNum));
                             safeDispatchEvent('exchange_rate_updated', { detail: newRateNum });
                         }
+                    } else if (data.type === 'app_update' && data.version) {
+                        window.dispatchEvent(new CustomEvent('app-update-pushed', { detail: data }));
+                    } else if (data.type === 'sale_push_notification' && isOwnerOrAdminForPush(user)) {
+                        safeDispatchEvent('triggerNotification', {
+                            detail: {
+                                message: `${data.title} — ${data.body}`,
+                                type: 'success'
+                            }
+                        });
+                        // Also show OS/PWA notification if permission is granted and Service Worker push did not already show this tag
+                        if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+                            setTimeout(async () => {
+                                if ((window as any).__lastDisplayedPushTag === data.tag) return;
+                                (window as any).__lastDisplayedPushTag = data.tag;
+                                try {
+                                    const reg = (window as any).__pwaServiceWorkerReg || (await navigator.serviceWorker?.getRegistration());
+                                    if (reg && typeof reg.showNotification === 'function') {
+                                        await reg.showNotification(data.title, {
+                                            body: data.body,
+                                            icon: data.icon || '/icon.svg',
+                                            badge: data.badge || '/icon.svg',
+                                            tag: data.tag,
+                                            renotify: true,
+                                            data: data.data
+                                        } as any);
+                                    }
+                                } catch {}
+                            }, 650);
+                        }
                     }
                 } catch (err) { }
             };
@@ -2078,7 +2181,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             if (socket) socket.close();
             if (reconnectTimeout) clearTimeout(reconnectTimeout);
         };
-    }, [user?.id, user?.username]);
+    }, [user?.id, user?.username, user?.role]);
 
 
     // Global Offline Queue and Connectivity Monitoring

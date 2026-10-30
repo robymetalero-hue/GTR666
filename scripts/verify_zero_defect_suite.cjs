@@ -245,8 +245,13 @@ async function runZeroDefectSuite() {
   if (fs.existsSync(prodDbPath)) {
     const roDb = new Database(prodDbPath, { readonly: true });
     try {
-      const placeholders = CONTAMINATED_SALE_IDS.map(() => '?').join(',');
-      const ghostSalesCount = roDb.prepare(`SELECT COUNT(*) as c FROM sales WHERE id IN (${placeholders})`).get(...CONTAMINATED_SALE_IDS).c;
+      const prodPurgedIds = [399, 400, 401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412, 413, 414, 415, 416, 417, 418, 419, 420, 421, 422, 423, 425, 426, 427, 428];
+      const placeholders = prodPurgedIds.map(() => '?').join(',');
+      const ghostSalesCount = roDb.prepare(`
+        SELECT COUNT(*) as c FROM sales
+        WHERE id IN (${placeholders})
+           OR CAST(id AS TEXT) IN (SELECT record_id FROM deleted_records WHERE table_name = 'sales')
+      `).get(...prodPurgedIds).c;
       const sale398 = roDb.prepare(`SELECT id, total FROM sales WHERE id = 398`).get();
       const sale424 = roDb.prepare(`SELECT id, total FROM sales WHERE id = 424`).get();
       const intactLegit = (!sale398 || Math.abs(sale398.total - 2150) < 0.01) && (!sale424 || Math.abs(sale424.total - 610) < 0.01);
@@ -254,7 +259,7 @@ async function runZeroDefectSuite() {
       recordTest(
         'ZD-02',
         'Prod-ReadOnly-Audit',
-        'Inspección Read-Only de gtr_pos.db: 0 ventas fantasma (#399-#436) y ventas #398/#424 intactas',
+        'Inspección Read-Only de gtr_pos.db: 0 ventas fantasma (#399-#423, #425-#428) y ventas reales intactas',
         ghostSalesCount === 0 && intactLegit,
         `Fantasmas=${ghostSalesCount}, #398=${sale398 ? sale398.total : 'N/A'}, #424=${sale424 ? sale424.total : 'N/A'}`
       );

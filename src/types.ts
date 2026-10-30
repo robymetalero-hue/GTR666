@@ -1,7 +1,7 @@
 export interface User {
     id: number;
     username: string;
-    role: 'admin' | 'trabajador';
+    role: 'admin' | 'propietario' | 'vendedor' | 'trabajador';
     email?: string | null;
     permissions: {
         view_reports: boolean;
@@ -85,11 +85,11 @@ export interface SaleTab {
     clientPhone: string;
     discount: number;
     discountType: 'monto' | 'porcentaje';
-    paymentMethod: 'Efectivo' | 'Tarjeta' | 'Transferencia' | 'Crédito';
+    paymentMethod: 'Efectivo' | 'Tarjeta' | 'Transferencia' | 'Crédito' | 'Mixto';
 }
 
 export interface RgbThemeSettings {
-    effectType: 'rainbow' | 'neon' | 'fireIce' | 'aurora' | 'cyberpunk' | 'pastel' | 'custom' | 'oceanic' | 'sunset';
+    effectType: 'aiStudio' | 'rainbow' | 'neon' | 'fireIce' | 'aurora' | 'cyberpunk' | 'pastel' | 'custom' | 'oceanic' | 'sunset';
     speed: number; // in seconds
     glowIntensity: 'none' | 'subtle' | 'normal' | 'intense';
     angle: number; // in degrees

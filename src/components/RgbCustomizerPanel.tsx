@@ -4,17 +4,18 @@ import { Sliders, Palette, Sparkles, Trash2, Activity, Play } from 'lucide-react
 
 export default function RgbCustomizerPanel() {
     const { rgbSettings, setRgbSettings, user } = useAppContext();
-    const isAdmin = user?.role === 'admin';
+    const isAdmin = user?.role === 'admin' || user?.role === 'propietario';
 
     const palettes = [
-        { id: 'neon', name: '⚡ Ola de Neón', desc: 'Púrpuras, rosas y verdes eléctricos', colors: ['#ff00ff', '#00f0ff', '#39ff14', '#ff0077', '#7000ff'] },
-        { id: 'rainbow', name: '🌈 Arcoíris Clásico', desc: 'Espectro continuo tradicional', colors: ['#ff0000', '#ffaa00', '#ffff00', '#00ff00', '#00ffff', '#0000ff', '#ff00ff'] },
-        { id: 'cyberpunk', name: '🔮 Cyberpunk Atardecer', desc: 'Violetas de neón y fucsias cibernéticos', colors: ['#ff0055', '#9900ff', '#00ffcc', '#ff9900', '#ff00ff'] },
-        { id: 'oceanic', name: '🌊 Azul Océano / Deep', desc: 'Azul profundo, turquesa, esmeralda y verde', colors: ['#002244', '#005588', '#0088cc', '#00ffcc', '#00ffaa'] },
-        { id: 'sunset', name: '🌇 Atardecer de Fuego', desc: 'Rojo vivo, naranja radiante, coral y púrpura', colors: ['#ff3300', '#ff6600', '#ff9900', '#cc0066', '#660066'] },
-        { id: 'aurora', name: '🌌 Aurora Boreal', desc: 'Verdes boreales, cianes y toques púrpuras', colors: ['#00ffcc', '#2efc3a', '#0d98ba', '#9900ff', '#39ff14'] },
-        { id: 'pastel', name: '🍧 Dulce Algodón', desc: 'Tonalidades pastel suaves y relajadas', colors: ['#ffb7b2', '#ffdac1', '#e2f0cb', '#b5ead7', '#c7ceea'] },
-        { id: 'custom', name: '✨ Paleta Personalizada', desc: 'Define tus propios colores hexadecimales', colors: [] },
+        { id: 'aiStudio', name: '✨ AI Studio / Gemini', desc: 'Bordes luminosos azul eléctrico, violeta, magenta y cian estilo Google AI Studio', colors: ['#4285F4', '#8B5CF6', '#EC4899', '#06B6D4', '#3B82F6'] },
+        { id: 'neon', name: '⚡ Ola de Neón', desc: 'Cian eléctrico, azul zafiro, violeta y magenta puro', colors: ['#00F5D4', '#3B82F6', '#8B5CF6', '#EC4899', '#6366F1'] },
+        { id: 'rainbow', name: '🌈 Prisma Luminoso', desc: 'Espectro cromático limpio sin tonos opacos', colors: ['#3B82F6', '#6366F1', '#A855F7', '#EC4899', '#F43F5E', '#8B5CF6'] },
+        { id: 'cyberpunk', name: '🔮 Cyberpunk Atardecer', desc: 'Rosa neón, púrpura profundo y cian sintético', colors: ['#F43F5E', '#D946EF', '#8B5CF6', '#3B82F6', '#06B6D4'] },
+        { id: 'oceanic', name: '🌊 Azul Océano / Deep', desc: 'Azul zafiro, cian luminoso y esmeralda cristalino', colors: ['#2563EB', '#0284C7', '#06B6D4', '#14B8A6', '#10B981'] },
+        { id: 'sunset', name: '🌇 Atardecer de Fuego', desc: 'Coral vibrante, fucsia, violeta y ámbar luminoso', colors: ['#F43F5E', '#EC4899', '#A855F7', '#F97316', '#F59E0B'] },
+        { id: 'aurora', name: '🌌 Aurora Boreal', desc: 'Esmeralda boreal, turquesa, azul real y violeta', colors: ['#10B981', '#06B6D4', '#3B82F6', '#8B5CF6', '#14B8A6'] },
+        { id: 'pastel', name: '🍧 Cristal Pastel', desc: 'Tonalidades suaves de lavanda, rosa y cielo', colors: ['#60A5FA', '#A78BFA', '#F472B6', '#38BDF8', '#818CF8'] },
+        { id: 'custom', name: '🎨 Paleta Personalizada', desc: 'Define tus propios colores hexadecimales', colors: [] },
     ];
 
     const animationStyles = [

@@ -139,20 +139,17 @@
   --color-indigo-900: var(--brand-900);
   --color-indigo-950: var(--brand-950);
 
-  --animate-rgb-shift: rgb-shift var(--rgb-speed, 20s) var(--rgb-ease, ease-in-out) var(--rgb-direction, infinite);
+  --animate-rgb-shift: rgb-shift var(--rgb-speed, 14s) var(--rgb-ease, ease-in-out) var(--rgb-direction, infinite);
 
   @keyframes rgb-shift {
     0% {
       background-position: 0% 50%;
-      filter: hue-rotate(0deg);
     }
     50% {
       background-position: 100% 50%;
-      filter: hue-rotate(180deg);
     }
     100% {
       background-position: 0% 50%;
-      filter: hue-rotate(360deg);
     }
   }
 }
@@ -270,95 +267,133 @@
   overscroll-behavior-y: auto;
 }
 
-.gamer-rgb-glow {
-  background: var(--rgb-gradient, linear-gradient(-45deg, #ff00ff, #00f0ff, #39ff14, #0066ff, #9900ff, #ff7700, #ff00ff));
-  background-size: 400% 400%;
-  animation: rgb-shift var(--rgb-speed, 20s) var(--rgb-ease, ease-in-out) var(--rgb-direction, infinite);
-  box-shadow: 0 0 var(--rgb-glow-radius, 15px) var(--rgb-glow-color, rgba(0, 255, 204, 0.35));
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.gamer-rgb-glow:hover {
-  transform: translateY(-1px) scale(1.02);
-  box-shadow: 0 0 var(--rgb-glow-hover-radius, 25px) var(--rgb-glow-hover-color, rgba(0, 255, 204, 0.65)), 0 0 10px rgba(255, 0, 85, 0.65);
-}
-
-/* Theme RGB Gamer / Neon System */
+/* ============================================================================
+   GOOGLE AI STUDIO / GEMINI RGB THEME SYSTEM (CLEAN SURFACES + LUMINOUS BORDERS)
+   ============================================================================ */
 .theme-rgb {
-  --brand-50: #faf5ff;
-  --brand-100: #f3e8ff;
-  --brand-150: #e9d5ff;
-  --brand-200: #e9d5ff;
-  --brand-300: #d8b4fe;
-  --brand-400: #c084fc;
-  --brand-500: #a855f7;
-  --brand-550: #9333ea;
-  --brand-600: #9333ea;
-  --brand-650: #7e22ce;
-  --brand-700: #7e22ce;
-  --brand-750: #6b21a8;
-  --brand-800: #6b21a8;
-  --brand-850: #581c87;
-  --brand-900: #3b0764;
-  --brand-950: #0f051d;
+  --brand-50: #eef2ff;
+  --brand-100: #e0e7ff;
+  --brand-150: #c7d2fe;
+  --brand-200: #c7d2fe;
+  --brand-300: #a5b4fc;
+  --brand-400: #818cf8;
+  --brand-500: #6366f1;
+  --brand-550: #4f46e5;
+  --brand-600: #4f46e5;
+  --brand-650: #4338ca;
+  --brand-700: #4338ca;
+  --brand-750: #3730a3;
+  --brand-800: #3730a3;
+  --brand-850: #312e81;
+  --brand-900: #1e1b4b;
+  --brand-950: #0f0b29;
+  --rgb-surface-card: #ffffff;
+  --rgb-surface-subtle: #f8fafc;
+  --rgb-primary-fill: linear-gradient(135deg, #2563eb 0%, #4f46e5 50%, #7c3aed 100%);
 }
 
-/* Elevate colored buttons to gorgeous custom RGB shifting style when the RGB theme is active */
-.theme-rgb button[class*="bg-indigo-"],
-.theme-rgb button[class*="bg-emerald-"],
-.theme-rgb button[class*="bg-blue-"],
-.theme-rgb button[class*="bg-violet-"],
-.theme-rgb button[class*="bg-purple-"],
-.theme-rgb button[class*="bg-rose-"],
-.theme-rgb button[class*="bg-orange-"],
-.theme-rgb button[class*="bg-amber-"],
-.theme-rgb button[class*="bg-[#"],
-.theme-rgb button.gamer-rgb-glow,
-.theme-rgb .gamer-rgb-glow,
+html.dark.theme-rgb,
+.theme-rgb.dark {
+  --rgb-surface-card: #0c111e;
+  --rgb-surface-subtle: #080d16;
+  --rgb-primary-fill: linear-gradient(135deg, #1e1b4b 0%, #172554 50%, #2e1065 100%);
+}
+
+/* Primary Action / Checkout CTA with AI Studio luminous animated RGB border */
 .gamer-rgb-glow {
-  background: var(--rgb-gradient, linear-gradient(-45deg, #ff00ff, #00f0ff, #39ff14, #0066ff, #9900ff, #ff7700, #ff00ff)) !important;
-  background-size: 400% 400% !important;
-  animation: rgb-shift var(--rgb-speed, 20s) var(--rgb-ease, ease-in-out) var(--rgb-direction, infinite) !important;
-  box-shadow: 0 0 var(--rgb-glow-radius, 12px) var(--rgb-glow-color, rgba(168, 85, 247, 0.35)) !important;
+  border: 2px solid transparent !important;
+  background-image: var(--rgb-primary-fill, linear-gradient(135deg, #2563eb, #4f46e5, #7c3aed)), var(--rgb-gradient, linear-gradient(135deg, #4285F4, #8B5CF6, #EC4899, #06B6D4, #3B82F6, #4285F4)) !important;
+  background-origin: border-box !important;
+  background-clip: padding-box, border-box !important;
+  background-size: 100% 100%, 300% 300% !important;
+  animation: rgb-shift var(--rgb-speed, 14s) var(--rgb-ease, ease-in-out) var(--rgb-direction, infinite) !important;
+  box-shadow: 0 4px var(--rgb-glow-radius, 14px) var(--rgb-glow-color, rgba(99, 102, 241, 0.28)) !important;
   color: #ffffff !important;
-  border: none !important;
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4) !important;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.2s ease !important;
 }
 
-.theme-rgb button[class*="bg-indigo-"]:hover,
-.theme-rgb button[class*="bg-emerald-"]:hover,
-.theme-rgb button[class*="bg-blue-"]:hover,
-.theme-rgb button[class*="bg-violet-"]:hover,
-.theme-rgb button[class*="bg-purple-"]:hover,
-.theme-rgb button[class*="bg-rose-"]:hover,
-.theme-rgb button[class*="bg-orange-"]:hover,
-.theme-rgb button[class*="bg-amber-"]:hover,
-.theme-rgb button[class*="bg-[#"]:hover,
-.theme-rgb button.gamer-rgb-glow:hover,
-.theme-rgb .gamer-rgb-glow:hover,
-.gamer-rgb-glow:hover {
-  transform: translateY(-1.5px) scale(1.02) !important;
-  box-shadow: 0 0 var(--rgb-glow-hover-radius, 20px) var(--rgb-glow-hover-color, rgba(168, 85, 247, 0.65)), 0 0 10px rgba(0, 240, 255, 0.5) !important;
-}
-
-/* Subtle outline hover style for secondary or gray buttons in RGB mode */
-.theme-rgb button:not(.gamer-rgb-glow):not([class*="bg-indigo-"]):not([class*="bg-emerald-"]):not([class*="bg-blue-"]):not([class*="bg-violet-"]):not([class*="bg-purple-"]):not([class*="bg-rose-"]):not([class*="bg-orange-"]):not([class*="bg-amber-"]):not([class*="bg-[#"]) {
-  transition: all 0.2s ease !important;
-}
-
-.theme-rgb button:not(.gamer-rgb-glow):not([class*="bg-indigo-"]):not([class*="bg-emerald-"]):not([class*="bg-blue-"]):not([class*="bg-violet-"]):not([class*="bg-purple-"]):not([class*="bg-rose-"]):not([class*="bg-orange-"]):not([class*="bg-amber-"]):not([class*="bg-[#"]):hover {
-  box-shadow: 0 0 10px rgba(168, 85, 247, 0.25) !important;
-  border-color: rgba(168, 85, 247, 0.45) !important;
+.gamer-rgb-glow:hover:not(:disabled) {
   transform: translateY(-1px) !important;
+  box-shadow: 0 6px var(--rgb-glow-hover-radius, 22px) var(--rgb-glow-hover-color, rgba(139, 92, 246, 0.48)) !important;
+}
+
+/* 1. Cards, Panels & Modals in RGB Mode: Clean dark/light interior + animated AI Studio RGB border */
+.theme-rgb div.bg-white[class*="border"][class*="rounded-2xl"],
+.theme-rgb div.bg-white[class*="border"][class*="rounded-3xl"],
+.theme-rgb div.bg-white[class*="border"][class*="rounded-xl"],
+.theme-rgb section.bg-white[class*="border"],
+.theme-rgb aside[class*="border"] {
+  border: 1.5px solid transparent !important;
+  background-image: linear-gradient(var(--rgb-surface-card), var(--rgb-surface-card)), var(--rgb-gradient, linear-gradient(135deg, #4285F4, #8B5CF6, #EC4899, #06B6D4, #3B82F6, #4285F4)) !important;
+  background-origin: border-box !important;
+  background-clip: padding-box, border-box !important;
+  background-size: 100% 100%, 300% 300% !important;
+  animation: rgb-shift var(--rgb-speed, 14s) var(--rgb-ease, ease-in-out) var(--rgb-direction, infinite) !important;
+  box-shadow: 0 2px var(--rgb-glow-radius, 12px) var(--rgb-glow-color, rgba(99, 102, 241, 0.14));
+}
+
+/* 2. Solid Primary Buttons in RGB Mode: Vibrant interior + luminous animated RGB border */
+.theme-rgb button.bg-indigo-600:not(:disabled),
+.theme-rgb button.bg-indigo-650:not(:disabled),
+.theme-rgb button.bg-blue-600:not(:disabled),
+.theme-rgb button.bg-emerald-600:not(:disabled),
+.theme-rgb button.bg-violet-600:not(:disabled),
+.theme-rgb button.gamer-rgb-glow:not(:disabled) {
+  border: 1.5px solid transparent !important;
+  background-image: var(--rgb-primary-fill), var(--rgb-gradient, linear-gradient(135deg, #4285F4, #8B5CF6, #EC4899, #06B6D4, #3B82F6, #4285F4)) !important;
+  background-origin: border-box !important;
+  background-clip: padding-box, border-box !important;
+  background-size: 100% 100%, 300% 300% !important;
+  animation: rgb-shift var(--rgb-speed, 14s) var(--rgb-ease, ease-in-out) var(--rgb-direction, infinite) !important;
+  box-shadow: 0 3px var(--rgb-glow-radius, 14px) var(--rgb-glow-color, rgba(99, 102, 241, 0.28)) !important;
+  color: #ffffff !important;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), box-shadow 0.2s ease !important;
+}
+
+.theme-rgb button.bg-indigo-600:hover:not(:disabled),
+.theme-rgb button.bg-indigo-650:hover:not(:disabled),
+.theme-rgb button.bg-blue-600:hover:not(:disabled),
+.theme-rgb button.bg-emerald-600:hover:not(:disabled),
+.theme-rgb button.bg-violet-600:hover:not(:disabled),
+.theme-rgb button.gamer-rgb-glow:hover:not(:disabled) {
+  transform: translateY(-1px) !important;
+  box-shadow: 0 5px var(--rgb-glow-hover-radius, 22px) var(--rgb-glow-hover-color, rgba(139, 92, 246, 0.48)) !important;
+}
+
+/* 3. Secondary / Surface Bordered Buttons in RGB Mode: Clean surface + AI Studio animated RGB border */
+.theme-rgb button[class*="border"]:not(.bg-indigo-600):not(.bg-indigo-650):not(.bg-blue-600):not(.bg-emerald-600):not(.bg-violet-600):not(.bg-rose-600):not(.bg-amber-600):not(.gamer-rgb-glow):not(:disabled) {
+  border: 1.5px solid transparent !important;
+  background-image: linear-gradient(var(--rgb-surface-card), var(--rgb-surface-card)), var(--rgb-gradient, linear-gradient(135deg, #4285F4, #8B5CF6, #EC4899, #06B6D4, #3B82F6, #4285F4)) !important;
+  background-origin: border-box !important;
+  background-clip: padding-box, border-box !important;
+  background-size: 100% 100%, 300% 300% !important;
+  animation: rgb-shift var(--rgb-speed, 14s) var(--rgb-ease, ease-in-out) var(--rgb-direction, infinite) !important;
+  transition: transform 0.2s ease, box-shadow 0.2s ease !important;
+}
+
+.theme-rgb button[class*="border"]:not(.bg-indigo-600):not(.bg-indigo-650):not(.bg-blue-600):not(.bg-emerald-600):not(.bg-violet-600):not(.bg-rose-600):not(.bg-amber-600):not(.gamer-rgb-glow):hover:not(:disabled) {
+  transform: translateY(-1px) !important;
+  box-shadow: 0 3px var(--rgb-glow-radius, 12px) var(--rgb-glow-color, rgba(99, 102, 241, 0.25)) !important;
+}
+
+/* 4. Inputs & Selects in RGB Mode: Subtle animated RGB border on focus */
+.theme-rgb input:focus,
+.theme-rgb select:focus,
+.theme-rgb textarea:focus {
+  border-color: transparent !important;
+  background-image: linear-gradient(var(--rgb-surface-card), var(--rgb-surface-card)), var(--rgb-gradient, linear-gradient(135deg, #4285F4, #8B5CF6, #EC4899, #06B6D4, #3B82F6, #4285F4)) !important;
+  background-origin: border-box !important;
+  background-clip: padding-box, border-box !important;
+  background-size: 100% 100%, 300% 300% !important;
+  box-shadow: 0 0 12px var(--rgb-glow-color, rgba(99, 102, 241, 0.25)) !important;
 }
 
 /* Accessibility & High Contrast Protections (M10) */
 .theme-rgb button:disabled,
 .theme-rgb button[disabled] {
-  background: rgba(100, 116, 139, 0.25) !important;
+  background: rgba(100, 116, 139, 0.2) !important;
   color: rgba(148, 163, 184, 0.6) !important;
+  border: 1px solid rgba(148, 163, 184, 0.2) !important;
   box-shadow: none !important;
   transform: none !important;
   cursor: not-allowed !important;

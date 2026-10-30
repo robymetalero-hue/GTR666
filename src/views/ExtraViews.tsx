@@ -247,7 +247,7 @@ export function InicioView() {
 // VIEW: HISTORIAL DE VENTAS
 // ----------------------------------------------------
 export function HistorialVentasView() {
-    const { user, receiptTemplate, setView, isKioskLocked, requestSupervisorAuth } = useAppContext();
+    const { user, receiptTemplate, setView, isKioskLocked, requestSupervisorAuth, clients, showNotification } = useAppContext();
     const outerScroll = useElasticScroll(true);
     const listScroll = useElasticScroll(true);
     const [sales, setSales] = useState<any[]>([]);
@@ -357,9 +357,9 @@ export function HistorialVentasView() {
         return Array.from(new Set(list)).filter(Boolean) as string[];
     }, [sales]);
 
-    // Derive unique payment methods list from actual sales
+    // Derive unique payment methods list from actual sales + core POS methods
     const paymentMethods = React.useMemo(() => {
-        const list = sales.map(s => s.payment_method);
+        const list = ['Efectivo', 'Transferencia', 'Mixto', 'Tarjeta', ...sales.map(s => s.payment_method)];
         return Array.from(new Set(list)).filter(Boolean) as string[];
     }, [sales]);
 
@@ -929,10 +929,17 @@ export function HistorialVentasView() {
         }
     };
 
+    const [sharePhoneInput, setSharePhoneInput] = useState<string>('');
+
     // Trigger share dialog options panel
     const triggerShareOptions = (sale: any, items: any[]) => {
         setSharingSale(sale);
         setSharingItems(items);
+        const matchedClient = (clients || []).find((c: any) =>
+            (sale.client_id && Number(c.id) === Number(sale.client_id)) ||
+            (sale.client_name && String(c.name || '').toLowerCase() === String(sale.client_name).toLowerCase())
+        );
+        setSharePhoneInput(sale.client_phone || matchedClient?.phone || '');
         setShowShareOptionsModal(true);
     };
 
@@ -1015,6 +1022,41 @@ export function HistorialVentasView() {
         }
     };
 
+    // Instant direct WhatsApp receipt text (no cloud upload required)
+    const handleSendDirectWhatsAppText = () => {
+        if (!sharingSale) return;
+        const sym = sharingSale.currency === 'USD' ? '$' : 'Bs.';
+        const itemsText = sharingItems.map(item => `• ${item.quantity}x ${item.product_name} (${sym}${Number(item.price || 0).toFixed(2)})`).join('\n');
+        const discountText = Number(sharingSale.discount || 0) > 0 ? `\n*Descuento:* -${sym}${Number(sharingSale.discount).toFixed(2)}` : '';
+        const notesText = sharingSale.notes ? `\n📝 *Detalle:* ${sharingSale.notes}` : '';
+        const totalText = `${sym} ${Number(sharingSale.total || 0).toFixed(2)} ${sharingSale.currency || 'BOB'}`;
+
+        const message = `*GTR POS - COMPROBANTE DE VENTA #${sharingSale.id}*\n\n` +
+                        `📅 *Fecha:* ${new Date(sharingSale.created_at).toLocaleString('es-BO')}\n` +
+                        `👤 *Cliente:* ${sharingSale.client_name || 'Particular'}\n` +
+                        `💳 *Método de Pago:* ${sharingSale.payment_method}${notesText}\n\n` +
+                        `*DETALLE DE ARTÍCULOS:*\n${itemsText}` +
+                        `${discountText}\n\n` +
+                        `*TOTAL COBRADO:* *${totalText}*\n\n` +
+                        `¡Gracias por su preferencia!`;
+
+        const digits = String(sharePhoneInput || '').replace(/\D/g, '');
+        const normalizedPhone = digits.length === 8 ? `591${digits}` : digits;
+        const encodedMsg = encodeURIComponent(message);
+        const whatsappUrl = normalizedPhone
+            ? `https://wa.me/${normalizedPhone}?text=${encodedMsg}`
+            : `https://wa.me/?text=${encodedMsg}`;
+
+        const link = document.createElement('a');
+        link.href = whatsappUrl;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        if (showNotification) showNotification(`Abriendo WhatsApp para Ticket #${sharingSale.id}`, 'success');
+    };
+
     // Save PDF and open WhatsApp interface (Enlace)
     const handleShareWhatsApp = async () => {
         if (!sharingSale) return;
@@ -1033,7 +1075,6 @@ export function HistorialVentasView() {
                 const data = await res.json();
                 const shareUrl = data.url;
 
-                // Rich structured text message
                 const itemsText = sharingItems.map(item => `• ${item.quantity}x ${item.product_name} (${sharingSale.currency === 'USD' ? '$' : 'Bs.'}${item.price.toFixed(2)})`).join('\n');
                 const discountText = sharingSale.discount > 0 ? `\nDescuento: -${sharingSale.currency === 'USD' ? '$' : 'Bs.'}${sharingSale.discount.toFixed(2)}` : '';
                 const totalText = `${sharingSale.currency === 'USD' ? '$' : 'Bs.'} ${sharingSale.total.toFixed(2)} ${sharingSale.currency || 'BOB'}`;
@@ -1042,21 +1083,32 @@ export function HistorialVentasView() {
                                 `📅 *Fecha/Hora:* ${new Date(sharingSale.created_at).toLocaleString()}\n` +
                                 `👤 *Cliente:* ${sharingSale.client_name || 'Al público / Particular'}\n` +
                                 `💳 *Método de Pago:* ${sharingSale.payment_method}\n\n` +
-                                `*DETALLE DE ARTÍCULOS DETALLES:*\n${itemsText}\n` +
+                                `*DETALLE DE ARTÍCULOS:*\n${itemsText}\n` +
                                 `${discountText}\n` +
                                 `*TOTAL COBRADO:* *${totalText}*\n\n` +
                                 `📄 *Ver & Descargar Documento Oficial PDF:* ${shareUrl}\n\n` +
                                 `¡Gracias por preferir nuestro servicio! GTR POS Terminal.`;
 
+                const digits = String(sharePhoneInput || '').replace(/\D/g, '');
+                const normalizedPhone = digits.length === 8 ? `591${digits}` : digits;
                 const encodedMsg = encodeURIComponent(message);
-                const whatsappUrl = `https://api.whatsapp.com/send?text=${encodedMsg}`;
-                window.open(whatsappUrl, '_blank');
+                const whatsappUrl = normalizedPhone
+                    ? `https://wa.me/${normalizedPhone}?text=${encodedMsg}`
+                    : `https://wa.me/?text=${encodedMsg}`;
+                const link = document.createElement('a');
+                link.href = whatsappUrl;
+                link.target = '_blank';
+                link.rel = 'noopener noreferrer';
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
             } else {
-                alert("Código de respuesta errado al intentar subir comprobante.");
+                if (showNotification) showNotification("No se pudo subir el PDF. Enviando resumen directo por WhatsApp.", "info");
+                handleSendDirectWhatsAppText();
             }
         } catch (err) {
             console.error("Error uploading or sharing ticket:", err);
-            alert("No se pudo iniciar el flujo de sincronización de WhatsApp.");
+            handleSendDirectWhatsAppText();
         } finally {
             setSharingId(null);
         }
@@ -1159,7 +1211,7 @@ export function HistorialVentasView() {
                 </div>
 
                 {/* 2. Capital Invertido */}
-                {user?.role === 'admin' && (
+                {(user?.role === 'admin' || user?.role === 'propietario') && (
                     <>
                         <div className="bg-white dark:bg-[#0c111e] p-3.5 sm:p-4 rounded-2xl border border-slate-200/80 dark:border-slate-850 shadow-xs flex flex-col justify-between transition hover:border-amber-500/30">
                             <div className="flex items-center gap-1.5 mb-1">
@@ -1388,7 +1440,9 @@ export function HistorialVentasView() {
                                                     <span className={`text-[9px] px-1.5 py-0.2 rounded-md font-bold uppercase tracking-wider ${
                                                         sale.payment_method === 'Efectivo' 
                                                             ? 'bg-emerald-500/10 text-emerald-600' 
-                                                            : 'bg-indigo-500/10 text-indigo-600'
+                                                            : sale.payment_method === 'Mixto'
+                                                                ? 'bg-violet-500/10 text-violet-600 dark:text-violet-400'
+                                                                : 'bg-indigo-500/10 text-indigo-600'
                                                     }`}>
                                                         {sale.payment_method}
                                                     </span>
@@ -1469,11 +1523,13 @@ export function HistorialVentasView() {
                                                         <span className={`text-[9px] px-2 py-0.5 rounded-lg border uppercase tracking-wider font-extrabold ${
                                                             sale.payment_method === 'Efectivo' 
                                                                 ? 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20' 
-                                                                : sale.payment_method === 'Tarjeta' 
-                                                                    ? 'bg-indigo-500/10 text-indigo-600 border-indigo-500/20' 
-                                                                    : sale.payment_method === 'Crédito'
-                                                                        ? 'bg-amber-500/10 text-amber-600 border-amber-500/20'
-                                                                        : 'bg-indigo-500/10 text-indigo-600 border-indigo-500/20'
+                                                                : sale.payment_method === 'Mixto'
+                                                                    ? 'bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20'
+                                                                    : sale.payment_method === 'Tarjeta' 
+                                                                        ? 'bg-indigo-500/10 text-indigo-600 border-indigo-500/20' 
+                                                                        : sale.payment_method === 'Crédito'
+                                                                            ? 'bg-amber-500/10 text-amber-600 border-amber-500/20'
+                                                                            : 'bg-indigo-500/10 text-indigo-600 border-indigo-500/20'
                                                         }`}>
                                                             {sale.payment_method}
                                                         </span>
@@ -1778,19 +1834,19 @@ export function HistorialVentasView() {
                             </div>
 
                             {/* Modal Footer */}
-                            <div className="border-t border-slate-150 dark:border-slate-850 pt-3 flex items-center justify-between shrink-0 gap-2">
-                                <div className="flex flex-wrap gap-2">
+                            <div className="border-t border-slate-150 dark:border-slate-850 pt-3 flex flex-col sm:flex-row sm:items-center justify-between shrink-0 gap-2">
+                                <div className="grid grid-cols-2 sm:flex sm:flex-wrap gap-2 w-full sm:w-auto">
                                     <button
                                         onClick={() => handleReprintPDF(selectedSale, saleItems)}
-                                        className="py-2.5 px-4 bg-indigo-600 hover:bg-indigo-500 text-white font-extrabold text-xs rounded-xl tracking-wider flex items-center gap-1.5 cursor-pointer uppercase transition-all"
+                                        className="py-2.5 px-3.5 bg-indigo-600 hover:bg-indigo-500 text-white font-extrabold text-xs rounded-xl tracking-wider flex items-center justify-center gap-1.5 cursor-pointer uppercase transition-all"
                                     >
-                                        <Printer size={13} /> Reimprimir Copia
+                                        <Printer size={13} /> Reimprimir
                                     </button>
                                     <button
                                         onClick={() => triggerShareOptions(selectedSale, saleItems)}
-                                        className="py-2.5 px-4 bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-xs rounded-xl tracking-wider flex items-center gap-1.5 cursor-pointer transition-all"
+                                        className="py-2.5 px-3.5 bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold text-xs rounded-xl tracking-wider flex items-center justify-center gap-1.5 cursor-pointer transition-all"
                                     >
-                                        <Share2 size={13} /> Compartir Ticket
+                                        <Share2 size={13} /> Compartir
                                     </button>
                                     <button
                                         onClick={() => {
@@ -1805,14 +1861,14 @@ export function HistorialVentasView() {
                                                 proceedRefund();
                                             }
                                         }}
-                                        className="py-2.5 px-4 bg-rose-600 hover:bg-rose-500 text-white font-extrabold text-xs rounded-xl tracking-wider flex items-center gap-1.5 cursor-pointer transition-all uppercase"
+                                        className="col-span-2 sm:col-span-1 py-2.5 px-3.5 bg-rose-600 hover:bg-rose-500 text-white font-extrabold text-xs rounded-xl tracking-wider flex items-center justify-center gap-1.5 cursor-pointer transition-all uppercase"
                                     >
                                         <Undo2 size={13} /> Devolución
                                     </button>
                                 </div>
                                 <button 
                                     onClick={() => setShowDetailModal(false)}
-                                    className="py-2.5 px-5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-850 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 font-extrabold text-xs rounded-xl border border-slate-200/50 dark:border-slate-800 transition cursor-pointer"
+                                    className="w-full sm:w-auto py-2.5 px-5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-850 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 font-extrabold text-xs rounded-xl border border-slate-200/50 dark:border-slate-800 transition cursor-pointer"
                                 >
                                     Cerrar
                                 </button>
@@ -1921,29 +1977,51 @@ export function HistorialVentasView() {
                                     </div>
                                 </div>
 
-                                {/* Option Block: COMPANION LINK ON PORTAL */}
-                                <div className="p-3.5 rounded-2xl border border-slate-200/50 dark:border-slate-850 bg-slate-50/50 dark:bg-black/15 flex flex-col gap-2">
-                                    <div className="flex items-center gap-2 text-emerald-650 dark:text-emerald-405 font-sans font-black text-[10.5px] uppercase tracking-widest">
+                                {/* Option Block: WHATSAPP DIRECT & CLOUD LINK */}
+                                <div className="p-3.5 rounded-2xl border border-emerald-500/30 dark:border-emerald-900/50 bg-emerald-50/40 dark:bg-emerald-950/15 flex flex-col gap-2.5">
+                                    <div className="flex items-center gap-2 text-emerald-700 dark:text-emerald-400 font-sans font-black text-[10.5px] uppercase tracking-widest">
                                         <div className="w-2 h-2 rounded-full bg-emerald-500" />
-                                        Enlace de Resguardo WhatsApp
+                                        Envío Directo por WhatsApp
                                     </div>
-                                    <p className="text-[10px] text-slate-400 font-medium leading-relaxed">
-                                        Sube el ticket a la nube e inicia WhatsApp Web/Móvil con un texto predefinido que enlaza al cliente a la visualización remota de su comprobante.
-                                    </p>
-                                    <button
-                                        disabled={sharingId !== null}
-                                        onClick={() => {
-                                            handleShareWhatsApp();
-                                        }}
-                                        className="py-2.5 w-full bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-bold text-[10.5px] uppercase tracking-wider transition-all duration-150 flex items-center justify-center gap-1.5 shadow-md shadow-emerald-500/10 cursor-pointer"
-                                    >
-                                        {sharingId === sharingSale.id ? (
-                                            <div className="w-3.5 h-3.5 border-2 border-white/20 border-t-white rounded-full animate-spin" />
-                                        ) : (
-                                            <MessageCircle size={12} />
-                                        )}
-                                        {sharingId === sharingSale.id ? "Subiendo..." : "Enviar link por WhatsApp"}
-                                    </button>
+                                    <div className="flex flex-col gap-1">
+                                        <label className="text-[9px] font-extrabold uppercase tracking-wider text-slate-500 dark:text-slate-400">
+                                            Celular WhatsApp del Cliente (Opcional):
+                                        </label>
+                                        <input
+                                            type="tel"
+                                            value={sharePhoneInput}
+                                            onChange={(e) => setSharePhoneInput(e.target.value)}
+                                            placeholder="Ej. 70012345 (prefijo +591 automático)"
+                                            className="w-full px-3 py-1.5 rounded-xl bg-white dark:bg-[#070b13] border border-emerald-300 dark:border-emerald-800/70 text-xs font-mono font-bold text-slate-800 dark:text-white focus:outline-none focus:border-emerald-500"
+                                        />
+                                    </div>
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-0.5">
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                handleSendDirectWhatsAppText();
+                                                setShowShareOptionsModal(false);
+                                            }}
+                                            className="py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-bold text-[10px] uppercase tracking-wider transition-all duration-150 flex items-center justify-center gap-1.5 shadow-md shadow-emerald-500/10 cursor-pointer"
+                                        >
+                                            <MessageCircle size={12} /> WhatsApp Directo
+                                        </button>
+                                        <button
+                                            type="button"
+                                            disabled={sharingId !== null}
+                                            onClick={() => {
+                                                handleShareWhatsApp();
+                                            }}
+                                            className="py-2.5 bg-teal-600 hover:bg-teal-500 text-white rounded-xl font-bold text-[10px] uppercase tracking-wider transition-all duration-150 flex items-center justify-center gap-1.5 shadow-md shadow-teal-500/10 cursor-pointer"
+                                        >
+                                            {sharingId === sharingSale.id ? (
+                                                <div className="w-3.5 h-3.5 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+                                            ) : (
+                                                <Share2 size={12} />
+                                            )}
+                                            {sharingId === sharingSale.id ? "Subiendo..." : "Con Link PDF"}
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
 
@@ -2635,6 +2713,7 @@ export function AnalisisView() {
     const cashTotal = sales.filter(s => s.payment_method === 'Efectivo').reduce((acc, s) => acc + toBs(s), 0);
     const cardTotal = sales.filter(s => s.payment_method === 'Tarjeta').reduce((acc, s) => acc + toBs(s), 0);
     const transferTotal = sales.filter(s => s.payment_method === 'Transferencia').reduce((acc, s) => acc + toBs(s), 0);
+    const mixtoTotal = sales.filter(s => s.payment_method === 'Mixto').reduce((acc, s) => acc + toBs(s), 0);
     const totalTransactions = sales.length;
     const totalRevenue = sales.reduce((acc, s) => acc + toBs(s), 0);
     const averageTicket = totalTransactions > 0 ? totalRevenue / totalTransactions : 0;
@@ -2694,9 +2773,10 @@ export function AnalisisView() {
         return [
             { name: 'Efectivo', value: cashTotal, color: '#10b981' },
             { name: 'Tarjeta', value: cardTotal, color: '#4f46e5' },
-            { name: 'Transferencia', value: transferTotal, color: '#8b5cf6' }
+            { name: 'Transferencia / QR', value: transferTotal, color: '#8b5cf6' },
+            { name: 'Mixto (Efec. + QR)', value: mixtoTotal, color: '#06b6d4' }
         ].filter(d => d.value > 0);
-    }, [cashTotal, cardTotal, transferTotal]);
+    }, [cashTotal, cardTotal, transferTotal, mixtoTotal]);
 
     const CustomTooltip = ({ active, payload }: any) => {
         if (active && payload && payload.length) {

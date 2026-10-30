@@ -73,6 +73,53 @@ function openDB(): Promise<IDBDatabase> {
     });
 }
 
+const COMPLETED_OPS_STORAGE_KEY = 'gtr_completed_operation_ids';
+const MAX_COMPLETED_OPS = 250;
+let memoryCompletedOps = new Set<string>();
+
+export function getCompletedOperations(): Set<string> {
+    const result = new Set<string>(memoryCompletedOps);
+    if (typeof window !== 'undefined' && window.localStorage) {
+        try {
+            const raw = localStorage.getItem(COMPLETED_OPS_STORAGE_KEY);
+            if (raw) {
+                const parsed = JSON.parse(raw);
+                if (Array.isArray(parsed)) {
+                    for (const item of parsed) {
+                        if (typeof item === 'string' && item) result.add(item);
+                    }
+                }
+            }
+        } catch {}
+    }
+    return result;
+}
+
+export function markOperationCompleted(opId?: string | null, offlineId?: string | null): void {
+    const idsToAdd = [opId, offlineId].filter((v): v is string => typeof v === 'string' && v.trim().length > 0);
+    if (idsToAdd.length === 0) return;
+
+    idsToAdd.forEach(id => memoryCompletedOps.add(id));
+
+    if (typeof window !== 'undefined' && window.localStorage) {
+        try {
+            const current = Array.from(getCompletedOperations());
+            for (const id of idsToAdd) {
+                if (!current.includes(id)) current.push(id);
+            }
+            const trimmed = current.slice(-MAX_COMPLETED_OPS);
+            localStorage.setItem(COMPLETED_OPS_STORAGE_KEY, JSON.stringify(trimmed));
+        } catch {}
+    }
+}
+
+export function isOperationCompleted(opId?: string | null, offlineId?: string | null): boolean {
+    const completed = getCompletedOperations();
+    if (opId && completed.has(opId)) return true;
+    if (offlineId && completed.has(offlineId)) return true;
+    return false;
+}
+
 /**
  * LocalStorage Fallback functions
  */
@@ -88,7 +135,12 @@ function getLocalStorageQueue(): OfflineSale[] {
 
 function saveLocalStorageQueue(queue: OfflineSale[]): void {
     try {
-        localStorage.setItem('gtr_offline_sales_queue', JSON.stringify(queue));
+        if (queue.length === 0) {
+            localStorage.removeItem('gtr_offline_sales_queue');
+        } else {
+            localStorage.setItem('gtr_offline_sales_queue', JSON.stringify(queue));
+        }
+        memoryQueue = queue;
     } catch (e) {
         console.warn('Saving to LocalStorage failed:', e);
         memoryQueue = queue;
@@ -96,13 +148,14 @@ function saveLocalStorageQueue(queue: OfflineSale[]): void {
 }
 
 /**
- * Saves a sale to the offline queue
+ * Saves a sale to the offline queue (with idempotency deduplication by clientOperationId)
  */
 export async function saveOfflineSale(salePayload: any, clientName?: string, clientPhone?: string): Promise<OfflineSale> {
     // Ensure payload has a unique idempotency clientOperationId
+    const opId = salePayload?.clientOperationId || salePayload?.client_operation_id || `offline_op_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const safePayload = {
         ...salePayload,
-        clientOperationId: salePayload.clientOperationId || salePayload.client_operation_id || `offline_op_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+        clientOperationId: opId
     };
 
     let currentUserId: number | string | undefined = salePayload?.user_id;
@@ -125,12 +178,31 @@ export async function saveOfflineSale(salePayload: any, clientName?: string, cli
         createdAt: new Date().toISOString()
     };
 
+    // Guard 1: If this operation was already completed online or synced, do not queue it again
+    if (isOperationCompleted(opId)) {
+        console.log('[Offline DB] Skipping saveOfflineSale because operation is already marked completed:', opId);
+        return offlineSale;
+    }
+
+    // Guard 2: Check if an offline sale with the exact same clientOperationId is already queued
+    try {
+        const existingSales = await getOfflineSales();
+        const duplicate = existingSales.find(s => {
+            const sOpId = s.salePayload?.clientOperationId || s.salePayload?.client_operation_id;
+            return sOpId && sOpId === opId;
+        });
+        if (duplicate) {
+            console.log('[Offline DB] Sale with clientOperationId already exists in queue, returning existing:', duplicate.id);
+            return duplicate;
+        }
+    } catch (_) {}
+
     try {
         const db = await openDB();
         return new Promise((resolve, reject) => {
             const transaction = db.transaction(STORE_NAME, 'readwrite');
             const store = transaction.objectStore(STORE_NAME);
-            const request = store.add(offlineSale);
+            const request = store.put(offlineSale);
 
             request.onsuccess = () => {
                 db.close();
@@ -147,20 +219,24 @@ export async function saveOfflineSale(salePayload: any, clientName?: string, cli
     } catch (err) {
         console.warn('[Offline DB] IndexedDB unavailable, falling back to LocalStorage:', err);
         const queue = getLocalStorageQueue();
-        queue.push(offlineSale);
-        saveLocalStorageQueue(queue);
+        const existsInLs = queue.find(s => (s.salePayload?.clientOperationId || s.salePayload?.client_operation_id) === opId);
+        if (!existsInLs) {
+            queue.push(offlineSale);
+            saveLocalStorageQueue(queue);
+        }
         safeDispatchEvent('offline_queue_changed', { detail: { action: 'add_sale', sale: offlineSale } });
-        return offlineSale;
+        return existsInLs || offlineSale;
     }
 }
 
 /**
- * Retrieves all offline sales from the queue
+ * Retrieves all offline sales from the queue, filtering out completed/resurrected operations and deduplicating by clientOperationId
  */
 export async function getOfflineSales(): Promise<OfflineSale[]> {
+    let rawList: OfflineSale[] = [];
     try {
         const db = await openDB();
-        return new Promise((resolve, reject) => {
+        rawList = await new Promise<OfflineSale[]>((resolve, reject) => {
             const transaction = db.transaction(STORE_NAME, 'readonly');
             const store = transaction.objectStore(STORE_NAME);
             const request = store.getAll();
@@ -177,38 +253,118 @@ export async function getOfflineSales(): Promise<OfflineSale[]> {
         });
     } catch (err) {
         console.warn('[Offline DB] IndexedDB fetch failed, using fallback:', err);
-        return getLocalStorageQueue();
+        rawList = getLocalStorageQueue();
     }
+
+    const completed = getCompletedOperations();
+    const seenOpIds = new Set<string>();
+    const cleanList: OfflineSale[] = [];
+    const staleIdsToDelete: string[] = [];
+
+    for (const item of rawList) {
+        if (!item || !item.id) continue;
+        const opId = item.salePayload?.clientOperationId || item.salePayload?.client_operation_id;
+        if (completed.has(item.id) || (opId && completed.has(opId))) {
+            staleIdsToDelete.push(item.id);
+            continue;
+        }
+        if (opId) {
+            if (seenOpIds.has(opId)) {
+                staleIdsToDelete.push(item.id);
+                continue;
+            }
+            seenOpIds.add(opId);
+        }
+        cleanList.push(item);
+    }
+
+    // Background cleanup of any stale/duplicate items found in IndexedDB or LocalStorage
+    if (staleIdsToDelete.length > 0) {
+        openDB().then(db => {
+            try {
+                const tx = db.transaction(STORE_NAME, 'readwrite');
+                const store = tx.objectStore(STORE_NAME);
+                staleIdsToDelete.forEach(id => {
+                    try { store.delete(id); } catch {}
+                });
+                tx.oncomplete = () => db.close();
+                tx.onerror = () => db.close();
+            } catch {
+                db.close();
+            }
+        }).catch(() => {});
+
+        try {
+            const lsQueue = getLocalStorageQueue();
+            if (lsQueue.length > 0) {
+                const filteredLs = lsQueue.filter(s => !staleIdsToDelete.includes(s.id) && !completed.has(s.id));
+                saveLocalStorageQueue(filteredLs);
+            }
+        } catch {}
+    }
+
+    return cleanList;
 }
 
 /**
- * Deletes a sale from the offline queue
+ * Deletes a sale from ALL offline queues (IndexedDB, LocalStorage, and memory) and records it in completed operations so it can never resurrect
  */
-export async function deleteOfflineSale(id: string): Promise<void> {
+export async function deleteOfflineSale(id: string, clientOperationId?: string): Promise<void> {
+    let resolvedOpId = clientOperationId;
+
+    // Also purge from LocalStorage and memoryQueue unconditionally to prevent resurrection
+    try {
+        const lsQueue = getLocalStorageQueue();
+        const foundInLs = lsQueue.find(item => item.id === id);
+        if (!resolvedOpId && foundInLs) {
+            resolvedOpId = foundInLs.salePayload?.clientOperationId || foundInLs.salePayload?.client_operation_id;
+        }
+        const filtered = lsQueue.filter(item => {
+            if (item.id === id) return false;
+            const itemOpId = item.salePayload?.clientOperationId || item.salePayload?.client_operation_id;
+            if (resolvedOpId && itemOpId === resolvedOpId) return false;
+            return true;
+        });
+        saveLocalStorageQueue(filtered);
+    } catch (e) {
+        console.warn('[Offline DB] Error cleaning LocalStorage queue during delete:', e);
+    }
+
     try {
         const db = await openDB();
-        return new Promise((resolve, reject) => {
+        await new Promise<void>((resolve, reject) => {
             const transaction = db.transaction(STORE_NAME, 'readwrite');
             const store = transaction.objectStore(STORE_NAME);
-            const request = store.delete(id);
+            const getReq = store.get(id);
 
-            request.onsuccess = () => {
+            getReq.onsuccess = () => {
+                const record = getReq.result as OfflineSale | undefined;
+                if (!resolvedOpId && record) {
+                    resolvedOpId = record.salePayload?.clientOperationId || record.salePayload?.client_operation_id;
+                }
+                markOperationCompleted(resolvedOpId, id);
+                store.delete(id);
+            };
+            getReq.onerror = () => {
+                markOperationCompleted(resolvedOpId, id);
+                store.delete(id);
+            };
+
+            transaction.oncomplete = () => {
                 db.close();
-                console.log('[Offline DB] Sale deleted from IndexedDB:', id);
+                console.log('[Offline DB] Sale deleted from IndexedDB & LocalStorage:', id);
                 safeDispatchEvent('offline_queue_changed', { detail: { action: 'delete_sale', id } });
                 resolve();
             };
 
-            request.onerror = () => {
+            transaction.onerror = () => {
                 db.close();
-                reject(request.error || new Error('Failed to delete from IndexedDB'));
+                reject(transaction.error || new Error('Failed to delete from IndexedDB'));
             };
         });
     } catch (err) {
-        console.warn('[Offline DB] IndexedDB delete failed, using fallback:', err);
-        const queue = getLocalStorageQueue();
-        const filtered = queue.filter(item => item.id !== id);
-        saveLocalStorageQueue(filtered);
+        markOperationCompleted(resolvedOpId, id);
+        console.warn('[Offline DB] IndexedDB delete fallback completed:', err);
         safeDispatchEvent('offline_queue_changed', { detail: { action: 'delete_sale', id } });
     }
 }
@@ -236,7 +392,12 @@ function getLocalStorageActionsQueue(): OfflineAction[] {
 
 function saveLocalStorageActionsQueue(queue: OfflineAction[]): void {
     try {
-        localStorage.setItem('gtr_offline_actions_queue', JSON.stringify(queue));
+        if (queue.length === 0) {
+            localStorage.removeItem('gtr_offline_actions_queue');
+        } else {
+            localStorage.setItem('gtr_offline_actions_queue', JSON.stringify(queue));
+        }
+        memoryActionsQueue = queue;
     } catch (e) {
         console.warn('Saving actions to LocalStorage failed:', e);
         memoryActionsQueue = queue;
@@ -264,6 +425,20 @@ export async function saveOfflineAction(
         } catch (_) {}
     }
 
+    const opId = payload?.clientOperationId || payload?.client_operation_id;
+    if (opId && isOperationCompleted(opId)) {
+        return {
+            id: `action_${Date.now()}`,
+            type,
+            url,
+            method,
+            payload,
+            metadata,
+            ownerUserId: currentUserId,
+            createdAt: new Date().toISOString()
+        };
+    }
+
     const offlineAction: OfflineAction = {
         id: `action_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
         type,
@@ -280,7 +455,7 @@ export async function saveOfflineAction(
         return new Promise((resolve, reject) => {
             const transaction = db.transaction(ACTIONS_STORE_NAME, 'readwrite');
             const store = transaction.objectStore(ACTIONS_STORE_NAME);
-            const request = store.add(offlineAction);
+            const request = store.put(offlineAction);
 
             request.onsuccess = () => {
                 db.close();
@@ -308,9 +483,10 @@ export async function saveOfflineAction(
  * Retrieves all offline actions from the queue
  */
 export async function getOfflineActions(): Promise<OfflineAction[]> {
+    let rawActions: OfflineAction[] = [];
     try {
         const db = await openDB();
-        return new Promise((resolve, reject) => {
+        rawActions = await new Promise<OfflineAction[]>((resolve, reject) => {
             const transaction = db.transaction(ACTIONS_STORE_NAME, 'readonly');
             const store = transaction.objectStore(ACTIONS_STORE_NAME);
             const request = store.getAll();
@@ -327,14 +503,25 @@ export async function getOfflineActions(): Promise<OfflineAction[]> {
         });
     } catch (err) {
         console.warn('[Offline DB] IndexedDB action fetch failed, using fallback:', err);
-        return getLocalStorageActionsQueue();
+        rawActions = getLocalStorageActionsQueue();
     }
+
+    const completed = getCompletedOperations();
+    return rawActions.filter(a => a && a.id && !completed.has(a.id));
 }
 
 /**
- * Deletes an action from the offline action queue
+ * Deletes an action from ALL offline action queues (IndexedDB, LocalStorage, and memory)
  */
 export async function deleteOfflineAction(id: string): Promise<void> {
+    markOperationCompleted(id, id);
+
+    try {
+        const queue = getLocalStorageActionsQueue();
+        const filtered = queue.filter(item => item.id !== id);
+        saveLocalStorageActionsQueue(filtered);
+    } catch {}
+
     try {
         const db = await openDB();
         return new Promise((resolve, reject) => {
@@ -344,7 +531,7 @@ export async function deleteOfflineAction(id: string): Promise<void> {
 
             request.onsuccess = () => {
                 db.close();
-                console.log('[Offline DB] Action deleted from IndexedDB:', id);
+                console.log('[Offline DB] Action deleted from IndexedDB & LocalStorage:', id);
                 safeDispatchEvent('offline_queue_changed', { detail: { action: 'delete_action', id } });
                 resolve();
             };
@@ -355,10 +542,7 @@ export async function deleteOfflineAction(id: string): Promise<void> {
             };
         });
     } catch (err) {
-        console.warn('[Offline DB] IndexedDB action delete failed, using fallback:', err);
-        const queue = getLocalStorageActionsQueue();
-        const filtered = queue.filter(item => item.id !== id);
-        saveLocalStorageActionsQueue(filtered);
+        console.warn('[Offline DB] IndexedDB action delete fallback completed:', err);
         safeDispatchEvent('offline_queue_changed', { detail: { action: 'delete_action', id } });
     }
 }

@@ -5,8 +5,8 @@ import { AppProvider, useAppContext } from './context/AppContext';
 import { hasPermission, isMainAdmin, isAdminUser, canAccessForensicAudit } from './utils/permissions';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { startAutoBackupScheduler } from "./utils/driveBackupScheduler";
-import { hardRefreshApp } from "./utils/appRefresh";
-import { CLIENT_VERSION, compareClientWithServerVersion, validateVersionOnLogin, fetchCurrentServerVersion } from "./utils/versionCheck";
+import { hardRefreshApp, saveHotUpdateSnapshot } from "./utils/appRefresh";
+import { CLIENT_VERSION, compareClientWithServerVersion, validateVersionOnLogin, fetchCurrentServerVersion, acknowledgeServerVersion } from "./utils/versionCheck";
 export { CLIENT_VERSION };
 import { 
     initLocalForageCache, 
@@ -91,184 +91,41 @@ interface AnimatedMenuIconProps {
 }
 
 const AnimatedMenuIcon = ({ Icon, targetView, isActive }: AnimatedMenuIconProps) => {
+    if (!isActive) {
+        return (
+            <div className="transition-transform duration-200 flex items-center justify-center shrink-0 group-hover:scale-110">
+                <Icon size={16} />
+            </div>
+        );
+    }
+
     let animate: any = {};
-    let transition: any = { repeat: Infinity, ease: "easeInOut" };
+    let transition: any = { duration: 1.8, repeat: Infinity, ease: "easeInOut" };
 
     if (targetView === 'inicio') {
-        // Dynamic home bouncing & pulse
-        animate = { 
-            y: isActive ? [0, -4, 0] : [0, -1.2, 0],
-            scale: isActive ? [1, 1.15, 0.95, 1] : [1, 1.02, 1]
-        };
-        transition = {
-            duration: isActive ? 1.5 : 3,
-            repeat: Infinity,
-            ease: "easeInOut"
-        };
+        animate = { y: [0, -3, 0], scale: [1, 1.12, 1] };
     } else if (targetView === 'pos') {
-        // Shopping cart rolling back and forth
-        animate = { 
-            x: isActive ? [0, 4, -4, 0] : [0, 1, -1, 0],
-            rotate: isActive ? [0, 8, -8, 0] : [0, 2, -2, 0],
-            scale: isActive ? [1, 1.18, 1] : [1, 1]
-        };
-        transition = {
-            duration: isActive ? 1.4 : 3.5,
-            repeat: Infinity,
-            ease: "easeInOut"
-        };
+        animate = { x: [0, 3, -3, 0], scale: [1, 1.12, 1] };
     } else if (targetView === 'ventas_pendientes') {
-        // Pendulum ticking clock
-        animate = { 
-            rotate: isActive ? [0, -25, 25, 0] : [0, -8, 8, 0],
-            scale: isActive ? [1, 1.12, 1] : [1, 1.01, 1]
-        };
-        transition = {
-            duration: isActive ? 1.2 : 2.5,
-            repeat: Infinity,
-            ease: "easeInOut"
-        };
+        animate = { rotate: [0, -15, 15, 0], scale: [1, 1.1, 1] };
     } else if (targetView === 'historial_ventas') {
-        // Receipt paper sliding or squeezing
-        animate = { 
-            y: isActive ? [0, -3.5, 2, 0] : [0, -1, 0.5, 0], 
-            scaleY: isActive ? [1, 0.8, 1.1, 1] : [1, 0.95, 1.02, 1] 
-        };
-        transition = {
-            duration: isActive ? 1.8 : 4,
-            repeat: Infinity,
-            ease: "easeInOut"
-        };
+        animate = { y: [0, -2.5, 1.5, 0] };
     } else if (targetView === 'cuentas_por_cobrar') {
-        // Arrows shifting
-        animate = { 
-            x: isActive ? [-4, 4, -4] : [-1.5, 1.5, -1.5],
-            scale: isActive ? [1, 1.14, 1] : [1, 1]
-        };
-        transition = {
-            duration: isActive ? 1.6 : 3.8,
-            repeat: Infinity,
-            ease: "easeInOut"
-        };
-    } else if (targetView === 'productos') {
-        // Box scale and check
-        animate = { 
-            scale: isActive ? [1, 1.25, 0.9, 1] : [1, 1.04, 1], 
-            rotate: isActive ? [0, 12, -12, 0] : [0, 3, -3, 0] 
-        };
-        transition = {
-            duration: isActive ? 2.2 : 4.5,
-            repeat: Infinity,
-            ease: "easeInOut"
-        };
-    } else if (targetView === 'departamentos') {
-        // Folder tag expand
-        animate = { 
-            scaleX: isActive ? [1, 1.16, 0.92, 1] : [1, 1.03, 1], 
-            scaleY: isActive ? [1, 0.82, 1.1, 1] : [1, 0.96, 1] 
-        };
-        transition = {
-            duration: isActive ? 2 : 4,
-            repeat: Infinity,
-            ease: "easeInOut"
-        };
-    } else if (targetView === 'inventario') {
-         // Clipboard checklist pulsation
-         animate = { 
-             y: isActive ? [0, -4, 0] : [0, -1.5, 0],
-             scale: isActive ? [1, 1.2, 0.95, 1] : [1, 1.03, 1]
-         };
-         transition = {
-             duration: isActive ? 1.8 : 3.8,
-             repeat: Infinity,
-             ease: "easeInOut"
-         };
-    } else if (targetView === 'devoluciones') {
-        // Rolling loops of returns
-        animate = { 
-            rotate: isActive ? [0, -60, 20, 0] : [0, -12, 4, 0],
-            scale: isActive ? [1, 1.15, 0.95, 1] : [1, 1]
-        };
-        transition = {
-            duration: isActive ? 1.8 : 3.5,
-            repeat: Infinity,
-            ease: "easeInOut"
-        };
-    } else if (targetView === 'auditoria') {
-        // Turning of history wheel
-        animate = { 
-            rotate: isActive ? [0, 360] : [0, 15, 0],
-            scale: isActive ? [1, 1.15, 0.95, 1] : [1, 1]
-        };
-        transition = {
-            duration: isActive ? 2.5 : 4,
-            repeat: isActive ? Infinity : 0,
-            ease: "easeInOut"
-        };
-    } else if (targetView === 'reportes') {
-        // Bento layout modular squeeze
-        animate = { 
-            scale: isActive ? [1, 1.18, 0.92, 1] : [1, 1.02, 1],
-            y: isActive ? [0, -2, 2, 0] : [0, -0.5, 0.5, 0]
-        };
-        transition = {
-            duration: isActive ? 2 : 4,
-            repeat: Infinity,
-            ease: "easeInOut"
-        };
-    } else if (targetView === 'analisis') {
-        // Direct trending up bars growing
-        animate = { 
-            scaleY: isActive ? [1, 1.25, 0.85, 1] : [1, 1.06, 0.97, 1],
-            y: isActive ? [0, -3, 0] : [0, -0.8, 0]
-        };
-        transition = {
-            duration: isActive ? 1.5 : 3.2,
-            repeat: Infinity,
-            ease: "easeOut"
-        };
-    } else if (targetView === 'cajas') {
-        // Landmark safe box breath
-        animate = { 
-            scale: isActive ? [1, 1.15, 1] : [1, 1.02, 1],
-            rotate: isActive ? [-6, 6, -6] : [-1.5, 1.5, -1.5]
-        };
-        transition = {
-            duration: isActive ? 2 : 4,
-            repeat: Infinity,
-            ease: "easeInOut"
-        };
+        animate = { x: [-3, 3, -3] };
+    } else if (targetView === 'productos' || targetView === 'inventario') {
+        animate = { scale: [1, 1.15, 1] };
     } else if (targetView === 'configuraciones') {
-        // Persistent smooth gear-spinning rotation
-        animate = { 
-            rotate: [0, 360] 
-        };
-        transition = {
-            duration: isActive ? 3.5 : 12,
-            repeat: Infinity,
-            ease: "linear"
-        };
-    } else if (targetView === 'usuarios') {
-        // Group of users side-sway
-        animate = { 
-            y: isActive ? [0, -3.5, 0] : [0, -1, 0],
-            x: isActive ? [-2, 2, -2] : [-0.5, 0.5, -0.5]
-        };
-        transition = {
-            duration: isActive ? 1.6 : 3.5,
-            repeat: Infinity,
-            ease: "easeInOut"
-        };
+        animate = { rotate: [0, 360] };
+        transition = { duration: 4, repeat: Infinity, ease: "linear" };
     } else {
-        animate = { scale: isActive ? [1, 1.15, 1] : [1, 1] };
-        transition = { duration: 3, repeat: Infinity, ease: "easeInOut" };
+        animate = { scale: [1, 1.12, 1] };
     }
 
     return (
         <motion.div
             animate={animate}
             transition={transition}
-            className={`transition-colors duration-300 flex items-center justify-center shrink-0`}
+            className="transition-colors duration-300 flex items-center justify-center shrink-0"
         >
             <Icon size={16} />
         </motion.div>
@@ -283,7 +140,7 @@ function AppLayout() {
         isOfflineModalOpen, setIsOfflineModalOpen, isPwaInstallModalOpen, setIsPwaInstallModalOpen,
         hasPwaUpdate, isUpdatingPwa, pwaUpdateStepMessage, pwaVersionInfo, checkForPwaUpdates, applyPwaUpdate, handlePwaPrimaryAction,
         isSupervisorUnlocked, setIsSupervisorUnlocked, supervisorInfo, setSupervisorInfo, relockKiosk, isFullscreen, toggleFullscreen, showNotification,
-        inventoryLock, isKioskLocked, requestSupervisorAuth, cart, pendingSalesCount, pendingActionsCount
+        inventoryLock, isKioskLocked, requestSupervisorAuth, cart, tabs, activeTabId, clientName, clientPhone, discount, discountType, paymentMethod, pendingSalesCount, pendingActionsCount
     } = useAppContext();
     
     const isRgb = theme === 'rgb';
@@ -474,39 +331,37 @@ function AppLayout() {
         return () => clearInterval(interval);
     }, [showDevicesModal]);
 
-    // App live update push settings - blocks obsolete clients and clears cache aggressively
+    // App live update push settings - AI Studio-style non-blocking Hot-Swap update bar
     const [updateAvailable, setUpdateAvailable] = useState(false);
     const [showUpdateWarning, setShowUpdateWarning] = useState(false);
     const [serverVersion, setServerVersion] = useState("");
+    const [serverBuildTime, setServerBuildTime] = useState<number | undefined>(undefined);
     const [releaseNotes, setReleaseNotes] = useState("");
     const [isRefreshing, setIsRefreshing] = useState(false);
+    const [updateCountdown, setUpdateCountdown] = useState<number | null>(null);
 
-    const isCashierActive = () => {
+    // Confirm Hot-Swap restoration after reload
+    useEffect(() => {
         try {
-            const rawTabs = localStorage.getItem('cached_sales_tabs');
-            if (rawTabs) {
-                const tabs = JSON.parse(rawTabs);
-                if (Array.isArray(tabs) && tabs.some((t: any) => Array.isArray(t.cart) && t.cart.length > 0)) {
-                    return true;
-                }
+            const rawRestored = localStorage.getItem('gtr_hot_update_restored');
+            if (rawRestored) {
+                localStorage.removeItem('gtr_hot_update_restored');
+                const parsed = JSON.parse(rawRestored);
+                const verLabel = parsed?.version || CLIENT_VERSION;
+                const msg = parsed?.hadActiveCart
+                    ? `✓ Actualizado a v${verLabel}: Tu carrito activo, pestañas y sesión se restauraron intactos.`
+                    : `✓ Terminal actualizada a la versión v${verLabel} con caché optimizado.`;
+                setTimeout(() => {
+                    setGlobalNotification({ message: msg, type: 'success' });
+                    setTimeout(() => setGlobalNotification(null), 5500);
+                }, 400);
             }
-            const rawCart = localStorage.getItem('gtr_pos_active_cart_backup');
-            if (rawCart) {
-                const cart = JSON.parse(rawCart);
-                if (Array.isArray(cart) && cart.length > 0) {
-                    return true;
-                }
-            }
-            if (sessionStorage.getItem('pos_checkout_in_progress') === 'true') {
-                return true;
-            }
-        } catch (_) {}
-        return false;
-    };
+        } catch {}
+    }, []);
 
     const shouldTriggerAutoReload = (): boolean => {
         try {
-            if (isCashierActive() || pendingSalesCount > 0 || pendingActionsCount > 0) {
+            if (sessionStorage.getItem('pos_checkout_in_progress') === 'true') {
                 return false;
             }
             const now = Date.now();
@@ -517,13 +372,13 @@ function AppLayout() {
 
             // If an auto-reload occurred in the last 45 seconds, prevent looping
             if (lastReload && (now - lastReload) < 45000) {
-                console.warn(`[PWA Update] Auto-recarga en período de enfriamiento (${Math.round((now - lastReload) / 1000)}s atrás). Mostrando panel interactivo.`);
+                console.warn(`[PWA Update] Auto-recarga en período de enfriamiento (${Math.round((now - lastReload) / 1000)}s atrás). Mostrando barra superior compacta.`);
                 return false;
             }
 
             // If 2 or more consecutive auto-reloads occurred within 3 minutes, pause auto-reloads to protect user
             if (lastReload && (now - lastReload) < 180000 && count >= 2) {
-                console.warn("[PWA Update] Múltiples recargas recientes registradas. Requiriendo confirmación manual para evitar bucle.");
+                console.warn("[PWA Update] Múltiples recargas recientes registradas. Disponible en barra superior.");
                 return false;
             }
 
@@ -536,38 +391,29 @@ function AppLayout() {
         }
     };
 
-    const checkAppVersion = async () => {
-        try {
-            const serverInfo = await fetchCurrentServerVersion();
-            if (serverInfo && serverInfo.version) {
-                const comparison = compareClientWithServerVersion(serverInfo.version, CLIENT_VERSION);
-                if (comparison.isOutdated) {
-                    setUpdateAvailable(true);
-                    setServerVersion(comparison.serverVersion);
-                    setReleaseNotes(serverInfo.releaseNotes || "");
-                    setShowUpdateWarning(true);
-
-                    // Check anti-loop cooldown before automatic refresh
-                    if (shouldTriggerAutoReload()) {
-                        console.log(`[PWA Update] Versión obsoleta detectada (${CLIENT_VERSION} < ${comparison.serverVersion}). Actualizando terminal...`);
-                        await handleForceUpdate();
-                    }
-                } else {
-                    // Reset attempt counter when synchronized with server
-                    try {
-                        localStorage.removeItem('auto_version_reload_count');
-                    } catch {}
-                }
-            }
-        } catch (err) {
-            console.warn("Error checking app version:", err);
-        }
-    };
-
-    const handleForceUpdate = async () => {
+    const handleForceUpdate = async (targetVer?: string, targetBuildTime?: number) => {
+        if (isRefreshing) return;
         setIsRefreshing(true);
         (window as any).__pwaIsHandlingRefresh = true;
         sessionStorage.removeItem('pending_app_reload');
+        const resolvedVer = (typeof targetVer === 'string' && targetVer) ? targetVer : (serverVersion || CLIENT_VERSION);
+        const resolvedBuild = targetBuildTime || serverBuildTime;
+
+        // Snapshot live cart, tabs, client, discount, paymentMethod, and view before refreshing
+        saveHotUpdateSnapshot({
+            cart,
+            tabs,
+            activeTabId,
+            clientName,
+            clientPhone,
+            discount,
+            discountType,
+            paymentMethod,
+            view,
+            targetVersion: resolvedVer
+        });
+
+        acknowledgeServerVersion(resolvedVer, resolvedBuild);
         if ('serviceWorker' in navigator) {
             try {
                 const reg = (window as any).__pwaServiceWorkerReg || await navigator.serviceWorker.getRegistration();
@@ -581,19 +427,64 @@ function AppLayout() {
         await hardRefreshApp();
     };
 
+    // Automatic Hot-Swap countdown when update is detected
+    useEffect(() => {
+        if (!showUpdateWarning || updateCountdown === null || isRefreshing) return;
+        if (updateCountdown <= 0) {
+            handleForceUpdate(serverVersion, serverBuildTime);
+            return;
+        }
+        const timer = setTimeout(() => {
+            setUpdateCountdown(prev => (prev !== null ? prev - 1 : null));
+        }, 1000);
+        return () => clearTimeout(timer);
+    }, [showUpdateWarning, updateCountdown, isRefreshing, serverVersion, serverBuildTime]);
+
+    const checkAppVersion = async () => {
+        try {
+            const serverInfo = await fetchCurrentServerVersion();
+            if (serverInfo && serverInfo.version) {
+                const comparison = compareClientWithServerVersion(serverInfo.version, CLIENT_VERSION, serverInfo.buildTime);
+                if (comparison.isOutdated) {
+                    setUpdateAvailable(true);
+                    setServerVersion(comparison.serverVersion);
+                    setServerBuildTime(serverInfo.buildTime);
+                    setReleaseNotes(serverInfo.releaseNotes || "");
+                    setShowUpdateWarning(true);
+
+                    // Trigger brief 3s Hot-Swap countdown on the top bar if not in anti-loop cooldown
+                    if (shouldTriggerAutoReload()) {
+                        console.log(`[PWA Update] Nueva versión detectada (${comparison.clientVersion} -> ${comparison.serverVersion}). Iniciando actualización Hot-Swap...`);
+                        setUpdateCountdown(3);
+                    }
+                } else {
+                    setUpdateAvailable(false);
+                    setShowUpdateWarning(false);
+                    setUpdateCountdown(null);
+                    try {
+                        localStorage.removeItem('auto_version_reload_count');
+                    } catch {}
+                }
+            }
+        } catch (err) {
+            console.warn("Error checking app version:", err);
+        }
+    };
+
     useEffect(() => {
         const handlePushUpdate = async (e: any) => {
             const data = e.detail;
             if (data && data.version) {
-                const comparison = compareClientWithServerVersion(data.version, CLIENT_VERSION);
+                const comparison = compareClientWithServerVersion(data.version, CLIENT_VERSION, data.buildTime);
                 if (comparison.isOutdated) {
                     setUpdateAvailable(true);
                     setServerVersion(comparison.serverVersion);
+                    setServerBuildTime(data.buildTime);
                     setReleaseNotes(data.release_notes || "");
                     setShowUpdateWarning(true);
 
                     if (shouldTriggerAutoReload()) {
-                        await handleForceUpdate();
+                        setUpdateCountdown(3);
                     }
                 }
             }
@@ -606,10 +497,12 @@ function AppLayout() {
             if (reg?.waiting) {
                 reg.waiting.postMessage({ type: 'SKIP_WAITING' });
             }
+            const targetVer = e?.detail?.version || serverVersion || CLIENT_VERSION;
+            setServerVersion(targetVer);
             setUpdateAvailable(true);
             setShowUpdateWarning(true);
             if (shouldTriggerAutoReload()) {
-                await handleForceUpdate();
+                setUpdateCountdown(3);
             }
         };
         window.addEventListener('pwa-update-available', handlePwaUpdate);
@@ -623,9 +516,9 @@ function AppLayout() {
         };
         document.addEventListener('visibilitychange', handleVisibilityChange);
         
-        // Active version check on mount and every 2.5 minutes
+        // Active version check on mount and every 60 seconds
         checkAppVersion();
-        const updateInterval = setInterval(checkAppVersion, 150000);
+        const updateInterval = setInterval(checkAppVersion, 60000);
 
         return () => {
             window.removeEventListener('app-update-pushed', handlePushUpdate);
@@ -1419,6 +1312,44 @@ function AppLayout() {
             {/* Main body wrapper */}
             <div className="flex-grow flex flex-col h-full overflow-hidden relative">
 
+                {/* Compact AI Studio-Style Non-Blocking Top Update Banner */}
+                <AnimatePresence>
+                    {showUpdateWarning && (
+                        <motion.div
+                            initial={{ opacity: 0, y: -24 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: -24 }}
+                            transition={{ duration: 0.22, ease: "easeOut" }}
+                            className="bg-gradient-to-r from-indigo-600 via-blue-600 to-indigo-700 text-white px-3.5 py-2 flex flex-wrap items-center justify-between gap-2.5 border-b border-indigo-400/30 shadow-md z-[90] shrink-0 select-none"
+                        >
+                            <div className="flex items-center gap-2.5 min-w-0">
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-black uppercase tracking-wider bg-white/20 text-white border border-white/25 shrink-0 font-mono">
+                                    <Sparkles size={11} className="animate-pulse" />
+                                    v{serverVersion || CLIENT_VERSION}
+                                </span>
+                                <span className="text-xs font-bold truncate">
+                                    {isRefreshing
+                                        ? "Guardando carrito activo y aplicando nueva versión sin perder tus datos..."
+                                        : updateCountdown !== null && updateCountdown > 0
+                                        ? `Nueva versión lista · Guardando carrito y actualizando automáticamente en ${updateCountdown}s...`
+                                        : `Nueva versión de GTR POS disponible${releaseNotes ? ` (${releaseNotes})` : ''} · Tu carrito y sesión están protegidos.`}
+                                </span>
+                            </div>
+                            <div className="flex items-center gap-2 shrink-0 ml-auto">
+                                <button
+                                    type="button"
+                                    disabled={isRefreshing}
+                                    onClick={() => handleForceUpdate(serverVersion, serverBuildTime)}
+                                    className="px-3 py-1 bg-white hover:bg-indigo-50 active:scale-95 text-indigo-700 rounded-lg text-[11px] font-black uppercase tracking-wider shadow-xs transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+                                >
+                                    <RefreshCw size={12} className={isRefreshing ? "animate-spin" : ""} />
+                                    <span>{isRefreshing ? "Actualizando..." : "Actualizar ahora"}</span>
+                                </button>
+                            </div>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
+
                 {/* Isolated Sandbox Indicator Banner */}
                 {isSandboxEnv && (
                     <div className="bg-amber-500/15 dark:bg-amber-500/10 border-b border-amber-500/30 px-4 py-2 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5 text-xs text-amber-800 dark:text-amber-200 z-50 shrink-0 select-none">
@@ -1832,77 +1763,6 @@ function AppLayout() {
                     </div>
                 </div>
             )}
-
-            {/* Elegant Mandatory App Update Locking Modal Overlay */}
-            <AnimatePresence>
-                {showUpdateWarning && (
-                    <motion.div 
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        exit={{ opacity: 0 }}
-                        className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md select-none"
-                    >
-                        <motion.div 
-                            initial={{ scale: 0.9, y: 20 }}
-                            animate={{ scale: 1, y: 0 }}
-                            exit={{ scale: 0.9, y: 20 }}
-                            className="bg-white dark:bg-[#0c111e] rounded-3xl border border-orange-500/30 p-6 max-w-md w-full relative z-10 flex flex-col gap-5 shadow-2xl"
-                        >
-                            <div className="flex flex-col items-center gap-3.5 text-center">
-                                <div className="w-16 h-16 rounded-full bg-orange-500/10 flex items-center justify-center text-orange-500 border border-orange-500/20 shadow-lg shadow-orange-550/10 animate-bounce">
-                                    <Smartphone size={32} />
-                                </div>
-                                <div className="flex flex-col gap-1">
-                                    <span className="text-[10px] font-black uppercase tracking-wider text-orange-500 font-mono">Actualización Obligatoria</span>
-                                    <h2 className="font-sans font-black text-slate-855 dark:text-white text-lg tracking-tight leading-snug">
-                                        ¡Nueva Versión de GTR POS Disponible!
-                                    </h2>
-                                </div>
-                            </div>
-
-                            <div className="p-4 rounded-2xl bg-orange-500/5 dark:bg-orange-500/10 border border-orange-500/10 text-center">
-                                <p className="text-[11.5px] font-semibold text-slate-600 dark:text-slate-300 leading-relaxed">
-                                    Se ha detectado la versión <strong className="text-orange-550 dark:text-orange-400 font-black">v{serverVersion || "2.3.0"}</strong> en el servidor. Tu dispositivo actual posee una versión anterior y ha sido pausado para evitar cualquier desincronización en tus importes, inventarios y ventas fiscales.
-                                </p>
-                            </div>
-
-                            {releaseNotes && (
-                                <div className="flex flex-col gap-1.5 border border-slate-150 dark:border-slate-800 p-3 rounded-2xl bg-slate-50/50 dark:bg-black/25">
-                                    <span className="text-[9px] font-extrabold uppercase tracking-widest text-slate-400 font-mono">Notas de actualización:</span>
-                                    <p className="text-[10.5px] font-medium text-slate-500 dark:text-slate-400 italic">
-                                        "{releaseNotes}"
-                                    </p>
-                                </div>
-                            )}
-
-                            <div className="flex flex-col gap-2.5">
-                                <motion.button
-                                    disabled={isRefreshing}
-                                    whileHover={{ scale: isRefreshing ? 1 : 1.02 }}
-                                    whileTap={{ scale: isRefreshing ? 1 : 0.98 }}
-                                    onClick={handleForceUpdate}
-                                    className="w-full py-3.5 bg-gradient-to-r from-orange-500 to-amber-500 text-white text-xs font-black rounded-2xl uppercase tracking-wider transition-all cursor-pointer shadow-lg shadow-orange-500/25 flex items-center justify-center gap-2"
-                                >
-                                    {isRefreshing ? (
-                                        <>
-                                            <div className="w-4 h-4 border-2 border-white/35 border-t-white rounded-full animate-spin" />
-                                            <span>Actualizando Aplicación...</span>
-                                        </>
-                                    ) : (
-                                        <>
-                                            <Sparkles size={14} className="text-white animate-pulse" />
-                                            <span>Actualizar Ahora (Forzar)</span>
-                                        </>
-                                    )}
-                                </motion.button>
-                                <p className="text-[9px] font-bold text-center text-slate-400">
-                                    Al presionar se limpiará la caché local y se cargará el terminal limpio instantáneamente.
-                                </p>
-                            </div>
-                        </motion.div>
-                    </motion.div>
-                )}
-            </AnimatePresence>
 
             {/* S.I.T.A. Autonomous AI Test & Healing Pilot HUD */}
             <AnimatePresence>

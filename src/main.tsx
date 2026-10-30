@@ -184,11 +184,15 @@ import './index.css';
 window.addEventListener('unhandledrejection', async (event) => {
   if (event.reason && event.reason.message && event.reason.message.includes('Failed to fetch dynamically imported module')) {
     event.preventDefault();
-    console.warn("Chunk load error detected. Unregistering service workers and clearing caches...");
+    console.warn("Chunk load error detected. Clearing stale caches and updating Service Worker...");
     try {
-      const registrations = await navigator.serviceWorker.getRegistrations();
-      for (const registration of registrations) {
-        await registration.unregister();
+      if ('serviceWorker' in navigator) {
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        for (const registration of registrations) {
+          registration.active?.postMessage({ type: 'CLEAR_CACHES' });
+          registration.waiting?.postMessage({ type: 'SKIP_WAITING' });
+          await registration.update().catch(() => {});
+        }
       }
       if (window.caches) {
         const keys = await window.caches.keys();
@@ -203,9 +207,19 @@ window.addEventListener('unhandledrejection', async (event) => {
   }
 });
 
-// Service Worker Registration for PWA Standalone & Offline Execution
+// Service Worker Registration for PWA Standalone, Offline Execution & Native Web Push
 if ('serviceWorker' in navigator && (window.location.protocol === 'https:' || window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')) {
   window.addEventListener('load', () => {
+    // Clean up any legacy Workbox registerSW registrations that are not /sw.js
+    navigator.serviceWorker.getRegistrations().then((regs) => {
+      for (const r of regs) {
+        const scriptUrl = r.active?.scriptURL || r.installing?.scriptURL || r.waiting?.scriptURL || '';
+        if (scriptUrl && !scriptUrl.endsWith('/sw.js')) {
+          r.unregister().catch(() => {});
+        }
+      }
+    }).catch(() => {});
+
     // updateViaCache: 'none' forces browser to always query server directly for sw.js changes
     navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
       .then((reg) => {
@@ -245,6 +259,18 @@ if ('serviceWorker' in navigator && (window.location.protocol === 'https:' || wi
       .catch((err) => {
         console.warn('[PWA] Error al registrar Service Worker:', err);
       });
+  });
+
+  // Forward Service Worker push navigation and display messages to the app window
+  navigator.serviceWorker.addEventListener('message', (event) => {
+    const data = event.data;
+    if (!data || typeof data !== 'object') return;
+    if (data.type === 'NAVIGATE_FROM_PUSH') {
+      window.dispatchEvent(new CustomEvent('gtr-navigate-from-push', { detail: data }));
+    } else if (data.type === 'PUSH_NOTIFICATION_DISPLAYED') {
+      (window as any).__lastDisplayedPushTag = data.tag;
+      window.dispatchEvent(new CustomEvent('gtr-push-displayed', { detail: data }));
+    }
   });
 
   // When new Service Worker activates and takes control:
