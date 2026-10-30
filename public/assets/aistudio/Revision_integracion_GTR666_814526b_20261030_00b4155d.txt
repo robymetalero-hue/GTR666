@@ -1,0 +1,295 @@
+GTR666 — REVISIÓN DE INTEGRACIÓN DE LOS ÚLTIMOS CAMBIOS
+Fecha: 30 de octubre de 2026, Bolivia
+Repositorio: https://github.com/robymetalero-hue/GTR666
+Commit revisado: 814526b6695f87866206a79927553ca1e35aaf16
+Comparado con: ed7d0686685be60dc2760dcc5cde45a7ac84c35d
+
+CONCLUSIÓN
+
+Hay mejoras reales en conservación del carrito, control de colas offline,
+actualización de la PWA, consulta de inventario y avisos de ventas. Sin embargo,
+la integración todavía NO debe considerarse cerrada: se reprodujeron errores
+capaces de omitir ventas legítimas y alterar caja. También se reintrodujo una
+credencial fija de sincronización con permisos amplios en las reglas de nube.
+
+El problema prioritario para tu tienda es éste: dos clientes compran el mismo
+producto al mismo precio, con el mismo cajero y sin seleccionar un cliente del
+catálogo. Si las compras ocurren dentro de 90 segundos, la segunda puede recibir
+el ticket de la primera aunque tenga una clave de operación diferente. Si se
+entregan dos unidades y el sistema descuenta una, vuelve a existir stock que
+físicamente ya no tienes. Esta prueba utilizó la cabecera que envía el POS actual.
+
+Las correcciones necesarias son puntuales. No se propone reestructurar ni
+añadir más módulos. Conservar las mejoras comprobadas y corregir primero los
+puntos de las secciones 3, 4 y 5.
+
+1. QUÉ SE REVISÓ Y QUÉ SIGNIFICAN LAS PRUEBAS
+
+- Tres commits posteriores a la revisión anterior; 30 archivos modificados o
+  agregados, incluyendo metadatos y archivo de dependencias.
+- Copia de 154 archivos de código/configuración fijada al SHA y verificada
+  contra los hashes de GitHub: 27 archivos cambiados recuperados y 127 sin cambios.
+- 223 comprobaciones anteriores más 15 escenarios dirigidos a la integración
+  nueva: 238 casos, 219 cumplen, 19 diferencias y 0 errores del arnés.
+- De los 223 casos anteriores, cumplen 212; en la revisión anterior cumplían
+  213. El nuevo caso de entorno de desarrollo explica esa pérdida de aprobación.
+- De los 15 escenarios nuevos, 7 cumplen y 8 detectan un comportamiento distinto
+  al requerido. Hay escenarios que comprueban el mismo problema por dos caminos.
+  Las 19 diferencias NO equivalen a 19 vulnerabilidades distintas.
+- Sintaxis: 114 JS/CJS/TS sin JSX cumplen; 0 errores de sintaxis detectados.
+  Hay 31 TSX sin compilación completa.
+- Se intentó npm run build y npm run lint: faltan vite y tsc en este entorno.
+  Por ello no hay una compilación ni comprobación completa de tipos aprobada.
+- Las pruebas ejecutan funciones reales extraídas, SQLite en memoria y servicios
+  de red, almacenamiento y estado de React controlados. No equivalen a navegador
+  real, API HTTP/JWT completa, emulador de Firestore o entrega Push a un teléfono.
+- Para reflejar la versión actual se actualizaron fixtures de notificaciones,
+  estado de pago mixto, conjuntos de operaciones en curso y selector de entorno.
+  La validación de caja, inventario y número de registros no se relajó.
+- La copia del repositorio no se modificó. No se ejecutó la app con su base
+  productiva ni se hicieron publicaciones, cambios en GitHub o escrituras remotas.
+- No se descargó la base comercial. No se confirmó qué commit o reglas están
+  realmente desplegados en dspos.app.
+
+2. MEJORAS E INTEGRACIONES QUE SÍ SE COMPROBARON
+
+A) Actualización conservando el trabajo del cajero
+  AppContext.applyPwaUpdate -> saveHotUpdateSnapshot -> hardRefreshApp.
+  Se preservan claves de sesión, carrito, pestañas, IDs de operación y colas
+  locales; se retiran cachés de catálogo. En M07 sobrevivieron un carrito con
+  3 unidades, una venta pendiente, el token y la clave de la operación.
+  Esta prueba cubre LocalStorage y el flujo de recarga simulado; no una PWA
+  instalada ni todas las situaciones de IndexedDB y almacenamiento lleno.
+
+B) Control de duplicados en la cola local
+  offlineStorage añade operaciones completadas y deduplicación por clientOperationId.
+  AppContext añade conjuntos de operaciones en curso para no enviar el mismo
+  elemento simultáneamente. En M06, guardar dos veces la misma operación dejó
+  una entrada; eliminarla y volver a guardarla no la hizo reaparecer.
+  E08/E09 también cumplen en los escenarios de procesadores concurrentes.
+  Esta mejora local debe conservarse. Es distinta del filtro por parecido de
+  ventas del servidor, que causa el problema explicado en la sección 3.
+
+C) Pago mixto integrado en pantallas y registros
+  POS y cuentas por cobrar permiten efectivo + QR; caja recibe los movimientos
+  separados. En M05, un abono de Bs 10 con Bs 7 efectivo y Bs 3 QR dejó deuda,
+  movimientos y saldo de caja coherentes. Aún falta la validación del servidor
+  para un desglose inválido: la pantalla por sí sola no cierra ese control.
+
+D) Notificaciones desacopladas de la transacción comercial
+  Nueva tabla push_subscriptions -> endpoints /api/push -> web-push -> public/sw.js.
+  La configuración de VAPID se conserva en settings. Los eventos de ventas y
+  abonos llaman al avisador después del registro comercial.
+  M09: al fallar el transporte Push, la venta siguió respondiendo 200, se guardó
+  una vez, descontó una unidad y registró Bs 10 en caja.
+  M10: el cajero no pudo registrarse como receptor de avisos de administrador.
+  No se comprobó recepción real con la pantalla bloqueada ni estabilidad entre
+  contenedores. La pantalla de configuración tiene un contrato incompatible
+  con estas utilidades, explicado en la sección 6.
+
+E) Inventario con datos útiles y costos filtrados en los endpoints nuevos
+  Inventory consulta /api/products/:id/kardex y /api/inventory/restock-alerts.
+  Los cálculos incluyen ventas, devoluciones, ingresos, rotación y reposición.
+  M14: el Kardex no devolvió price_cost y las alertas ocultaron costos al cajero.
+  No se interpreta ese resultado como aprobación de todos los permisos de lectura.
+
+F) Conservación de correcciones anteriores
+  Se mantienen los casos aprobados de reservas, stock disponible, permisos de
+  pedidos, reintentos con clave estable, moneda de deudas, respaldo con WAL y
+  devoluciones con descuento. Las 21 comprobaciones aisladas de búsqueda,
+  precios, carrito y cámara cumplen.
+  Un modelo de 500 operaciones también conserva stock, auditoría y caja.
+  Ese modelo usa claves explícitas y NO la cabecera x-pos-checkout del navegador;
+  por eso no detecta por sí solo la regresión M01 del POS real.
+
+3. PRIORIDAD CRÍTICA: SE CONFUNDEN DOS VENTAS LEGÍTIMAS
+
+Ubicación:
+  server.ts, findRecentPosFingerprintMatch, aproximadamente 7843–7905.
+  src/views/POS.tsx, alrededor de 1890: envía x-pos-checkout: true.
+  server.ts, /api/offline-sales/submit: comparación de ventas online recientes.
+
+Caso M01:
+  Stock inicial 15, dos compras independientes de 1 unidad a Bs 10.
+  Cajero igual, cliente de catálogo vacío, claves de operación A y B distintas.
+  Ambas solicitudes llevan la cabecera del POS y ocurren dentro de 90 segundos.
+  Esperado: 2 tickets, stock 13 y caja Bs 20.
+  Observado: 1 ticket, stock 14 y caja Bs 10.
+  Ambas solicitudes responden HTTP 200 y entregan el mismo saleId.
+
+Caso M03:
+  Una segunda venta offline independiente, con clave distinta pero igual
+  contenido a una online reciente, responde already_approved y no queda pendiente.
+  No se diferencia de forma segura una segunda compra de un reintento.
+
+Corrección puntual:
+  - Mantener la deduplicación por client_operation_id y el hash de esa operación.
+  - No convertir una clave nueva en la venta de otra clave por igualdad de
+    importe, artículos, cajero y ventana temporal.
+  - Aplicar la misma regla al reconciliar ventas offline.
+  - Preservar la clave estable del carrito en recargas y reintentos; esa parte
+    ya tiene mejoras útiles que no deben retirarse.
+
+Aceptación:
+  Dos compras idénticas con claves distintas deben producir dos tickets.
+  Repetir una compra con la misma clave debe producir un solo ticket.
+  M02 ya cumple el segundo requisito; M01 y M03 no cumplen el primero.
+
+4. PRIORIDAD ALTA: UN DESGLOSE MIXTO INVÁLIDO PUEDE INFLAR LA CAJA
+
+Ubicación:
+  server.ts, POST /api/accounts-receivable/:id/pay, alrededor de 8576–8626.
+  GET /api/cash-accounts llama a selfHealCashAccounts antes de responder.
+
+Caso M04, sobre una deuda ficticia de Bs 100:
+  Se envió abono amount=10, método Mixto, efectivo=100 y QR=100.
+  Esperado: rechazar sin registrar abono ni alterar saldo.
+  Observado: HTTP 200, deuda reducida en Bs 10 y dos movimientos nuevos por Bs 200.
+  La caja quedó inicialmente en Bs 10; después de consultar cash-accounts,
+  la autorreparación la cambió a Bs 200 para hacerla coincidir con esos movimientos.
+
+La pantalla actual valida la suma, pero la API confía en los componentes
+enviados. Un cliente anterior, petición alterada o error de estado puede generar
+un saldo inconsistente. No se realizó ningún abono real.
+
+Corrección puntual:
+  - Validar en el servidor componentes numéricos finitos, no negativos, moneda
+    y suma equivalente al importe efectivamente aceptado.
+  - Rechazar el desglose inválido antes de escribir, dentro de la misma garantía
+    transaccional del abono.
+  - Verificar también los demás caminos de pago mixto y el saldo restante cuando
+    ya hubo anticipos. No normalizar silenciosamente importes que representan
+    dinero que no se recibió.
+  - Incluir el desglose comercial relevante en la comprobación de reintentos.
+
+5. PRIORIDAD ALTA: SE REINTRODUJERON CREDENCIALES FIJAS Y UN DEFAULT PRODUCTIVO
+
+A) Credencial literal de sincronización
+  firebaseSync.ts, ensureServerAuth, alrededor de 123–124, vuelve a usar un
+  correo y contraseña fijos si faltan variables de entorno.
+  firestore.rules, isSyncDaemon, alrededor de 26, concede autoridad al correo
+  correspondiente, además de los claims de sincronización.
+  La comprobación de correo del daemon no exige email_verified.
+
+  M13 ejecutó la función real con variables de entorno vacías y un sustituto
+  de Firebase: se intentó iniciar sesión con el fallback. No hubo red ni un
+  intento de acceso a una cuenta real. Los valores se omiten intencionalmente
+  de este informe.
+
+  El repositorio continúa siendo público. No se puede tratar como secreto una
+  contraseña incluida allí. No se verificó si esa credencial existe, está activa
+  o se utiliza en producción; eso requiere revisar la configuración autorizada.
+
+  Corrección puntual:
+    Quitar el fallback literal, configurar la identidad de sincronización fuera
+    del código y usar una autoridad verificable. Rotar cualquier credencial
+    expuesta que esté activa y revocar sus sesiones cuando corresponda. Eliminar
+    el texto de un commit nuevo no invalida una credencial ya publicada.
+
+B) Desarrollo sin entorno explícito abre el contexto productivo
+  server.ts, líneas 7–8: sin APP_ENV, todo lo que no sea NODE_ENV=test se declara
+  production. El middleware ya no reconoce por defecto el host ais-dev como sandbox.
+  database.ts también devuelve producción fuera de un contexto o entorno de prueba.
+
+  M12/V03: NODE_ENV=development, URL/Host ais-dev y APP_ENV ausente resultan en
+  producción. Se evaluaron los selectores reales sin abrir una base de datos.
+  Esto reduce una protección que antes cumplía y es relevante al trabajar desde
+  AI Studio, dados los incidentes anteriores con datos de prueba en producción.
+
+  Corrección puntual:
+    Exigir producción explícita y mantener desarrollo/pruebas aislados por defecto.
+    Configurar APP_ENV de manera inequívoca en cada entorno; no depender de que
+    cada solicitud de prueba recuerde enviar una cabecera de sandbox.
+
+6. NOTIFICACIONES: LA PANTALLA NO USA EL MISMO CONTRATO QUE LAS UTILIDADES
+
+Ubicación:
+  src/utils/pushNotifications.ts: PushStatusSummary y funciones de suscripción.
+  src/views/ConfiguracionesView.tsx: estado inicial, loadPushStatus y botones.
+
+El módulo devuelve:
+  isSubscribed, adminSubscriptionsCount y success.
+La pantalla utiliza:
+  subscribed, serverCount y ok.
+Además, llama con user a dos funciones declaradas sin parámetros.
+
+M15 conectó la utilidad real de estado con el manejador real del botón:
+  Había una suscripción activa y el módulo devolvió isSubscribed=true.
+  La pantalla la consideró inactiva e intentó suscribir otra vez.
+  No llamó a desuscribir y mostró como error una respuesta success=true.
+
+Corrección puntual: unificar los nombres y firmas, usar el tipo compartido y
+comprobar activación, visualización del contador, prueba y desactivación. Esto
+también deja observaciones concretas para la compilación de TypeScript pendiente.
+
+Otra omisión de permisos (M11): POST /api/push/unsubscribe elimina por endpoint
+sin limitar por user_id. Un cajero que proporciona un endpoint ficticio de otro
+usuario pudo borrar la suscripción del administrador. No se descubrieron ni
+utilizaron endpoints reales. Limitar la baja al propietario o a una acción
+administrativa explícitamente autorizada.
+
+7. CONTINÚAN ALGUNOS CASOS ANTERIORES DE RECUPERACIÓN Y SEGURIDAD
+
+- Z03: si el inventario y caja ya fueron corregidos pero permanecen encabezado
+  y relaciones antiguas sin marcador de la corrección, hidratar el incidente
+  sigue llevando stock 12 a 15 y caja 0 a -30. Con tombstone previo, L04 cumple.
+  La limpieza de relaciones no demuestra por sí sola un efecto pendiente de revertir.
+
+- L05: el primer pull completo corrige la devolución parcial; un segundo pull
+  forzado puede devolver caja a Bs 20 aunque deba quedar en Bs 0.
+  Hay fechas SQLite UTC sin zona mezcladas con ISO con zona. server.ts fija
+  America/La_Paz; interpretar la fecha UTC sin zona como hora local puede hacer
+  que una réplica vieja parezca cuatro horas más nueva. Normalizar esas fechas
+  antes de comparar y preservar el resultado registrado de la remediación.
+
+- L01/L02: las solicitudes sin clave siguen dependiendo de bloques de 15 segundos.
+  El mismo abono repetido con 2 ms de separación al cruzar un bloque se duplica;
+  dos abonos independientes iguales en el mismo bloque se confunden. Los clientes
+  actuales con claves distintas cumplen L03. No afirmar que una ventana de tiempo
+  reemplaza la identidad durable de una operación.
+
+- L06: la regla de productos aún permite cambios de una identidad Firebase
+  autenticada sin rol administrador si el stock no aumenta. Eso permite, según
+  la expresión de la regla, cambiar el precio manteniendo el stock o reducirlo.
+  Se revisó/evaluó la expresión aislada, no reglas desplegadas ni un emulador.
+
+- M08: en el service worker, caches.match('/index.html') || caches.match('/')
+  aplica el OR a promesas. Si falta index.html pero existe la raíz cacheada, no
+  se usa esa segunda alternativa. La prueba offline obtuvo respuesta vacía.
+  Resolver la primera promesa antes de elegir la alternativa. No implica que
+  todas las aperturas offline fallen; es ese escenario específico.
+
+8. CÓMO INTERPRETAR LAS OTRAS DIFERENCIAS Y QUÉ FALTA VALIDAR
+
+K02/F10 no demuestran un ajuste de stock no autorizado: editar producto responde
+200 pero conserva el stock. K12 permite consultar la propia cola con costos
+ocultos. No se cuentan como nuevas vulnerabilidades por cambiar el HTTP esperado.
+
+S07 depende de dos SQLite independientes escribiendo al mismo Firestore; la
+topología real de producción no se comprobó. Un mutex en memoria no basta para
+deducir protección entre servidores independientes.
+
+E15 conserva una cuestión de autoría al cambiar de usuario con cola antigua:
+el procesador puede enviar la operación de otro cajero. Debe definirse y respetarse
+esa política, sin inferir pérdida de datos productivos a partir de esta simulación.
+
+No se probó visualmente cada pantalla Android/PC ni una impresora. Los cambios
+de layouts, tablas y tema están presentes en código, pero su aspecto final no
+se certificó en dispositivos. Tampoco se verificó la entrega real de notificaciones,
+las reglas desplegadas, la configuración de Firebase o el estado comercial actual.
+
+ORDEN RECOMENDADO DE CIERRE
+
+1) Corregir la deduplicación por parecido para no perder dos ventas legítimas.
+2) Cerrar los invariantes del pago mixto en el servidor y el efecto de autorreparación.
+3) Retirar/rotar credenciales expuestas y recuperar el aislamiento de desarrollo.
+4) Cerrar la recuperación parcial y la comparación de fechas de caja.
+5) Unificar el contrato de notificaciones y limitar las bajas a su propietario.
+6) Corregir la alternativa de caché offline y completar compilación/tipos.
+7) Publicar únicamente la versión validada, comprobar el commit servido y las
+   reglas efectivas; hacer la aceptación con datos ficticios y entorno aislado.
+
+No ejecutar ventas de prueba en la base comercial para intentar cerrar estos
+casos. Este informe contiene escenarios reproducidos y correcciones necesarias;
+no afirma que todos ellos hayan ocurrido en la tienda ni que el despliegue actual
+sea idéntico al commit revisado.

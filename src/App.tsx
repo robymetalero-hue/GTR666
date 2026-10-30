@@ -212,11 +212,7 @@ function AppLayout() {
     const [pingingDevices, setPingingDevices] = useState(false);
     const [globalNotification, setGlobalNotification] = useState<{message: string; type: "success"|"error"|"warn"} | null>(null);
 
-    const isSandboxEnv = typeof window !== 'undefined' && (
-        window.location.hostname.includes('ais-dev') || 
-        window.location.hostname === 'localhost' || 
-        window.location.hostname === '127.0.0.1'
-    );
+    const isSandboxEnv = typeof window !== 'undefined' && localStorage.getItem('gtr_sandbox_mode') === 'true';
     const [cloningSandbox, setCloningSandbox] = useState(false);
     const handleCloneSandbox = async () => {
         if (!window.confirm("⚠️ ¿Deseas actualizar el Sandbox con los datos reales de Producción?\n\nEsto recargará los productos, configuraciones y usuarios desde producción hacia 'gtr_pos_sandbox.db' para que puedas hacer pruebas realistas sin tocar producción.")) {

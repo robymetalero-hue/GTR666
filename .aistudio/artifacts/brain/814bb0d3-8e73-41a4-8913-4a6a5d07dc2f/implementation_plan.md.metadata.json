@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan de implementacion actualizado: Actualizacion Instantanea Estilo AI Studio sin bloqueo de caja + Solucion Definitiva contra Doble Sincronizacion Offline y Ventas Duplicadas.",
-  "updatedAt":  "2026-10-30T11:06:25.652051646Z",
+  "summary":  "Plan para restaurar la conexión y sincronización automática con Firebase en modo producción, eliminando los avisos de variables de entorno desconocidas y manteniendo intactas todas las mejoras de seguridad, idempotencia y protección anti-duplicados de ventas.",
+  "updatedAt":  "2026-10-30T15:52:35.716977720Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

@@ -21,11 +21,15 @@ export interface PushStatusSummary {
   supported: boolean;
   permission: NotificationPermission | 'unsupported';
   isSubscribed: boolean;
+  subscribed: boolean;
+  eligibleRole: boolean;
   adminSubscriptionsCount: number;
+  serverCount: number;
   endpoint?: string | null;
 }
 
-export async function getSalesPushStatus(): Promise<PushStatusSummary> {
+export async function getSalesPushStatus(user?: any): Promise<PushStatusSummary> {
+  const eligibleRole = user ? isOwnerOrAdminForPush(user) : true;
   const supported =
     typeof window !== 'undefined' &&
     'serviceWorker' in navigator &&
@@ -37,7 +41,10 @@ export async function getSalesPushStatus(): Promise<PushStatusSummary> {
       supported: false,
       permission: 'unsupported',
       isSubscribed: false,
+      subscribed: false,
+      eligibleRole,
       adminSubscriptionsCount: 0,
+      serverCount: 0,
       endpoint: null
     };
   }
@@ -63,7 +70,7 @@ export async function getSalesPushStatus(): Promise<PushStatusSummary> {
     const res = await fetch('/api/push/status');
     if (res.ok) {
       const data = await res.json();
-      adminSubscriptionsCount = Number(data.adminSubscriptionsCount || 0);
+      adminSubscriptionsCount = Number(data.adminSubscriptionsCount ?? data.serverCount ?? 0);
     }
   } catch {}
 
@@ -71,15 +78,20 @@ export async function getSalesPushStatus(): Promise<PushStatusSummary> {
     supported: true,
     permission: Notification.permission,
     isSubscribed,
+    subscribed: isSubscribed,
+    eligibleRole,
     adminSubscriptionsCount,
+    serverCount: adminSubscriptionsCount,
     endpoint
   };
 }
 
-export async function subscribeToSalesPush(): Promise<{
+export async function subscribeToSalesPush(_user?: any): Promise<{
   success: boolean;
+  ok: boolean;
   message: string;
   adminSubscriptionsCount?: number;
+  serverCount?: number;
 }> {
   if (
     typeof window === 'undefined' ||
@@ -89,6 +101,7 @@ export async function subscribeToSalesPush(): Promise<{
   ) {
     return {
       success: false,
+      ok: false,
       message: 'Este navegador o dispositivo no soporta notificaciones Web Push.'
     };
   }
@@ -97,6 +110,7 @@ export async function subscribeToSalesPush(): Promise<{
   if (permission !== 'granted') {
     return {
       success: false,
+      ok: false,
       message: 'Permiso de notificaciones denegado. Habilita las notificaciones en la configuración del navegador o PWA.'
     };
   }
@@ -144,17 +158,22 @@ export async function subscribeToSalesPush(): Promise<{
     localStorage.setItem('pwa_push_subscribed', 'true');
   } catch {}
 
+  const count = Number(subData.adminSubscriptionsCount ?? subData.serverCount ?? 1);
   return {
     success: true,
+    ok: true,
     message: subData.message || 'Notificaciones Push de ventas activadas en este dispositivo.',
-    adminSubscriptionsCount: Number(subData.adminSubscriptionsCount || 1)
+    adminSubscriptionsCount: count,
+    serverCount: count
   };
 }
 
 export async function unsubscribeFromSalesPush(): Promise<{
   success: boolean;
+  ok: boolean;
   message: string;
   adminSubscriptionsCount?: number;
+  serverCount?: number;
 }> {
   let endpoint: string | null = null;
   try {
@@ -178,15 +197,25 @@ export async function unsubscribeFromSalesPush(): Promise<{
     body: JSON.stringify({ endpoint })
   });
   const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    return {
+      success: false,
+      ok: false,
+      message: data.error || 'No se pudo desactivar la suscripción Push en el servidor.'
+    };
+  }
 
   try {
     localStorage.setItem('pwa_push_subscribed', 'false');
   } catch {}
 
+  const count = Number(data.adminSubscriptionsCount ?? data.serverCount ?? 0);
   return {
     success: true,
+    ok: true,
     message: data.message || 'Notificaciones Push desactivadas en este dispositivo.',
-    adminSubscriptionsCount: Number(data.adminSubscriptionsCount || 0)
+    adminSubscriptionsCount: count,
+    serverCount: count
   };
 }
 
@@ -207,7 +236,7 @@ export async function syncAdminPushSubscriptionIfGranted(user: any): Promise<voi
 
   if (Notification.permission === 'granted') {
     try {
-      await subscribeToSalesPush();
+      await subscribeToSalesPush(user);
     } catch (e) {
       console.warn('[Push] Background subscription sync skipped:', e);
     }
@@ -216,6 +245,7 @@ export async function syncAdminPushSubscriptionIfGranted(user: any): Promise<voi
 
 export async function triggerTestSalesPush(): Promise<{
   success: boolean;
+  ok: boolean;
   message: string;
   sentCount?: number;
   totalTargets?: number;
@@ -230,6 +260,7 @@ export async function triggerTestSalesPush(): Promise<{
   }
   return {
     success: true,
+    ok: true,
     message: data.message || 'Notificación de prueba enviada.',
     sentCount: data.sentCount,
     totalTargets: data.totalTargets

@@ -609,9 +609,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             }
 
             if (typeof window !== 'undefined' && !finalHeaders['x-app-environment']) {
-                const isSandbox = window.location.hostname.includes('ais-dev') || 
-                                  window.location.hostname === 'localhost' || 
-                                  window.location.hostname === '127.0.0.1';
+                const isSandbox = localStorage.getItem('gtr_sandbox_mode') === 'true';
                 finalHeaders['x-app-environment'] = isSandbox ? 'sandbox' : 'production';
             }
 
@@ -1825,18 +1823,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                     if (!processedPayload.clientOperationId && !processedPayload.client_operation_id) {
                         processedPayload.client_operation_id = action.id;
                     }
-                    if (action.ownerUserId && !processedPayload.ownerUserId && !processedPayload.user_id) {
-                        processedPayload.ownerUserId = action.ownerUserId;
+                    const originalActionUserId = processedPayload.user_id || processedPayload.ownerUserId || action.ownerUserId || user?.id;
+                    const originalActionUsername =
+                        processedPayload.user_name ||
+                        processedPayload.username ||
+                        action.ownerUsername ||
+                        (originalActionUserId && user?.id && String(originalActionUserId) === String(user.id) ? user.username : undefined);
+                    if (originalActionUserId) {
+                        processedPayload.user_id = originalActionUserId;
+                        processedPayload.ownerUserId = originalActionUserId;
+                    }
+                    if (originalActionUsername && !processedPayload.user_name) {
+                        processedPayload.user_name = originalActionUsername;
                     }
 
-                    // Execute fetch call with authorization and user context
+                    // Execute fetch call with authorization and original operator context
                     const authToken = localStorage.getItem('auth_token');
                     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
                     if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
-                    if (user) {
+                    if (originalActionUserId) {
+                        headers['x-user-id'] = String(originalActionUserId);
+                    } else if (user) {
                         headers['x-user-id'] = String(user.id);
-                        headers['x-user-role'] = user.role || '';
-                        headers['x-user-username'] = user.username || '';
+                    }
+                    if (user?.role) {
+                        headers['x-user-role'] = user.role;
+                    }
+                    if (originalActionUsername) {
+                        headers['x-user-username'] = String(originalActionUsername);
+                    } else if (user?.username) {
+                        headers['x-user-username'] = user.username;
                     }
 
                     const res = await fetch(action.url, {
@@ -1961,18 +1977,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                         }
                     }
 
-                    // 2. Submit to Offline Quarantine Queue for Administrator Authorization (or automatic duplicate reconciliation if already recorded online)
+                    // 2. Submit to Offline Quarantine Queue for Administrator Authorization (preserving the original cashier who created the sale)
+                    const originalSaleUserId = sale.salePayload?.user_id || sale.ownerUserId || user?.id || 1;
+                    const originalSaleUsername =
+                        sale.salePayload?.user_name ||
+                        sale.salePayload?.username ||
+                        sale.ownerUsername ||
+                        (originalSaleUserId && user?.id && String(originalSaleUserId) === String(user.id) ? user.username : undefined) ||
+                        'Vendedor';
                     const submitPayload = {
                         ...sale.salePayload,
                         id: sale.id,
                         clientOperationId: opId,
                         client_name: sale.clientName,
                         client_phone: sale.clientPhone,
-                        user_name: user?.username || sale.salePayload.user_name || 'Vendedor'
+                        user_id: originalSaleUserId,
+                        user_name: originalSaleUsername
                     };
 
                     const token = localStorage.getItem('auth_token');
-                    const saleHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+                    const saleHeaders: Record<string, string> = {
+                        'Content-Type': 'application/json',
+                        'x-user-id': String(originalSaleUserId),
+                        'x-user-username': String(originalSaleUsername)
+                    };
                     if (token) saleHeaders['Authorization'] = `Bearer ${token}`;
 
                     const saleRes = await fetch('/api/offline-sales/submit', {

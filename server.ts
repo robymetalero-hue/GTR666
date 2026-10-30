@@ -1,9 +1,5 @@
 process.env.TZ = 'America/La_Paz';
 
-// Strict Environment Resolution:
-// Fail-closed security architecture: NEVER silently default to 'production'.
-// In development, preview containers (ais-dev), or tests, default strictly to 'sandbox'.
-// Only assume 'production' when explicitly declared or running on verified production domain (dspos.app).
 if (!process.env.APP_ENV) {
   process.env.APP_ENV = process.env.NODE_ENV === 'test' ? 'sandbox' : 'production';
 }
@@ -216,13 +212,15 @@ async function startServer() {
   // Sandbox vs Production Environment Isolation Gate
   // Accede inequívocamente a producción para dspos.app, ais-pre o cabecera explícita 'production' (salvo cuando el proceso es sandbox o test)
   app.use((req, res, next) => {
-    const explicitEnv = String(req.headers['x-app-environment'] || '').toLowerCase();
+    const explicitEnv = String(req.headers['x-app-environment'] || '').toLowerCase().trim();
+    const appEnv = String(process.env.APP_ENV || '').toLowerCase().trim();
+    const nodeEnv = String(process.env.NODE_ENV || '').toLowerCase().trim();
 
     let isSandbox = false;
     if (
-      process.env.APP_ENV === 'test' ||
-      process.env.APP_ENV === 'sandbox' ||
-      process.env.NODE_ENV === 'test' ||
+      appEnv === 'test' ||
+      appEnv === 'sandbox' ||
+      nodeEnv === 'test' ||
       explicitEnv === 'sandbox'
     ) {
       isSandbox = true;
@@ -440,6 +438,52 @@ async function startServer() {
   function roundCashBs(amount: number): number {
     if (!Number.isFinite(amount)) return 0;
     return Math.round((amount + Number.EPSILON) * 2) / 2;
+  }
+
+  function validateSplitPayment(
+    splitPayment: any,
+    expectedAmount: number,
+    currencyLabel: string = 'BOB'
+  ): { valid: boolean; error?: string; cashAmount: number; qrAmount: number } {
+    if (!splitPayment || typeof splitPayment !== 'object') {
+      return {
+        valid: false,
+        error: "El pago Mixto requiere especificar el desglose de montos en Efectivo y QR (split_payment).",
+        cashAmount: 0,
+        qrAmount: 0
+      };
+    }
+    const rawCash = Number(splitPayment.cash_amount);
+    const rawQr = Number(splitPayment.qr_amount);
+    if (!Number.isFinite(rawCash) || !Number.isFinite(rawQr) || rawCash < 0 || rawQr < 0) {
+      return {
+        valid: false,
+        error: "Los montos de Efectivo y QR en un pago Mixto deben ser valores numéricos finitos no negativos.",
+        cashAmount: 0,
+        qrAmount: 0
+      };
+    }
+    const cashAmount = Math.round((rawCash + Number.EPSILON) * 100) / 100;
+    const qrAmount = Math.round((rawQr + Number.EPSILON) * 100) / 100;
+    const sumSplit = Math.round((cashAmount + qrAmount + Number.EPSILON) * 100) / 100;
+    const target = Math.round((Number(expectedAmount || 0) + Number.EPSILON) * 100) / 100;
+    if (sumSplit <= 0 && target > 0) {
+      return {
+        valid: false,
+        error: "La suma del desglose Mixto (Efectivo + QR) debe ser mayor a cero.",
+        cashAmount,
+        qrAmount
+      };
+    }
+    if (Math.abs(sumSplit - target) > 0.01) {
+      return {
+        valid: false,
+        error: `Desglose de pago Mixto inválido: la suma de Efectivo (${cashAmount.toFixed(2)} ${currencyLabel}) + QR (${qrAmount.toFixed(2)} ${currencyLabel}) = ${sumSplit.toFixed(2)} ${currencyLabel} no coincide con el monto a cobrar de ${target.toFixed(2)} ${currencyLabel}.`,
+        cashAmount,
+        qrAmount
+      };
+    }
+    return { valid: true, cashAmount, qrAmount };
   }
 
   function getReservedStock(productId: number | string): number {
@@ -1470,9 +1514,21 @@ async function startServer() {
       if (!verifiedUser) {
         return res.status(401).json({ error: "Sesión requerida." });
       }
-      const endpoint = req.body?.endpoint;
+      const uRole = String(verifiedUser.role || '').toLowerCase().trim();
+      const canManageAllPush = isMainAdmin(verifiedUser) || uRole === 'propietario';
+      const endpoint = req.body?.endpoint ? String(req.body.endpoint).trim() : '';
       if (endpoint) {
-        db.prepare("DELETE FROM push_subscriptions WHERE endpoint = ?").run(String(endpoint));
+        const existingSub = db.prepare("SELECT id, user_id FROM push_subscriptions WHERE endpoint = ?").get(endpoint) as any;
+        if (existingSub && Number(existingSub.user_id) !== Number(verifiedUser.id) && !canManageAllPush) {
+          return res.status(403).json({
+            error: "No tienes autorización para desactivar la suscripción Push de otro usuario."
+          });
+        }
+        if (canManageAllPush) {
+          db.prepare("DELETE FROM push_subscriptions WHERE endpoint = ?").run(endpoint);
+        } else {
+          db.prepare("DELETE FROM push_subscriptions WHERE endpoint = ? AND user_id = ?").run(endpoint, verifiedUser.id);
+        }
       } else {
         db.prepare("DELETE FROM push_subscriptions WHERE user_id = ?").run(verifiedUser.id);
       }
@@ -7170,8 +7226,8 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         }))
       })).digest('hex');
 
-      // T05: Synthesize deterministic short-window operation ID when legacy client omits client_operation_id
-      const effectiveClientOpId = clientOpId || `auto_refund_${Number(sale_id)}_${refundPayloadHash.slice(0, 24)}_${Math.floor(Date.now() / 15000)}`;
+      // L01/L02: Use explicit client_operation_id only; never synthesize time-bucket IDs
+      const effectiveClientOpId = clientOpId ? String(clientOpId).trim() : null;
 
       if (effectiveClientOpId) {
         const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(effectiveClientOpId) as any;
@@ -7678,6 +7734,12 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           : Number(user_id || verifiedUser?.id || 1);
 
         const normalizedInitialAbono = payment_method === 'Crédito' ? Math.min(safeTotal, Math.max(0, Number(initial_abono || 0))) : 0;
+        const normalizedSplitForHash = payment_method === 'Mixto' && split_payment && typeof split_payment === 'object'
+          ? {
+              cash_amount: Math.round((Number(split_payment.cash_amount || 0) + Number.EPSILON) * 100) / 100,
+              qr_amount: Math.round((Number(split_payment.qr_amount || 0) + Number.EPSILON) * 100) / 100
+            }
+          : undefined;
         const normalizedItemsForHash = items.map((it: any) => ({
           product_id: Number(it.product_id),
           quantity: Number(it.quantity),
@@ -7693,6 +7755,9 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           };
           if (includeInitialAbono) {
             p.initial_abono = normalizedInitialAbono;
+          }
+          if (normalizedSplitForHash) {
+            p.split_payment = normalizedSplitForHash;
           }
           p.currency = safeCurrency;
           p.exchange_rate = rateVal;
@@ -7840,46 +7905,6 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           } catch (_) {}
         };
 
-        // Commercial fingerprint check for POS checkouts to block double-tap or network-flicker duplicates within 90s even if opId was rotated
-        const findRecentPosFingerprintMatch = (): any | null => {
-          if (req.headers['x-pos-checkout'] !== 'true') return null;
-          try {
-            const recentSales = db.prepare(`
-              SELECT id, total, discount, payment_method, client_id, currency, created_at
-              FROM sales
-              WHERE user_id = ? AND ABS(total - ?) < 0.01 AND payment_method = ?
-              ORDER BY id DESC LIMIT 8
-            `).all(effectiveUserId, safeTotal, payment_method || 'Efectivo') as any[];
-
-            const nowMs = Date.now();
-            for (const cand of recentSales) {
-              if (Number(cand.client_id || 0) !== Number(client_id || 0)) continue;
-              if (Math.abs(Number(cand.discount || 0) - safeDiscount) >= 0.01) continue;
-              if (String(cand.currency || 'BOB') !== String(safeCurrency)) continue;
-              const createdMs = cand.created_at ? new Date(cand.created_at).getTime() : 0;
-              if (createdMs && Math.abs(nowMs - createdMs) > 90000) continue;
-
-              const dbItems = db.prepare('SELECT product_id, quantity, price FROM sale_items WHERE sale_id = ? ORDER BY id ASC').all(cand.id) as any[];
-              if (dbItems.length !== normalizedItemsForHash.length) continue;
-              let allMatch = true;
-              for (let i = 0; i < dbItems.length; i++) {
-                if (
-                  Number(dbItems[i].product_id) !== normalizedItemsForHash[i].product_id ||
-                  Number(dbItems[i].quantity) !== normalizedItemsForHash[i].quantity ||
-                  Math.abs(Number(dbItems[i].price) - normalizedItemsForHash[i].price) >= 0.01
-                ) {
-                  allMatch = false;
-                  break;
-                }
-              }
-              if (allMatch) {
-                return cand;
-              }
-            }
-          } catch (_) {}
-          return null;
-        };
-
         // Pre-validation idempotency check (handles D03, D04, Y10, T18 before price/exchange_rate/points checks)
         if (clientOpId) {
           const preCheck = checkSaleIdempotency();
@@ -7895,15 +7920,12 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           }
         }
 
-        const fingerprintMatch = findRecentPosFingerprintMatch();
-        if (fingerprintMatch) {
-          reconcilePendingOfflineByOpId(clientOpId, fingerprintMatch.id);
-          return res.status(200).json({
-            success: true,
-            saleId: fingerprintMatch.id,
-            total: Number(fingerprintMatch.total),
-            isDuplicate: true
-          });
+        // M04: Strict server-side validation of Mixto split_payment components before writing
+        if (payment_method === 'Mixto') {
+          const splitCheck = validateSplitPayment(split_payment, safeTotal, safeCurrency);
+          if (!splitCheck.valid) {
+            return res.status(400).json({ error: splitCheck.error });
+          }
         }
 
         // Security check: validate discount permissions
@@ -8151,14 +8173,16 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           const receivedAmount = payment_method === 'Crédito' ? Math.min(safeTotal, Math.max(0, Number(initial_abono || 0))) : safeTotal;
           const receivedAmountInBs = safeCurrency === 'USD' ? (receivedAmount * currentRate) : receivedAmount;
 
-          // Record cash movement(s) (pending settlement) — supports split Efectivo + QR when payment_method === 'Mixto'
+          // Record cash movement(s) (pending settlement) — supports validated split Efectivo + QR when payment_method === 'Mixto'
           const movIds: any[] = [];
-          if (payment_method === 'Mixto' && split_payment) {
-            const rawCash = Math.max(0, Number(split_payment.cash_amount || 0));
-            const rawQr = Math.max(0, Number(split_payment.qr_amount || 0));
-            const sumSplit = rawCash + rawQr;
-            const normCash = sumSplit > 0 ? Number(((rawCash / sumSplit) * receivedAmount).toFixed(2)) : Number((receivedAmount / 2).toFixed(2));
-            const normQr = Math.max(0, Number((receivedAmount - normCash).toFixed(2)));
+          if (payment_method === 'Mixto') {
+            const splitCheck = validateSplitPayment(split_payment, receivedAmount, safeCurrency);
+            if (!splitCheck.valid) {
+              const splitErr = new Error(splitCheck.error || "Desglose de pago Mixto inválido.");
+              (splitErr as any).statusCode = 400;
+              throw splitErr;
+            }
+            const { cashAmount: normCash, qrAmount: normQr } = splitCheck;
 
             if (normCash > 0) {
               const movCash = db.prepare(`
@@ -8474,15 +8498,25 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         return res.status(400).json({ error: "El tipo de cambio del abono debe ser un valor numérico positivo mayor a cero." });
       }
 
-      const arPayHash = crypto.createHash('sha256').update(JSON.stringify({
+      const arSplitForHash = payment_method === 'Mixto' && req.body?.split_payment && typeof req.body.split_payment === 'object'
+        ? {
+            cash_amount: Math.round((Number(req.body.split_payment.cash_amount || 0) + Number.EPSILON) * 100) / 100,
+            qr_amount: Math.round((Number(req.body.split_payment.qr_amount || 0) + Number.EPSILON) * 100) / 100
+          }
+        : undefined;
+      const arPayHashObj: Record<string, any> = {
         account_receivable_id: Number(id),
         amount: Math.round(payAmount * 100) / 100,
         currency: payCurrency,
         payment_method: payment_method || 'Efectivo'
-      })).digest('hex');
+      };
+      if (arSplitForHash) {
+        arPayHashObj.split_payment = arSplitForHash;
+      }
+      const arPayHash = crypto.createHash('sha256').update(JSON.stringify(arPayHashObj)).digest('hex');
 
-      // T06: Synthesize deterministic short-window operation ID when legacy client omits client_operation_id
-      const effectiveClientOpId = clientOpId || `auto_arpay_${Number(id)}_${arPayHash.slice(0, 24)}_${Math.floor(Date.now() / 15000)}`;
+      // L01/L02: Use explicit client_operation_id only; never synthesize time-bucket IDs
+      const effectiveClientOpId = clientOpId ? String(clientOpId).trim() : null;
 
       // Y04: Check processed_operations BEFORE checking remaining_amount so confirmed payment retries return 200 idempotent
       if (effectiveClientOpId) {
@@ -8527,6 +8561,14 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           actualPayReceived = Math.round((actualDebtReduction / payRate) * 100) / 100;
         } else {
           actualPayReceived = actualDebtReduction;
+        }
+      }
+
+      // M04: Validate Mixto split_payment components against actualPayReceived BEFORE opening transaction
+      if (payment_method === 'Mixto') {
+        const splitCheck = validateSplitPayment(req.body?.split_payment, actualPayReceived, payCurrency);
+        if (!splitCheck.valid) {
+          return res.status(400).json({ error: splitCheck.error });
         }
       }
 
@@ -8575,31 +8617,38 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
         // Record the cash movement in actual received currency (split into Efectivo + Transferencia when Mixto)
         const movIds: any[] = [];
-        const splitPay = req.body?.split_payment;
-        if (payment_method === 'Mixto' && splitPay && (Number(splitPay.cash_amount) > 0 || Number(splitPay.qr_amount) > 0)) {
-          const splitCash = Math.max(0, Math.round((Number(splitPay.cash_amount) || 0) * 100) / 100);
-          const splitQr = Math.max(0, Math.round((Number(splitPay.qr_amount) || 0) * 100) / 100);
+        if (payment_method === 'Mixto') {
+          const splitCheck = validateSplitPayment(req.body?.split_payment, actualPayReceived, payCurrency);
+          if (!splitCheck.valid) {
+            const splitErr = new Error(splitCheck.error || "Desglose de pago Mixto inválido.");
+            (splitErr as any).statusCode = 400;
+            throw splitErr;
+          }
+          const { cashAmount: splitCash, qrAmount: splitQr } = splitCheck;
+          const currSym = payCurrency === 'USD' ? '$' : 'Bs.';
           if (splitCash > 0) {
             const resCash = db.prepare(`
               INSERT INTO cash_movements (seller_id, sale_id, type, amount, currency, payment_method, status, notes)
-              VALUES (?, ?, 'ingreso_manual', ?, 'BOB', 'Efectivo', 'pendiente', ?)
+              VALUES (?, ?, 'ingreso_manual', ?, ?, 'Efectivo', 'pendiente', ?)
             `).run(
               currentActiveUserId,
               record.sale_id,
               splitCash,
-              notes ? `${notes} (Efectivo Mixto: Bs. ${splitCash.toFixed(2)})` : `Abono CxC Venta #${record.sale_id} (Efectivo Mixto: Bs. ${splitCash.toFixed(2)})`
+              payCurrency,
+              notes ? `${notes} (Efectivo Mixto: ${currSym} ${splitCash.toFixed(2)})` : `Abono CxC Venta #${record.sale_id} (Efectivo Mixto: ${currSym} ${splitCash.toFixed(2)})`
             );
             movIds.push(resCash.lastInsertRowid);
           }
           if (splitQr > 0) {
             const resQr = db.prepare(`
               INSERT INTO cash_movements (seller_id, sale_id, type, amount, currency, payment_method, status, notes)
-              VALUES (?, ?, 'ingreso_manual', ?, 'BOB', 'Transferencia', 'pendiente', ?)
+              VALUES (?, ?, 'ingreso_manual', ?, ?, 'Transferencia', 'pendiente', ?)
             `).run(
               currentActiveUserId,
               record.sale_id,
               splitQr,
-              notes ? `${notes} (QR Mixto: Bs. ${splitQr.toFixed(2)})` : `Abono CxC Venta #${record.sale_id} (QR Mixto: Bs. ${splitQr.toFixed(2)})`
+              payCurrency,
+              notes ? `${notes} (QR Mixto: ${currSym} ${splitQr.toFixed(2)})` : `Abono CxC Venta #${record.sale_id} (QR Mixto: ${currSym} ${splitQr.toFixed(2)})`
             );
             movIds.push(resQr.lastInsertRowid);
           }
@@ -8960,7 +9009,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         const remOrderBob = safeCurrency === 'USD' ? Number((remOrder * currentRate).toFixed(2)) : remOrder;
         notifyAdminsOfSaleEvent({
           eventType: 'pedido_anticipo',
-          referenceId: pendingSaleId,
+          referenceId: Number(pendingSaleId),
           amount: safePaid,
           currency: safeCurrency,
           exchangeRate: currentRate,
@@ -9281,14 +9330,24 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         return res.status(400).json({ error: "Monto de pago no válido." });
       }
 
-      const pendingPayHash = crypto.createHash('sha256').update(JSON.stringify({
+      const pendingPaySplitForHash = payment_method === 'Mixto' && req.body?.split_payment && typeof req.body.split_payment === 'object'
+        ? {
+            cash_amount: Math.round((Number(req.body.split_payment.cash_amount || 0) + Number.EPSILON) * 100) / 100,
+            qr_amount: Math.round((Number(req.body.split_payment.qr_amount || 0) + Number.EPSILON) * 100) / 100
+          }
+        : undefined;
+      const pendingPayHashObj: Record<string, any> = {
         pending_sale_id: Number(id),
         amount: Math.round(parsedAmount * 100) / 100,
         payment_method: payment_method || 'Efectivo'
-      })).digest('hex');
+      };
+      if (pendingPaySplitForHash) {
+        pendingPayHashObj.split_payment = pendingPaySplitForHash;
+      }
+      const pendingPayHash = crypto.createHash('sha256').update(JSON.stringify(pendingPayHashObj)).digest('hex');
 
-      // T06: Synthesize deterministic short-window operation ID when legacy client omits client_operation_id
-      const effectiveClientOpId = clientOpId || `auto_pendpay_${Number(id)}_${pendingPayHash.slice(0, 24)}_${Math.floor(Date.now() / 15000)}`;
+      // L01/L02: Use explicit client_operation_id only; never synthesize time-bucket IDs
+      const effectiveClientOpId = clientOpId ? String(clientOpId).trim() : null;
 
       // Y03: Check processed_operations BEFORE checking sale status or remaining balance
       if (effectiveClientOpId) {
@@ -9318,6 +9377,12 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       }
       
       const actualAccepted = Math.min(parsedAmount, remainingAmount);
+      if (payment_method === 'Mixto') {
+        const splitCheck = validateSplitPayment(req.body?.split_payment, actualAccepted, sale.currency || 'BOB');
+        if (!splitCheck.valid) {
+          return res.status(400).json({ error: splitCheck.error });
+        }
+      }
       const newPaidAmount = Math.min(totalAmount, Math.round((paidAmount + actualAccepted) * 100) / 100);
       const newRemainingAmount = Math.max(0, Math.round((totalAmount - newPaidAmount) * 100) / 100);
       
@@ -9417,13 +9482,23 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     try {
       if (checkInventoryLock(res)) return;
 
-      const finalizePayloadHash = crypto.createHash('sha256').update(JSON.stringify({
+      const finalizeSplitForHash = payment_method === 'Mixto' && req.body?.split_payment && typeof req.body.split_payment === 'object'
+        ? {
+            cash_amount: Math.round((Number(req.body.split_payment.cash_amount || 0) + Number.EPSILON) * 100) / 100,
+            qr_amount: Math.round((Number(req.body.split_payment.qr_amount || 0) + Number.EPSILON) * 100) / 100
+          }
+        : undefined;
+      const finalizeHashObj: Record<string, any> = {
         pending_sale_id: Number(id),
         payment_method: payment_method || 'Efectivo',
         client_id: client_id ? Number(client_id) : null,
         initial_abono: Number(initial_abono || 0),
         redeemed_points: Number(redeemed_points || 0)
-      })).digest('hex');
+      };
+      if (finalizeSplitForHash) {
+        finalizeHashObj.split_payment = finalizeSplitForHash;
+      }
+      const finalizePayloadHash = crypto.createHash('sha256').update(JSON.stringify(finalizeHashObj)).digest('hex');
 
       if (clientOpId) {
         const existingOp = db.prepare('SELECT payload_hash, response_body FROM processed_operations WHERE client_operation_id = ?').get(clientOpId) as any;
@@ -9507,6 +9582,12 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         return res.status(400).json({
           error: `El abono adicional (${requestedInitialAbono.toFixed(2)} ${safeCurrency}) sumado a los anticipos previos (${accumulatedAbonosPre.toFixed(2)} ${safeCurrency}) excede el saldo pendiente del pedido (${remainingOrderBalancePre.toFixed(2)} ${safeCurrency}).`
         });
+      }
+      if (payment_method === 'Mixto') {
+        const splitCheck = validateSplitPayment(req.body?.split_payment, remainingOrderBalancePre, safeCurrency);
+        if (!splitCheck.valid) {
+          return res.status(400).json({ error: splitCheck.error });
+        }
       }
       
       const saleInsert = db.prepare('INSERT INTO sales (total, discount, payment_method, user_id, client_id, exchange_rate, currency, cierre_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)');
@@ -9709,22 +9790,27 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
         if (cashReceivedNow > 0) {
           const cashInBs = safeCurrency === 'USD' ? (cashReceivedNow * safeRate) : cashReceivedNow;
-          const splitPay = req.body?.split_payment;
-          if (payment_method === 'Mixto' && splitPay && (Number(splitPay.cash_amount) > 0 || Number(splitPay.qr_amount) > 0)) {
-            const splitCash = Math.max(0, Math.round((Number(splitPay.cash_amount) || 0) * 100) / 100);
-            const splitQr = Math.max(0, Math.round((Number(splitPay.qr_amount) || 0) * 100) / 100);
+          if (payment_method === 'Mixto') {
+            const splitCheck = validateSplitPayment(req.body?.split_payment, cashReceivedNow, safeCurrency);
+            if (!splitCheck.valid) {
+              const splitErr = new Error(splitCheck.error || "Desglose de pago Mixto inválido.");
+              (splitErr as any).statusCode = 400;
+              throw splitErr;
+            }
+            const { cashAmount: splitCash, qrAmount: splitQr } = splitCheck;
+            const currSym = safeCurrency === 'USD' ? '$' : 'Bs.';
             if (splitCash > 0) {
               const movResCash = db.prepare(`
                 INSERT INTO cash_movements (seller_id, sale_id, type, amount, currency, payment_method, status, notes)
-                VALUES (?, ?, 'venta', ?, 'BOB', 'Efectivo', 'pendiente', ?)
-              `).run(activeUserId, finalSaleId, splitCash, `Liquidación pedido #${id} (Efectivo Mixto: Bs. ${splitCash.toFixed(2)})`);
+                VALUES (?, ?, 'venta', ?, ?, 'Efectivo', 'pendiente', ?)
+              `).run(activeUserId, finalSaleId, splitCash, safeCurrency, `Liquidación pedido #${id} (Efectivo Mixto: ${currSym} ${splitCash.toFixed(2)})`);
               cashMovId = movResCash.lastInsertRowid;
             }
             if (splitQr > 0) {
               const movResQr = db.prepare(`
                 INSERT INTO cash_movements (seller_id, sale_id, type, amount, currency, payment_method, status, notes)
-                VALUES (?, ?, 'venta', ?, 'BOB', 'Transferencia', 'pendiente', ?)
-              `).run(activeUserId, finalSaleId, splitQr, `Liquidación pedido #${id} (QR Mixto: Bs. ${splitQr.toFixed(2)})`);
+                VALUES (?, ?, 'venta', ?, ?, 'Transferencia', 'pendiente', ?)
+              `).run(activeUserId, finalSaleId, splitQr, safeCurrency, `Liquidación pedido #${id} (QR Mixto: ${currSym} ${splitQr.toFixed(2)})`);
               if (!cashMovId) cashMovId = movResQr.lastInsertRowid;
             }
           } else {
@@ -9934,20 +10020,30 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         items
       } = req.body || {};
 
-      // 1. Check if this sale was already approved or recorded in sales by client_operation_id
+      // 1. Check if this sale was already approved or recorded in sales or processed_operations by client_operation_id (M03)
       const existingSale = db.prepare('SELECT id FROM sales WHERE client_operation_id = ?').get(safeOpId) as any;
-      if (existingSale) {
+      const existingProcessedOp = !existingSale
+        ? (db.prepare("SELECT response_body FROM processed_operations WHERE client_operation_id = ? AND operation_type = 'sale'").get(safeOpId) as any)
+        : null;
+      let resolvedOnlineSaleId: any = existingSale?.id;
+      if (!resolvedOnlineSaleId && existingProcessedOp?.response_body) {
+        try {
+          const parsedResp = JSON.parse(existingProcessedOp.response_body);
+          if (parsedResp?.saleId) resolvedOnlineSaleId = parsedResp.saleId;
+        } catch (_) {}
+      }
+      if (resolvedOnlineSaleId) {
         try {
           db.prepare(`
             UPDATE offline_pending_sales
             SET status = 'approved', resolved_sale_id = ?, approved_at = COALESCE(approved_at, ?)
             WHERE (id = ? OR client_operation_id = ?) AND status = 'pending'
-          `).run(existingSale.id, getBoliviaISOString(), safeId, safeOpId);
+          `).run(resolvedOnlineSaleId, getBoliviaISOString(), safeId, safeOpId);
         } catch (_) {}
         return res.json({
           success: true,
           status: 'already_approved',
-          saleId: existingSale.id,
+          saleId: resolvedOnlineSaleId,
           isDuplicate: true,
           message: 'Esta venta ya fue aprobada y registrada formalmente en línea.'
         });
@@ -9970,58 +10066,17 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         return res.status(400).json({ error: 'La venta offline no contiene artículos válidos.' });
       }
 
+      // E15: Preserve the original cashier who created the offline sale even if synced after another user logs in
       const verifiedUser = (req as any).verifiedUser;
-      const uRole = String(verifiedUser?.role || '').toLowerCase();
-      const isAdmin = verifiedUser && (['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser));
-      const effectiveUserId = (verifiedUser && (!isAdmin || !user_id))
-        ? Number(verifiedUser.id)
-        : Number(user_id || verifiedUser?.id || 1);
-      const userRow = db.prepare('SELECT username FROM users WHERE id = ?').get(effectiveUserId) as any;
-      const userName = userRow?.username || verifiedUser?.username || 'Vendedor';
-
-      // 3. Commercial Fingerprint Reconciliation: Check if this exact sale was already recorded online in `sales` (e.g. during a network flicker)
-      const numSubmittedTotal = Math.max(0, Number(total || 0));
-      const numSubmittedDiscount = Math.max(0, Number(discount || 0));
-      try {
-        const recentOnlineSales = db.prepare(`
-          SELECT id, total, discount, payment_method, client_id, currency, created_at
-          FROM sales
-          WHERE user_id = ? AND ABS(total - ?) < 0.01 AND payment_method = ?
-          ORDER BY id DESC LIMIT 10
-        `).all(effectiveUserId, numSubmittedTotal, payment_method || 'Efectivo') as any[];
-
-        const nowMs = Date.now();
-        for (const cand of recentOnlineSales) {
-          if (client_id && Number(cand.client_id || 0) !== Number(client_id || 0)) continue;
-          if (Math.abs(Number(cand.discount || 0) - numSubmittedDiscount) >= 0.01) continue;
-          if (String(cand.currency || 'BOB') !== String(currency || 'BOB')) continue;
-          const createdMs = cand.created_at ? new Date(cand.created_at).getTime() : 0;
-          if (createdMs && Math.abs(nowMs - createdMs) > 600000) continue; // 10-minute window for offline sync after network flicker
-
-          const dbItems = db.prepare('SELECT product_id, quantity, price FROM sale_items WHERE sale_id = ? ORDER BY id ASC').all(cand.id) as any[];
-          if (dbItems.length !== items.length) continue;
-          let itemsMatch = true;
-          for (let i = 0; i < dbItems.length; i++) {
-            if (
-              Number(dbItems[i].product_id) !== Number(items[i].product_id) ||
-              Number(dbItems[i].quantity) !== Number(items[i].quantity) ||
-              Math.abs(Number(dbItems[i].price) - Number(items[i].price)) >= 0.01
-            ) {
-              itemsMatch = false;
-              break;
-            }
-          }
-          if (itemsMatch) {
-            return res.json({
-              success: true,
-              status: 'already_approved',
-              saleId: cand.id,
-              isDuplicate: true,
-              message: 'Esta venta ya había ingresado en línea antes del corte de red; duplicado descartado automáticamente.'
-            });
-          }
-        }
-      } catch (_) {}
+      const requestedUserId = Number(user_id || req.headers['x-user-id'] || 0);
+      const requestedUserRow = requestedUserId > 0
+        ? (db.prepare('SELECT id, username FROM users WHERE id = ?').get(requestedUserId) as any)
+        : null;
+      const effectiveUserId = requestedUserRow?.id
+        ? Number(requestedUserRow.id)
+        : (requestedUserId > 0 ? requestedUserId : Number(verifiedUser?.id || 1));
+      const userRow = requestedUserRow || (db.prepare('SELECT username FROM users WHERE id = ?').get(effectiveUserId) as any);
+      const userName = userRow?.username || req.body?.user_name || req.headers['x-user-username'] || verifiedUser?.username || 'Vendedor';
 
       // Enrich items with current product metadata
       const enrichedItems = items.map((it: any) => {

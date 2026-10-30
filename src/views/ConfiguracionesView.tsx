@@ -71,8 +71,10 @@ export default function ConfiguracionesView() {
     const [pushStatus, setPushStatus] = useState<PushStatusSummary>({
         supported: false,
         permission: 'default',
+        isSubscribed: false,
         subscribed: false,
         eligibleRole: false,
+        adminSubscriptionsCount: 0,
         serverCount: 0
     });
     const [isTogglingPush, setIsTogglingPush] = useState(false);
@@ -81,7 +83,13 @@ export default function ConfiguracionesView() {
     const loadPushStatus = async () => {
         if (!user) return;
         const status = await getSalesPushStatus(user);
-        setPushStatus(status);
+        setPushStatus({
+            ...status,
+            isSubscribed: Boolean(status.isSubscribed ?? status.subscribed),
+            subscribed: Boolean(status.isSubscribed ?? status.subscribed),
+            adminSubscriptionsCount: Number(status.adminSubscriptionsCount ?? status.serverCount ?? 0),
+            serverCount: Number(status.adminSubscriptionsCount ?? status.serverCount ?? 0)
+        });
     };
 
     const fetchAppVersion = async () => {
@@ -956,14 +964,19 @@ export default function ConfiguracionesView() {
         if (!user) return;
         setIsTogglingPush(true);
         try {
-            if (pushStatus.subscribed) {
+            const currentlySubscribed = Boolean(pushStatus.isSubscribed ?? pushStatus.subscribed);
+            if (currentlySubscribed) {
                 const res = await unsubscribeFromSalesPush();
-                showNotification?.(res.message, res.ok ? "info" : "error");
+                const isOk = Boolean(res.success ?? res.ok);
+                showNotification?.(res.message, isOk ? "info" : "error");
             } else {
                 const res = await subscribeToSalesPush(user);
-                showNotification?.(res.message, res.ok ? "success" : "error");
+                const isOk = Boolean(res.success ?? res.ok);
+                showNotification?.(res.message, isOk ? "success" : "error");
             }
             await loadPushStatus();
+        } catch (err: any) {
+            showNotification?.(err?.message || "Error al gestionar las notificaciones Push.", "error");
         } finally {
             setIsTogglingPush(false);
         }
@@ -973,7 +986,10 @@ export default function ConfiguracionesView() {
         setIsSendingTestPush(true);
         try {
             const res = await triggerTestSalesPush();
-            showNotification?.(res.message, res.ok ? "success" : "error");
+            const isOk = Boolean(res.success ?? res.ok);
+            showNotification?.(res.message, isOk ? "success" : "error");
+        } catch (err: any) {
+            showNotification?.(err?.message || "No se pudo enviar la notificación Push de prueba.", "error");
         } finally {
             setIsSendingTestPush(false);
         }
@@ -2246,8 +2262,8 @@ export default function ConfiguracionesView() {
                 <div className="bg-white dark:bg-[#0c111e] rounded-3xl border border-indigo-500/30 dark:border-indigo-500/20 p-6 flex flex-col gap-5 animate-in fade-in slide-in-from-bottom-3 duration-300">
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-100 dark:border-slate-850/50 pb-4">
                         <div className="flex items-center gap-3">
-                            <div className={`p-2.5 rounded-xl ${pushStatus.subscribed ? 'bg-emerald-500/15 text-emerald-500' : 'bg-indigo-500/10 text-indigo-500'}`}>
-                                {pushStatus.subscribed ? <BellRing size={20} className="animate-pulse" /> : <Bell size={20} />}
+                            <div className={`p-2.5 rounded-xl ${(pushStatus.isSubscribed ?? pushStatus.subscribed) ? 'bg-emerald-500/15 text-emerald-500' : 'bg-indigo-500/10 text-indigo-500'}`}>
+                                {(pushStatus.isSubscribed ?? pushStatus.subscribed) ? <BellRing size={20} className="animate-pulse" /> : <Bell size={20} />}
                             </div>
                             <div>
                                 <div className="flex items-center gap-2 flex-wrap">
@@ -2255,11 +2271,11 @@ export default function ConfiguracionesView() {
                                         Notificaciones Push de Ventas en PWA
                                     </h2>
                                     <span className={`px-2 py-0.5 rounded-md text-[9.5px] font-black uppercase tracking-wider ${
-                                        pushStatus.subscribed
+                                        (pushStatus.isSubscribed ?? pushStatus.subscribed)
                                             ? 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20'
                                             : 'bg-slate-500/10 text-slate-500 border border-slate-500/20'
                                     }`}>
-                                        {pushStatus.subscribed ? 'ACTIVO EN ESTE DISPOSITIVO' : 'INACTIVO EN ESTE DISPOSITIVO'}
+                                        {(pushStatus.isSubscribed ?? pushStatus.subscribed) ? 'ACTIVO EN ESTE DISPOSITIVO' : 'INACTIVO EN ESTE DISPOSITIVO'}
                                     </span>
                                 </div>
                                 <p className="text-[11px] text-slate-400 mt-1 font-semibold">
@@ -2274,20 +2290,20 @@ export default function ConfiguracionesView() {
                                 onClick={handleToggleSalesPush}
                                 disabled={isTogglingPush || !pushStatus.supported}
                                 className={`px-4 py-2.5 rounded-xl font-black text-[11px] uppercase tracking-wider flex items-center gap-2 transition-all cursor-pointer disabled:opacity-50 ${
-                                    pushStatus.subscribed
+                                    (pushStatus.isSubscribed ?? pushStatus.subscribed)
                                         ? 'bg-rose-500/10 hover:bg-rose-500/20 text-rose-500 border border-rose-500/25'
                                         : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/20'
                                 }`}
                             >
-                                {pushStatus.subscribed ? <BellOff size={15} /> : <BellRing size={15} />}
+                                {(pushStatus.isSubscribed ?? pushStatus.subscribed) ? <BellOff size={15} /> : <BellRing size={15} />}
                                 {isTogglingPush
                                     ? 'Procesando...'
-                                    : pushStatus.subscribed
+                                    : (pushStatus.isSubscribed ?? pushStatus.subscribed)
                                         ? 'Desactivar en este equipo'
                                         : 'Activar Notificaciones Push'}
                             </button>
 
-                            {pushStatus.subscribed && (
+                            {(pushStatus.isSubscribed ?? pushStatus.subscribed) && (
                                 <button
                                     type="button"
                                     onClick={handleSendTestSalesPush}
@@ -2333,7 +2349,7 @@ export default function ConfiguracionesView() {
                         <div className="p-3.5 rounded-2xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200/60 dark:border-slate-800/60">
                             <span className="text-[9.5px] font-black uppercase tracking-wider text-slate-400 block">Tus Dispositivos Suscritos</span>
                             <span className="text-xs font-extrabold text-indigo-600 dark:text-indigo-400 mt-1 block">
-                                {pushStatus.serverCount} {pushStatus.serverCount === 1 ? 'dispositivo activo' : 'dispositivos activos'}
+                                {(pushStatus.adminSubscriptionsCount ?? pushStatus.serverCount ?? 0)} {(pushStatus.adminSubscriptionsCount ?? pushStatus.serverCount ?? 0) === 1 ? 'dispositivo activo' : 'dispositivos activos'}
                             </span>
                         </div>
                     </div>

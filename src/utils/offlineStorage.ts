@@ -15,6 +15,7 @@ export interface OfflineSale {
     clientName?: string;
     clientPhone?: string;
     ownerUserId?: number | string;
+    ownerUsername?: string;
     createdAt: string;
 }
 
@@ -26,6 +27,7 @@ export interface OfflineAction {
     payload: any;
     metadata?: any;
     ownerUserId?: number | string;
+    ownerUsername?: string;
     createdAt: string;
 }
 
@@ -159,14 +161,23 @@ export async function saveOfflineSale(salePayload: any, clientName?: string, cli
     };
 
     let currentUserId: number | string | undefined = salePayload?.user_id;
-    if (!currentUserId && typeof window !== 'undefined') {
+    let currentUsername: string | undefined = salePayload?.user_name || salePayload?.username;
+    if ((!currentUserId || !currentUsername) && typeof window !== 'undefined') {
         try {
             const rawUser = localStorage.getItem('user');
             if (rawUser) {
                 const parsed = JSON.parse(rawUser);
-                currentUserId = parsed.id;
+                if (!currentUserId) currentUserId = parsed.id;
+                if (!currentUsername) currentUsername = parsed.username;
             }
         } catch (_) {}
+    }
+
+    if (currentUserId && !safePayload.user_id) {
+        safePayload.user_id = currentUserId;
+    }
+    if (currentUsername && !safePayload.user_name) {
+        safePayload.user_name = currentUsername;
     }
 
     const offlineSale: OfflineSale = {
@@ -175,6 +186,7 @@ export async function saveOfflineSale(salePayload: any, clientName?: string, cli
         clientName,
         clientPhone,
         ownerUserId: currentUserId,
+        ownerUsername: currentUsername,
         createdAt: new Date().toISOString()
     };
 
@@ -415,12 +427,14 @@ export async function saveOfflineAction(
     metadata?: any
 ): Promise<OfflineAction> {
     let currentUserId: number | string | undefined = metadata?.ownerUserId || payload?.user_id;
-    if (!currentUserId && typeof window !== 'undefined') {
+    let currentUsername: string | undefined = metadata?.ownerUsername || payload?.user_name || payload?.username;
+    if ((!currentUserId || !currentUsername) && typeof window !== 'undefined') {
         try {
             const rawUser = localStorage.getItem('user');
             if (rawUser) {
                 const parsed = JSON.parse(rawUser);
-                currentUserId = parsed.id;
+                if (!currentUserId) currentUserId = parsed.id;
+                if (!currentUsername) currentUsername = parsed.username;
             }
         } catch (_) {}
     }
@@ -435,6 +449,7 @@ export async function saveOfflineAction(
             payload,
             metadata,
             ownerUserId: currentUserId,
+            ownerUsername: currentUsername,
             createdAt: new Date().toISOString()
         };
     }
@@ -447,6 +462,7 @@ export async function saveOfflineAction(
         payload,
         metadata,
         ownerUserId: currentUserId,
+        ownerUsername: currentUsername,
         createdAt: new Date().toISOString()
     };
 

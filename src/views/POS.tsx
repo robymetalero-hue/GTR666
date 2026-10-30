@@ -1793,6 +1793,7 @@ export default function POS() {
                 payment_method: methodToUse,
                 split_payment: splitPaymentObj,
                 user_id: user?.id || 1,
+                user_name: user?.username || 'Cajero',
                 client_id: clientId,
                 items: cart.filter(c => c.cartQuantity > 0).map(c => ({
                     product_id: c.id,

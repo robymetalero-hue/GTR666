@@ -45,10 +45,15 @@ export function isCurrentContextSandbox(): boolean {
   if (store !== undefined) {
     return store.isSandbox;
   }
+  const appEnv = String(process.env.APP_ENV || '').toLowerCase().trim();
+  const nodeEnv = String(process.env.NODE_ENV || '').toLowerCase().trim();
+  if (appEnv === 'production') {
+    return false;
+  }
   if (
-    process.env.APP_ENV === 'test' ||
-    process.env.APP_ENV === 'sandbox' ||
-    process.env.NODE_ENV === 'test'
+    appEnv === 'test' ||
+    appEnv === 'sandbox' ||
+    nodeEnv === 'test'
   ) {
     return true;
   }
