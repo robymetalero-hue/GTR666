@@ -1590,6 +1590,9 @@ export default function Inventory() {
 
         if (!editingProduct) {
             payload.stock = Number(stock);
+        } else if (stock !== "" && Number(stock) !== Number(editingProduct.stock)) {
+            payload.stock = Math.max(0, Number(stock));
+            payload.reason = 'Ajuste directo de existencias desde edición de producto';
         }
 
         try {
@@ -2937,25 +2940,34 @@ export default function Inventory() {
                                 </div>
 
                                 <div className="flex flex-col gap-1.5">
-                                    <label className="text-[9px] font-extrabold uppercase tracking-widest text-slate-400">
-                                        {editingProduct ? 'Stock Físico Actual (Protegido)' : 'Unidades Disponibles'}
-                                    </label>
-                                    <input 
-                                        type="number" 
-                                        min="0"
-                                        disabled={Boolean(editingProduct)}
-                                        className={`p-2.5 border border-slate-200 dark:border-slate-850 rounded-xl dark:bg-[#070b13] text-xs font-mono font-black text-slate-700 dark:text-grey-100 focus:outline-none focus:border-blue-550 dark:text-white ${editingProduct ? 'opacity-60 cursor-not-allowed bg-slate-100 dark:bg-slate-900' : ''}`}
-                                        value={stock}
-                                        onFocus={e => !editingProduct && e.target.select()}
-                                        onClick={e => !editingProduct && (e.target as HTMLInputElement).select()}
-                                        onChange={e => !editingProduct && setStock(e.target.value === "" ? "" : Number(e.target.value))}
-                                        title={editingProduct ? "Para modificar existencias usa el botón de Ajuste de Inventario o Entrada de Mercadería" : ""}
-                                    />
-                                    {editingProduct && (
-                                        <span className="text-[8.5px] font-semibold text-amber-600 dark:text-amber-400 leading-tight">
-                                            Usa Ajuste de Stock en la tabla para modificar unidades sin afectar ventas en curso.
-                                        </span>
-                                    )}
+                                    {(() => {
+                                        const canDirectEditStock = !editingProduct || user?.role === 'admin' || user?.role === 'propietario' || user?.role === 'administrador' || Boolean((user as any)?.permissions?.inventory_adjustments);
+                                        return (
+                                            <>
+                                                <label className="text-[9px] font-extrabold uppercase tracking-widest text-slate-400">
+                                                    {editingProduct ? (canDirectEditStock ? 'Stock Físico Actual (Editable)' : 'Stock Físico Actual (Protegido)') : 'Unidades Disponibles'}
+                                                </label>
+                                                <input 
+                                                    type="number" 
+                                                    min="0"
+                                                    disabled={!canDirectEditStock}
+                                                    className={`p-2.5 border border-slate-200 dark:border-slate-850 rounded-xl dark:bg-[#070b13] text-xs font-mono font-black text-slate-700 dark:text-grey-100 focus:outline-none focus:border-blue-550 dark:text-white ${!canDirectEditStock ? 'opacity-60 cursor-not-allowed bg-slate-100 dark:bg-slate-900' : ''}`}
+                                                    value={stock}
+                                                    onFocus={e => canDirectEditStock && e.target.select()}
+                                                    onClick={e => canDirectEditStock && (e.target as HTMLInputElement).select()}
+                                                    onChange={e => canDirectEditStock && setStock(e.target.value === "" ? "" : Number(e.target.value))}
+                                                    title={!canDirectEditStock ? "Para modificar existencias solicita permisos de Ajuste de Inventario" : ""}
+                                                />
+                                                {editingProduct && (
+                                                    <span className="text-[8.5px] font-semibold text-amber-600 dark:text-amber-400 leading-tight">
+                                                        {canDirectEditStock
+                                                            ? 'Cualquier cambio en unidades se registrará automáticamente en el Kárdex de auditoría.'
+                                                            : 'Usa Ajuste de Stock en la tabla para modificar unidades sin afectar ventas en curso.'}
+                                                    </span>
+                                                )}
+                                            </>
+                                        );
+                                    })()}
                                 </div>
 
                                 <div className="flex flex-col gap-1.5">

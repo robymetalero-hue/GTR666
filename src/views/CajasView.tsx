@@ -135,9 +135,10 @@ export default function CajasView() {
   const [adjustMethod, setAdjustMethod] = useState<string>('Efectivo');
   const [adjustNotes, setAdjustNotes] = useState<string>('');
 
-  // Blind Cash Settlement States
-  const [isBlindCashSettlement, setIsBlindCashSettlement] = useState<boolean>(true);
+  // Blind Cash Settlement States (default to transparent with auto-filled balance for fast reset)
+  const [isBlindCashSettlement, setIsBlindCashSettlement] = useState<boolean>(false);
   const [showBlindResult, setShowBlindResult] = useState<boolean>(false);
+  const [isResettingId, setIsResettingId] = useState<number | null>(null);
 
   // Search & filter
   const [searchTerm, setSearchTerm] = useState('');
@@ -150,12 +151,19 @@ export default function CajasView() {
   }, [user, activeTab, isKioskLocked]);
 
   const getHeaders = () => {
-    return {
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('auth_token') : null;
+    const isSandbox = typeof localStorage !== 'undefined' && localStorage.getItem('gtr_sandbox_mode') === 'true';
+    const headers: Record<string, string> = {
       'Content-Type': 'application/json',
+      'x-app-environment': isSandbox ? 'sandbox' : 'production',
       'x-user-role': isKioskLocked ? 'vendedor' : (user?.role || ''),
       'x-user-id': String(user?.id || ''),
       'x-user-permissions': JSON.stringify(isKioskLocked ? { ...user?.permissions, view_other_cash: false } : (user?.permissions || {}))
     };
+    if (token && token.trim()) {
+      headers['Authorization'] = `Bearer ${token.trim()}`;
+    }
+    return headers;
   };
 
   const fetchAccounts = async () => {
@@ -177,6 +185,11 @@ export default function CajasView() {
           const myAccount = data[0];
           setSelectedAccount(myAccount);
           fetchMovements(myAccount.seller_id);
+        } else if (selectedAccount) {
+          const updatedSelected = data.find((acc: CashAccount) => Number(acc.seller_id) === Number(selectedAccount.seller_id));
+          if (updatedSelected) {
+            setSelectedAccount(updatedSelected);
+          }
         }
       } else {
         showNotification?.("No se pudieron cargar las cuentas de caja acumulativa.", "error");
@@ -222,18 +235,61 @@ export default function CajasView() {
     setIsDetailModalOpen(true);
   };
 
-  const handleOpenSettle = () => {
-    if (!selectedAccount) return;
-    setDeliveredAmount('');
-    setSettleNotes('');
-    setIsBlindCashSettlement(true);
+  const handleOpenSettle = (accountOverride?: CashAccount) => {
+    const targetAcc = accountOverride || selectedAccount;
+    if (!targetAcc) return;
+    if (accountOverride) {
+      setSelectedAccount(accountOverride);
+      fetchMovements(accountOverride.seller_id);
+    }
+    setDeliveredAmount(Number(targetAcc.current_balance || 0).toFixed(2));
+    setSettleNotes('Liquidación y reseteo de caja a cero');
+    setIsBlindCashSettlement(false);
     setShowBlindResult(false);
     setIsSettleFormOpen(true);
   };
 
+  const handleQuickResetToZero = async (accountOverride?: CashAccount) => {
+    const targetAcc = accountOverride || selectedAccount;
+    if (!targetAcc || isResettingId !== null) return;
+    setIsResettingId(targetAcc.seller_id);
+    try {
+      const expectedBal = Number(targetAcc.current_balance || 0);
+      const res = await fetch(`/api/cash-accounts/${targetAcc.seller_id}/settle`, {
+        method: 'POST',
+        headers: getHeaders(),
+        body: JSON.stringify({
+          admin_id: user?.id || 1,
+          admin_username: user?.username || 'admin',
+          delivered_amount: expectedBal,
+          notes: 'Reseteo directo de caja acumulada a cero'
+        })
+      });
+
+      if (res.ok) {
+        showNotification?.(`✓ Caja de ${targetAcc.seller_username} reseteada a 0.00 Bs correctamente.`, "success");
+        setIsSettleFormOpen(false);
+        setIsDetailModalOpen(false);
+        await Promise.all([fetchAccounts(), fetchSettlements()]);
+        if (selectedAccount && Number(selectedAccount.seller_id) === Number(targetAcc.seller_id)) {
+          await fetchMovements(targetAcc.seller_id);
+        }
+      } else {
+        const err = await res.json().catch(() => ({ error: 'No se pudo resetear la caja.' }));
+        showNotification?.(`Error al resetear caja: ${err.error || 'Error desconocido'}`, "error");
+      }
+    } catch (err) {
+      console.error(err);
+      showNotification?.("Fallo de red al resetear la caja.", "error");
+    } finally {
+      setIsResettingId(null);
+    }
+  };
+
   const handleConfirmSettle = async () => {
     if (!selectedAccount) return;
-    const deliveredVal = parseFloat(deliveredAmount);
+    const rawTrimmed = String(deliveredAmount ?? '').trim();
+    const deliveredVal = rawTrimmed === '' ? Number(selectedAccount.current_balance || 0) : parseFloat(rawTrimmed);
     if (isNaN(deliveredVal) || deliveredVal < 0) {
       showNotification?.("Monto entregado no es válido.", "error");
       return;
@@ -253,13 +309,13 @@ export default function CajasView() {
 
       if (res.ok) {
         const result = await res.json();
-        showNotification?.(`✓ Caja de ${selectedAccount.seller_username} liquidada correctamente. Diferencia: ${result.difference.toFixed(2)} Bs.`, "success");
+        showNotification?.(`✓ Caja de ${selectedAccount.seller_username} liquidada y reseteada a 0.00 Bs. Diferencia: ${Number(result.difference || 0).toFixed(2)} Bs.`, "success");
         setIsSettleFormOpen(false);
         setIsDetailModalOpen(false);
-        fetchAccounts();
-        fetchSettlements();
+        await Promise.all([fetchAccounts(), fetchSettlements()]);
+        await fetchMovements(selectedAccount.seller_id);
       } else {
-        const err = await res.json();
+        const err = await res.json().catch(() => ({ error: 'Error al liquidar' }));
         showNotification?.(`Error al liquidar: ${err.error}`, "error");
       }
     } catch (err) {
@@ -465,14 +521,25 @@ export default function CajasView() {
                     <span>Ventas vigentes sin liquidar:</span>
                     <span className="font-mono font-black text-white">{movements.filter(m => m.type === 'venta' && m.status === 'pendiente').length} tickets</span>
                   </div>
-                  {isAdminOrPropietario ? (
-                    <button
-                      onClick={handleOpenSettle}
-                      className="w-full mt-2 py-2.5 bg-white text-indigo-700 hover:bg-indigo-50 font-black text-[10px] uppercase rounded-xl transition flex items-center justify-center gap-1.5 cursor-pointer shadow-md"
-                    >
-                      <CheckCircle2 size={13} />
-                      Auto-Liquidar & Resetear mi Caja
-                    </button>
+                  {(isAdminOrPropietario || hasPermission(user, 'reset_own_cash')) ? (
+                    <div className="flex flex-col gap-2 mt-2">
+                      <button
+                        onClick={() => handleQuickResetToZero(selectedAccount)}
+                        disabled={isResettingId === selectedAccount.seller_id || (selectedAccount.current_balance === 0 && movements.filter(m => m.status === 'pendiente').length === 0)}
+                        className="w-full py-2.5 bg-white text-indigo-700 hover:bg-indigo-50 disabled:opacity-50 font-black text-[10px] uppercase rounded-xl transition flex items-center justify-center gap-1.5 cursor-pointer shadow-md"
+                      >
+                        <CheckCircle2 size={13} />
+                        {isResettingId === selectedAccount.seller_id ? 'Reseteando Caja...' : 'Resetear mi Caja a 0.00 Bs'}
+                      </button>
+                      <button
+                        onClick={() => handleOpenSettle(selectedAccount)}
+                        disabled={selectedAccount.current_balance === 0 && movements.filter(m => m.status === 'pendiente').length === 0}
+                        className="w-full py-2 bg-indigo-500/30 hover:bg-indigo-500/40 disabled:opacity-40 text-white font-bold text-[9.5px] uppercase rounded-xl transition flex items-center justify-center gap-1.5 cursor-pointer border border-white/20"
+                      >
+                        <FileText size={11} />
+                        Arqueo con Conteo Detallado
+                      </button>
+                    </div>
                   ) : (
                     <div className="text-center text-[9px] text-indigo-200 bg-white/10 p-2 rounded-lg leading-snug font-medium">
                       * El administrador debe realizar tu arqueo físico de caja para resetear tu saldo a cero.
@@ -659,13 +726,25 @@ export default function CajasView() {
                       </p>
                     </div>
 
-                    <button
-                      onClick={() => handleOpenDetail(acc)}
-                      className="w-full py-2.5 bg-indigo-50/80 hover:bg-indigo-100 dark:bg-[#11192e] dark:text-indigo-400 text-indigo-650 font-extrabold text-[10.5px] uppercase rounded-xl transition flex items-center justify-center gap-1.5 cursor-pointer mt-1"
-                    >
-                      <FileText size={12} />
-                      Ver Detalle & Liquidar
-                    </button>
+                    <div className="flex flex-col sm:flex-row gap-2 mt-1">
+                      <button
+                        onClick={() => handleOpenDetail(acc)}
+                        className="flex-1 py-2.5 bg-indigo-50/80 hover:bg-indigo-100 dark:bg-[#11192e] dark:text-indigo-400 text-indigo-650 font-extrabold text-[10px] uppercase rounded-xl transition flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <FileText size={12} />
+                        Ver Detalle
+                      </button>
+                      {(acc.current_balance !== 0 || (acc.pending_tickets_count && acc.pending_tickets_count > 0)) && (
+                        <button
+                          onClick={() => handleQuickResetToZero(acc)}
+                          disabled={isResettingId === acc.seller_id}
+                          className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-extrabold text-[10px] uppercase rounded-xl transition flex items-center justify-center gap-1.5 cursor-pointer shadow-sm"
+                        >
+                          <CheckCircle2 size={12} />
+                          {isResettingId === acc.seller_id ? 'Reseteando...' : 'Resetear a 0.00 Bs'}
+                        </button>
+                      )}
+                    </div>
                   </div>
                 );
               })}
@@ -979,13 +1058,23 @@ export default function CajasView() {
               </button>
               
               {isAdminOrPropietario && (selectedAccount.current_balance !== 0 || movements.some(m => m.status === 'pendiente')) && (
-                <button 
-                  onClick={handleOpenSettle}
-                  className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-extrabold text-[10.5px] uppercase rounded-xl cursor-pointer shadow-md shadow-indigo-500/10 transition flex items-center gap-1.5"
-                >
-                  <CheckCircle2 size={13} />
-                  Liquidar Caja (Resetear)
-                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button 
+                    onClick={() => handleOpenSettle(selectedAccount)}
+                    className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-extrabold text-[10px] uppercase rounded-xl cursor-pointer transition flex items-center gap-1.5"
+                  >
+                    <FileText size={12} />
+                    Arqueo con Conteo
+                  </button>
+                  <button 
+                    onClick={() => handleQuickResetToZero(selectedAccount)}
+                    disabled={isResettingId === selectedAccount.seller_id}
+                    className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-extrabold text-[10.5px] uppercase rounded-xl cursor-pointer shadow-md shadow-emerald-500/10 transition flex items-center gap-1.5"
+                  >
+                    <CheckCircle2 size={13} />
+                    {isResettingId === selectedAccount.seller_id ? 'Reseteando...' : 'Resetear Caja a 0.00 Bs'}
+                  </button>
+                </div>
               )}
             </div>
           </div>

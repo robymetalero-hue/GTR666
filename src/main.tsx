@@ -94,14 +94,10 @@ const patchedFetch = async function (input: RequestInfo | URL, init?: RequestIni
       }
     }
 
-    // Attach explicit sandbox environment header if running in sandbox
-    const isSandbox = window.location.hostname.includes('ais-dev') || 
-                      window.location.hostname.includes('localhost') || 
-                      window.location.hostname.includes('127.0.0.1');
-    if (isSandbox) {
-      headersObj['x-app-environment'] = 'sandbox';
-    } else if (window.location.hostname.includes('ais-pre')) {
-      headersObj['x-app-environment'] = 'production';
+    // Attach explicit environment header: default to production unless sandbox mode is explicitly enabled
+    if (!headersObj['x-app-environment']) {
+      const isSandbox = localStorage.getItem('gtr_sandbox_mode') === 'true';
+      headersObj['x-app-environment'] = isSandbox ? 'sandbox' : 'production';
     }
 
     // Attach Authorization token if available

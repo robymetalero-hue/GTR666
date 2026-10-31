@@ -3682,8 +3682,9 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         return res.status(404).json({ error: "Producto no encontrado." });
       }
 
-      // Preserve current server stock on metadata/price edits; stock changes must use dedicated inventory adjustment endpoints
-      const safeStock = Number(oldProd.stock || 0);
+      // Preserve current server stock on metadata/price edits when stock is omitted; apply explicit stock edits when provided
+      const hasExplicitStock = stock !== undefined && stock !== null && String(stock).trim() !== '' && !Number.isNaN(Number(stock));
+      const safeStock = hasExplicitStock ? Math.max(0, Number(stock)) : Number(oldProd.stock || 0);
       const safePriceUnit = Math.max(0, Number(price_unit !== undefined && price_unit !== null ? price_unit : oldProd.price_unit || 0));
       const safePriceBulk = Math.max(0, Number(price_bulk !== undefined && price_bulk !== null ? price_bulk : oldProd.price_bulk || 0));
       const safePriceCost = Math.max(0, Number(price_cost !== undefined ? price_cost : (oldProd.price_cost || (price_unit ? price_unit * 0.6 : 0))));
@@ -12939,6 +12940,44 @@ DIRECTIVAS CRÍTICAS:
       const rateRow = db.prepare("SELECT value FROM settings WHERE key = 'exchange_rate'").get() as any;
       const currentRate = rateRow ? parseFloat(rateRow.value) : 6.96;
 
+      // Gather all sale IDs already settled in cash_settlements so self-heal never resurrects them as 'pendiente'
+      const settledSaleIds = new Set<number>();
+      try {
+        const settlementRows = db.prepare("SELECT sale_ids FROM cash_settlements WHERE sale_ids IS NOT NULL").all() as any[];
+        for (const sr of settlementRows) {
+          try {
+            const parsed = JSON.parse(sr.sale_ids);
+            if (Array.isArray(parsed)) {
+              for (const sid of parsed) {
+                if (sid !== null && sid !== undefined) settledSaleIds.add(Number(sid));
+              }
+            }
+          } catch (_) {}
+        }
+      } catch (_) {}
+
+      const parseTsMs = (raw: any): number => {
+        if (!raw) return 0;
+        const s = String(raw).trim();
+        if (!s) return 0;
+        if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?$/.test(s)) {
+          const ms = new Date(s.replace(' ', 'T') + 'Z').getTime();
+          return Number.isFinite(ms) ? ms : 0;
+        }
+        const ms = new Date(s).getTime();
+        return Number.isFinite(ms) ? ms : 0;
+      };
+
+      const sellerLastSettlementMs = new Map<number, number>();
+      try {
+        const accRows = db.prepare("SELECT seller_id, last_settlement_at FROM cash_accounts WHERE last_settlement_at IS NOT NULL").all() as any[];
+        for (const ar of accRows) {
+          if (ar.seller_id !== undefined && ar.last_settlement_at) {
+            sellerLastSettlementMs.set(Number(ar.seller_id), parseTsMs(ar.last_settlement_at));
+          }
+        }
+      } catch (_) {}
+
       // 1. Find all sales where closure/cierre is NULL and there is NO cash movement for that sale
       // Note: credit sales ('Crédito') only generate cash movements if they have an initial abono > 0
       const missingMovementsQuery = targetSellerId 
@@ -12976,16 +13015,22 @@ DIRECTIVAS CRÍTICAS:
               continue;
             }
 
+            const saleCreatedMs = parseTsMs(sale.created_at);
+            const lastSettleMs = sellerLastSettlementMs.get(Number(sale.user_id)) || 0;
+            const isAlreadySettled = settledSaleIds.has(Number(sale.id)) || (lastSettleMs > 0 && saleCreatedMs > 0 && saleCreatedMs <= lastSettleMs);
+            const targetStatus = isAlreadySettled ? 'liquidado' : 'pendiente';
+
             // Insert the missing cash movement in SQLite using the sale's timestamp
             const result = db.prepare(`
               INSERT INTO cash_movements (seller_id, sale_id, type, amount, currency, payment_method, status, notes, created_at)
-              VALUES (?, ?, 'venta', ?, ?, ?, 'pendiente', ?, ?)
+              VALUES (?, ?, 'venta', ?, ?, ?, ?, ?, ?)
             `).run(
               sale.user_id,
               sale.id,
               receivedAmount,
               sale.currency || 'BOB',
               sale.payment_method || 'Efectivo',
+              targetStatus,
               `Sincronización de venta #${sale.id} (Autoreparado)`,
               sale.created_at ? sale.created_at.replace('T', ' ').substring(0, 19) : new Date().toISOString().replace('T', ' ').substring(0, 19)
             );
@@ -13015,6 +13060,17 @@ DIRECTIVAS CRÍTICAS:
         `).run(sellerId, sName);
 
         const account = db.prepare('SELECT * FROM cash_accounts WHERE seller_id = ?').get(sellerId) as any;
+        const lastSettleMs = account?.last_settlement_at ? parseTsMs(account.last_settlement_at) : 0;
+
+        // Ensure any 'pendiente' movement that belongs to an already-settled sale or predates last_settlement_at is marked 'liquidado'
+        const rawPending = db.prepare("SELECT id, sale_id, created_at FROM cash_movements WHERE seller_id = ? AND status = 'pendiente'").all(sellerId) as any[];
+        for (const pm of rawPending) {
+          const pmCreatedMs = parseTsMs(pm.created_at);
+          if ((pm.sale_id && settledSaleIds.has(Number(pm.sale_id))) || (lastSettleMs > 0 && pmCreatedMs > 0 && pmCreatedMs <= lastSettleMs)) {
+            db.prepare("UPDATE cash_movements SET status = 'liquidado' WHERE id = ?").run(pm.id);
+            newlyCreatedMovementIds.push(Number(pm.id));
+          }
+        }
         
         // Sum all pending movements using historical exchange rate of the sale
         const pendingMovements = db.prepare(`
@@ -13026,13 +13082,16 @@ DIRECTIVAS CRÍTICAS:
         let calculatedBalance = 0;
         for (const m of pendingMovements) {
           const rate = Number(m.sale_exchange_rate || currentRate);
-          const amtInBs = m.currency === 'USD' ? (m.amount * rate) : m.amount;
+          const rawAmt = Number(m.amount) || 0;
+          const signedAmt = (m.type === 'devolucion' || m.type === 'retiro_manual') && rawAmt > 0 ? -rawAmt : rawAmt;
+          const amtInBs = m.currency === 'USD' ? (signedAmt * rate) : signedAmt;
           calculatedBalance += amtInBs;
         }
+        calculatedBalance = Math.round(calculatedBalance * 100) / 100;
 
         if (Math.abs(account.current_balance - calculatedBalance) > 0.01) {
           console.log(`[Self-Heal] Updating current_balance of cash account for seller ${sName} (${sellerId}) from ${account.current_balance} to ${calculatedBalance}`);
-          db.prepare('UPDATE cash_accounts SET current_balance = ?, updated_at = CURRENT_TIMESTAMP WHERE seller_id = ?').run(calculatedBalance, sellerId);
+          db.prepare('UPDATE cash_accounts SET current_balance = ?, updated_at = ? WHERE seller_id = ?').run(calculatedBalance, getBoliviaISOString(), sellerId);
           updatedAccountIds.push(account.id);
         }
       }
@@ -13169,42 +13228,54 @@ DIRECTIVAS CRÍTICAS:
     }
   });
 
-  // Liquidar/Cerrar periodo de acumulación y reiniciar caja del vendedor a cero (Solo Administrador / Propietario)
+  // Liquidar/Cerrar periodo de acumulación y reiniciar caja del vendedor a cero
   app.post("/api/cash-accounts/:sellerId/settle", (req, res) => {
     const sellerId = Number(req.params.sellerId);
     const { delivered_amount, notes } = req.body;
     
-    // Secure backend check: Strictly restrict to verified admin, administrador or propietario
     const verifiedUser = (req as any).verifiedUser;
     if (!verifiedUser) {
       return res.status(401).json({ error: "Sesión requerida." });
     }
     const uRole = String(verifiedUser.role || '').toLowerCase();
     const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+    let userPerms: any = {};
+    try {
+      userPerms = typeof verifiedUser.permissions === 'string' ? JSON.parse(verifiedUser.permissions) : (verifiedUser.permissions || {});
+    } catch (_) {}
+    const canSelfReset = Number(verifiedUser.id) === sellerId && Boolean(userPerms.reset_own_cash);
+    const canOtherReset = Boolean(userPerms.reset_other_cash);
 
-    if (!isAdmin) {
+    if (!isAdmin && !canSelfReset && !canOtherReset) {
       return res.status(403).json({ error: "Acceso denegado: Solo el administrador o propietario puede liquidar o resetear cuentas de caja." });
     }
 
     try {
-      const sellerAcc = db.prepare('SELECT * FROM cash_accounts WHERE seller_id = ?').get(sellerId) as any;
+      let sellerAcc = db.prepare('SELECT * FROM cash_accounts WHERE seller_id = ?').get(sellerId) as any;
       if (!sellerAcc) {
-        return res.status(404).json({ error: "Cuenta de caja no encontrada." });
+        const uRow = db.prepare('SELECT username FROM users WHERE id = ?').get(sellerId) as any;
+        if (!uRow) {
+          return res.status(404).json({ error: "Cuenta de caja no encontrada." });
+        }
+        db.prepare('INSERT OR IGNORE INTO cash_accounts (seller_id, seller_username, current_balance) VALUES (?, ?, 0.0)').run(sellerId, uRow.username);
+        sellerAcc = db.prepare('SELECT * FROM cash_accounts WHERE seller_id = ?').get(sellerId) as any;
       }
 
       const pendingMovements = db.prepare("SELECT * FROM cash_movements WHERE seller_id = ? AND status = 'pendiente'").all(sellerId) as any[];
-      if (pendingMovements.length === 0 && sellerAcc.current_balance === 0) {
+      if (pendingMovements.length === 0 && Number(sellerAcc.current_balance || 0) === 0) {
         return res.status(400).json({ error: "La caja de este vendedor ya se encuentra liquidada en cero sin movimientos pendientes." });
       }
 
-      const calculated = sellerAcc.current_balance;
-      const delivered = Number(delivered_amount);
-      const difference = delivered - calculated;
-      const status = difference === 0 ? 'confirmada' : 'con_diferencia';
+      const calculated = Number(sellerAcc.current_balance || 0);
+      const hasExplicitDelivered = delivered_amount !== undefined && delivered_amount !== null && String(delivered_amount).trim() !== '' && !Number.isNaN(Number(delivered_amount));
+      const delivered = hasExplicitDelivered ? Number(delivered_amount) : calculated;
+      const difference = Math.round((delivered - calculated) * 100) / 100;
+      const status = Math.abs(difference) < 0.01 ? 'confirmada' : 'con_diferencia';
 
       const saleIds = pendingMovements.filter(m => m.sale_id).map(m => m.sale_id);
       const updatedMovementIds = pendingMovements.map(m => m.id);
-      const startPeriod = sellerAcc.last_settlement_at || (pendingMovements.length > 0 ? pendingMovements[pendingMovements.length - 1].created_at : new Date().toISOString());
+      const nowIso = getBoliviaISOString();
+      const startPeriod = sellerAcc.last_settlement_at || (pendingMovements.length > 0 ? pendingMovements[pendingMovements.length - 1].created_at : nowIso);
 
       let settlementId: number | bigint = 0;
       const transaction = db.transaction(() => {
@@ -13212,31 +13283,33 @@ DIRECTIVAS CRÍTICAS:
         const resSet = db.prepare(`
           INSERT INTO cash_settlements 
           (seller_id, seller_username, admin_id, admin_username, period_start, period_end, calculated_amount, delivered_amount, difference, notes, sale_ids, status, created_at)
-          VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           sellerId,
           sellerAcc.seller_username,
           verifiedUser.id,
           verifiedUser.username,
           startPeriod,
+          nowIso,
           calculated,
           delivered,
           difference,
-          notes || 'Liquidación exitosa',
+          notes || 'Liquidación y reseteo de caja a 0.00 Bs.',
           JSON.stringify(saleIds),
-          status
+          status,
+          nowIso
         );
         settlementId = resSet.lastInsertRowid;
 
         // Update movements to liquidado
         db.prepare("UPDATE cash_movements SET status = 'liquidado' WHERE seller_id = ? AND status = 'pendiente'").run(sellerId);
 
-        // Reset account balance
+        // Reset account balance with canonical ISO timestamp so pullFirestoreToLocal and selfHealCashAccounts respect the settlement cutoff
         db.prepare(`
           UPDATE cash_accounts 
-          SET current_balance = 0.0, last_settlement_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+          SET current_balance = 0.0, last_settlement_at = ?, updated_at = ?
           WHERE seller_id = ?
-        `).run(sellerId);
+        `).run(nowIso, nowIso, sellerId);
       });
 
       transaction();
@@ -13246,6 +13319,13 @@ DIRECTIVAS CRÍTICAS:
         cash_movements: updatedMovementIds,
         cash_settlements: [settlementId]
       });
+
+      // Immediately push the settled account, movements, and settlement record to Firestore
+      Promise.allSettled([
+        pushLocalToFirestore('cash_accounts', [sellerAcc.id]),
+        updatedMovementIds.length > 0 ? pushLocalToFirestore('cash_movements', updatedMovementIds) : Promise.resolve(),
+        pushLocalToFirestore('cash_settlements', [settlementId])
+      ]).catch(() => {});
 
       // Get current exchange rate for audit log
       const rateRow = db.prepare("SELECT value FROM settings WHERE key = 'exchange_rate'").get() as any;
@@ -15080,6 +15160,7 @@ Responde de forma sumamente atenta, con alta proactividad, y con precisión mate
       try {
         console.log("[Sync] Synchronizing production SQLite database (gtr_pos.db) from Cloud Firestore in background...");
         await pullFirestoreToLocal();
+        await pushAllLocalToFirestore();
         console.log("[Sync] Startup production synchronization check completed.");
 
         // Ensure sandbox database is also initialized from verified production database if empty/outdated

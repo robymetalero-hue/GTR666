@@ -1269,36 +1269,72 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
             deletedIdsSet = new Set(deletedRows.map(r => String(r.record_id)));
           } catch (e) {}
 
-          // Pre-capture local verified stock and updated_at map to implement the ANTI-OVERWRITE STOCK SHIELD
+          // Pre-capture local verified product rows and updated_at map to implement the ANTI-OVERWRITE PRODUCT & STOCK SHIELD
           const localProductStocksMap = new Map<number, number>();
           const localProductUpdatedMap = new Map<number, string>();
+          const localProductsFullMap = new Map<number, any>();
           if (table === 'products') {
             try {
-              const currentProds = db.prepare('SELECT id, stock, updated_at FROM products').all() as any[];
+              const currentProds = db.prepare('SELECT * FROM products').all() as any[];
               for (const p of currentProds) {
-                if (p.id !== undefined && p.stock !== null && p.stock !== undefined) {
-                  localProductStocksMap.set(Number(p.id), Number(p.stock));
+                if (p.id !== undefined) {
+                  const pid = Number(p.id);
+                  localProductsFullMap.set(pid, p);
+                  if (p.stock !== null && p.stock !== undefined) {
+                    localProductStocksMap.set(pid, Number(p.stock));
+                  }
                   if (p.updated_at) {
-                    localProductUpdatedMap.set(Number(p.id), String(p.updated_at));
+                    localProductUpdatedMap.set(pid, String(p.updated_at));
                   }
                 }
               }
             } catch (_) {}
           }
 
-          // Z07: Pre-capture local verified cash_accounts balance and updated_at map so stale remote replicas cannot overwrite remediated drawer balances
+          // Z07: Pre-capture local verified cash_accounts balance, last_settlement_at and updated_at map so stale remote replicas cannot overwrite remediated or settled drawer balances
           const localCashBalancesMap = new Map<number, number>();
           const localCashUpdatedMap = new Map<number, string>();
-          if (table === 'cash_accounts') {
+          const localCashLastSettlementMap = new Map<number, string>();
+          if (table === 'cash_accounts' || table === 'cash_movements') {
             try {
-              const currentCash = db.prepare('SELECT seller_id, current_balance, updated_at FROM cash_accounts').all() as any[];
+              const currentCash = db.prepare('SELECT seller_id, current_balance, last_settlement_at, updated_at FROM cash_accounts').all() as any[];
               for (const ca of currentCash) {
-                if (ca.seller_id !== undefined && ca.current_balance !== null && ca.current_balance !== undefined) {
-                  localCashBalancesMap.set(Number(ca.seller_id), Number(ca.current_balance));
+                if (ca.seller_id !== undefined) {
+                  const sid = Number(ca.seller_id);
+                  if (ca.current_balance !== null && ca.current_balance !== undefined) {
+                    localCashBalancesMap.set(sid, Number(ca.current_balance));
+                  }
                   if (ca.updated_at) {
-                    localCashUpdatedMap.set(Number(ca.seller_id), String(ca.updated_at));
+                    localCashUpdatedMap.set(sid, String(ca.updated_at));
+                  }
+                  if (ca.last_settlement_at) {
+                    localCashLastSettlementMap.set(sid, String(ca.last_settlement_at));
                   }
                 }
+              }
+            } catch (_) {}
+          }
+
+          // Pre-capture locally settled cash_movements and settled sale_ids so a remote 'pendiente' status never resurrects an already-settled movement
+          const localSettledMovementIds = new Set<number>();
+          const localSettledSaleIds = new Set<number>();
+          if (table === 'cash_movements') {
+            try {
+              const settledMovs = db.prepare("SELECT id, sale_id FROM cash_movements WHERE status = 'liquidado'").all() as any[];
+              for (const m of settledMovs) {
+                if (m.id !== undefined) localSettledMovementIds.add(Number(m.id));
+                if (m.sale_id !== undefined && m.sale_id !== null) localSettledSaleIds.add(Number(m.sale_id));
+              }
+              const settlementsRows = db.prepare("SELECT sale_ids FROM cash_settlements WHERE sale_ids IS NOT NULL").all() as any[];
+              for (const sr of settlementsRows) {
+                try {
+                  const parsedIds = JSON.parse(sr.sale_ids);
+                  if (Array.isArray(parsedIds)) {
+                    for (const sid of parsedIds) {
+                      if (sid !== null && sid !== undefined) localSettledSaleIds.add(Number(sid));
+                    }
+                  }
+                } catch (_) {}
               }
             } catch (_) {}
           }
@@ -1369,19 +1405,32 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
             if (table === 'products' && data.id !== undefined) {
               try {
                 const prodIdNum = Number(data.id);
+                const localProd = localProductsFullMap.get(prodIdNum);
                 const localStock = localProductStocksMap.get(prodIdNum);
                 const localUpdatedStr = localProductUpdatedMap.get(prodIdNum);
                 const remoteStock = Number(data.stock);
 
                 const localUpdated = parseNormalizedTimestampMs(localUpdatedStr);
-                const remoteUpdated = parseNormalizedTimestampMs(data.updated_at || data._tx_timestamp);
+                const remoteUpdated = parseNormalizedTimestampMs(data.updated_at);
                 const remediatedTsStr = activeLedger.products[String(prodIdNum)];
                 const remediatedTs = parseNormalizedTimestampMs(remediatedTsStr);
                 const hasSaleProductRemediation = Object.values(activeLedger.sales || {}).some(
                   (entry: any) => entry?.netStock && entry.netStock[String(prodIdNum)] !== undefined
                 );
 
-                if (remediatedInThisPull.products.has(prodIdNum) && localStock !== undefined && !isNaN(localStock)) {
+                // If local product row was modified more recently than remote updated_at, preserve all local product fields (name, sku, category, prices, stock)
+                if (localProd && localUpdated > 0 && localUpdated > remoteUpdated) {
+                  data.name = localProd.name;
+                  data.category = localProd.category;
+                  data.sku = localProd.sku;
+                  data.stock = Number(localProd.stock ?? 0);
+                  data.price_unit = Number(localProd.price_unit ?? data.price_unit ?? 0);
+                  data.price_bulk = Number(localProd.price_bulk ?? data.price_bulk ?? 0);
+                  data.price_cost = Number(localProd.price_cost ?? data.price_cost ?? 0);
+                  data.stock_alarm = Number(localProd.stock_alarm ?? data.stock_alarm ?? 5);
+                  if (localProd.image !== undefined) data.image = localProd.image;
+                  if (localUpdatedStr) data.updated_at = localUpdatedStr;
+                } else if (remediatedInThisPull.products.has(prodIdNum) && localStock !== undefined && !isNaN(localStock)) {
                   data.stock = localStock;
                   if (localUpdatedStr) data.updated_at = localUpdatedStr;
                 } else if ((remediatedTs > 0 || hasSaleProductRemediation) && remediatedTs >= remoteUpdated && localStock !== undefined && !isNaN(localStock)) {
@@ -1389,10 +1438,6 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
                   if (localUpdatedStr) data.updated_at = localUpdatedStr;
                 } else if (localStock === 0 && localUpdated >= remoteUpdated) {
                   data.stock = 0;
-                  if (localUpdatedStr) data.updated_at = localUpdatedStr;
-                } else if (localUpdated > remoteUpdated && localStock !== undefined && !isNaN(localStock)) {
-                  // Local record is newer than remote Firestore snapshot: local stock wins
-                  data.stock = localStock;
                   if (localUpdatedStr) data.updated_at = localUpdatedStr;
                 } else if (!isNaN(remoteStock)) {
                   data.stock = remoteStock;
@@ -1410,24 +1455,34 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
                 const sellerIdNum = Number(data.seller_id);
                 const localBal = localCashBalancesMap.get(sellerIdNum);
                 const localUpdatedStr = localCashUpdatedMap.get(sellerIdNum);
+                const localLastSettleStr = localCashLastSettlementMap.get(sellerIdNum);
                 const remoteBal = Number(data.current_balance);
 
                 const localUpdated = parseNormalizedTimestampMs(localUpdatedStr);
-                const remoteUpdated = parseNormalizedTimestampMs(data.updated_at || data._tx_timestamp);
+                const remoteUpdated = parseNormalizedTimestampMs(data.updated_at);
+                const localSettleMs = parseNormalizedTimestampMs(localLastSettleStr);
+                const remoteSettleMs = parseNormalizedTimestampMs(data.last_settlement_at);
                 const remediatedTsStr = activeLedger.sellers[String(sellerIdNum)];
                 const remediatedTs = parseNormalizedTimestampMs(remediatedTsStr);
                 const hasSaleSellerRemediation = Object.values(activeLedger.sales || {}).some(
                   (entry: any) => entry?.netCash && entry.netCash[String(sellerIdNum)] !== undefined
                 );
 
-                if (remediatedInThisPull.sellers.has(sellerIdNum) && localBal !== undefined && !isNaN(localBal)) {
+                if (localSettleMs > remoteSettleMs && localBal !== undefined && !isNaN(localBal)) {
                   data.current_balance = localBal;
+                  if (localLastSettleStr) data.last_settlement_at = localLastSettleStr;
+                  if (localUpdatedStr) data.updated_at = localUpdatedStr;
+                } else if (remediatedInThisPull.sellers.has(sellerIdNum) && localBal !== undefined && !isNaN(localBal)) {
+                  data.current_balance = localBal;
+                  if (localLastSettleStr) data.last_settlement_at = localLastSettleStr;
                   if (localUpdatedStr) data.updated_at = localUpdatedStr;
                 } else if ((remediatedTs > 0 || hasSaleSellerRemediation) && remediatedTs >= remoteUpdated && localBal !== undefined && !isNaN(localBal)) {
                   data.current_balance = localBal;
+                  if (localLastSettleStr) data.last_settlement_at = localLastSettleStr;
                   if (localUpdatedStr) data.updated_at = localUpdatedStr;
                 } else if (localUpdated > remoteUpdated && localBal !== undefined && !isNaN(localBal)) {
                   data.current_balance = localBal;
+                  if (localLastSettleStr) data.last_settlement_at = localLastSettleStr;
                   if (localUpdatedStr) data.updated_at = localUpdatedStr;
                 } else if (!isNaN(remoteBal)) {
                   data.current_balance = remoteBal;
@@ -1437,6 +1492,28 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
                 }
               } catch (e: any) {
                 console.warn('[Sync Cash] Error preserving cash balance:', e.message);
+              }
+            }
+
+            if (table === 'cash_movements' && data.id !== undefined) {
+              try {
+                const movIdNum = Number(data.id);
+                const saleIdNum = data.sale_id !== undefined && data.sale_id !== null ? Number(data.sale_id) : null;
+                const sellerIdNum = data.seller_id !== undefined ? Number(data.seller_id) : null;
+                const localSettleStr = sellerIdNum !== null ? localCashLastSettlementMap.get(sellerIdNum) : undefined;
+                const localSettleMs = parseNormalizedTimestampMs(localSettleStr);
+                const movCreatedMs = parseNormalizedTimestampMs(data.created_at);
+
+                // Once a movement is settled ('liquidado') locally or belongs to a settled sale or predates the seller's last_settlement_at, never revert it to 'pendiente'
+                if (
+                  localSettledMovementIds.has(movIdNum) ||
+                  (saleIdNum !== null && localSettledSaleIds.has(saleIdNum)) ||
+                  (localSettleMs > 0 && movCreatedMs > 0 && movCreatedMs <= localSettleMs)
+                ) {
+                  data.status = 'liquidado';
+                }
+              } catch (e: any) {
+                console.warn('[Sync Cash Movements] Error preserving movement settlement status:', e.message);
               }
             }
 

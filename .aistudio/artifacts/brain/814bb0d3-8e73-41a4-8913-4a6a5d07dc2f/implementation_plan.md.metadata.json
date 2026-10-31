@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan para restaurar la conexión y sincronización automática con Firebase en modo producción, eliminando los avisos de variables de entorno desconocidas y manteniendo intactas todas las mejoras de seguridad, idempotencia y protección anti-duplicados de ventas.",
-  "updatedAt":  "2026-10-30T15:52:35.716977720Z",
+  "summary":  "Plan de implementacion para corregir el desvio a sandbox en main.tsx, habilitar el reseteo directo a cero de cajas acumuladas sin resurreccion de saldo, y garantizar la persistencia y sincronizacion de ventas e inventario sin duplicados.",
+  "updatedAt":  "2026-10-31T00:55:26.346577820Z",
   "requestFeedback":  true,
   "userFacing":  true
 }
