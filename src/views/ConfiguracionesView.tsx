@@ -999,16 +999,43 @@ export default function ConfiguracionesView() {
         <div id="settings-view" className="p-5 md:p-6 overflow-y-auto h-full flex flex-col gap-6 select-none bg-[#f8fafc]/40 dark:bg-[#070a10]">
             
             {/* Header portion */}
-            <div className="flex justify-between items-center bg-white dark:bg-[#0c111e] p-5 rounded-3xl border border-slate-200/60 dark:border-slate-850/40">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white dark:bg-[#0c111e] p-5 rounded-3xl border border-slate-200/60 dark:border-slate-850/40">
                 <div className="flex items-center gap-3">
                     <div className="p-2 bg-indigo-500/10 text-indigo-500 rounded-xl">
                         <Settings size={18} />
                     </div>
                     <div>
                         <h1 className="text-base font-extrabold text-slate-800 dark:text-white uppercase tracking-wider">Configuraciones Globales</h1>
-                        <p className="text-[11px] text-slate-400 mt-1 font-semibold">Configura el tipo de cambio USD/BOB y visualiza las bitácoras de auditoría.</p>
+                        <p className="text-[11px] text-slate-400 mt-1 font-semibold">Configura el tipo de cambio USD/BOB, sincronización Cloud Firestore y bitácoras de auditoría.</p>
                     </div>
                 </div>
+
+                {isAdmin && (
+                    <button
+                        type="button"
+                        onClick={async () => {
+                            try {
+                                showNotification?.("Verificando y sincronizando base de datos con Cloud Firestore...", "info");
+                                const res = await fetch('/api/sync/verify-and-push', {
+                                    method: 'POST',
+                                    headers: getAuthHeaders({ 'Content-Type': 'application/json' })
+                                });
+                                const data = await res.json();
+                                if (res.ok && data.success) {
+                                    showNotification?.(`✓ Sincronización verificada: ${data.salesCount} ventas · ${data.productsCount} productos · ${data.clientsCount} clientes · ${data.cashAccountsCount} cajas respaldadas en Firebase.`, "success");
+                                } else {
+                                    showNotification?.(data.error || "No se pudo verificar la sincronización con Firebase.", "error");
+                                }
+                            } catch (err: any) {
+                                showNotification?.("Error de conexión al verificar sincronización con Firebase.", "error");
+                            }
+                        }}
+                        className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl transition flex items-center gap-2 cursor-pointer whitespace-nowrap shrink-0 shadow-xs"
+                    >
+                        <RefreshCw size={14} />
+                        Verificar y Sincronizar con Cloud Firestore
+                    </button>
+                )}
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-start">

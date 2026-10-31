@@ -73,9 +73,10 @@ interface SaleDetail {
 
 export default function CajasView() {
   const { user, showNotification, exchangeRate, isKioskLocked } = useAppContext();
-  const isAdminOrPropietario = !isKioskLocked && (user?.role === 'propietario' || hasPermission(user, 'view_other_cash'));
+  const isAdminOrPropietario = !isKioskLocked && (user?.role === 'propietario' || user?.role === 'admin' || user?.role === 'administrador');
 
   const [activeTab, setActiveTab] = useState<'estado' | 'cierres'>('estado');
+  const [isVerifyingCloud, setIsVerifyingCloud] = useState(false);
   
   // Backend States
   const [accounts, setAccounts] = useState<CashAccount[]>([]);
@@ -438,30 +439,64 @@ export default function CajasView() {
           </div>
         </div>
 
-        {/* Pestañas (Solo Admin/Propietario ve ambas, Vendedor también para consultar sus liquidaciones) */}
-        <div className="flex gap-2 p-1 bg-slate-100 dark:bg-black/45 border border-slate-200/40 dark:border-slate-800/80 rounded-xl self-stretch sm:self-auto">
-          <button
-            onClick={() => setActiveTab('estado')}
-            className={`flex-1 sm:flex-none px-4 py-2 text-[10px] uppercase font-bold rounded-lg transition cursor-pointer flex items-center justify-center gap-1.5 ${
-              activeTab === 'estado' 
-                ? 'bg-white dark:bg-[#0f1424] text-indigo-650 dark:text-indigo-400 shadow-sm border border-slate-200/50' 
-                : 'text-slate-400 hover:text-slate-650'
-            }`}
-          >
-            <UserCheck size={12} />
-            Estado de Cajas
-          </button>
-          <button
-            onClick={() => setActiveTab('cierres')}
-            className={`flex-1 sm:flex-none px-4 py-2 text-[10px] uppercase font-bold rounded-lg transition cursor-pointer flex items-center justify-center gap-1.5 ${
-              activeTab === 'cierres' 
-                ? 'bg-white dark:bg-[#0f1424] text-indigo-650 dark:text-indigo-400 shadow-sm border border-slate-200/50' 
-                : 'text-slate-400 hover:text-slate-650'
-            }`}
-          >
-            <History size={12} />
-            Liquidaciones Históricas
-          </button>
+        <div className="flex flex-wrap items-center gap-2 self-stretch sm:self-auto">
+          {isAdminOrPropietario && (
+            <button
+              onClick={async () => {
+                if (isVerifyingCloud) return;
+                setIsVerifyingCloud(true);
+                try {
+                  const res = await fetch('/api/sync/verify-and-push', {
+                    method: 'POST',
+                    headers: getHeaders()
+                  });
+                  const data = await res.json();
+                  if (res.ok && data.success) {
+                    showNotification(`✓ Nube sincronizada: ${data.salesCount} ventas · ${data.productsCount} productos · ${data.cashAccountsCount} cajas verificadas.`, 'success');
+                    await fetchAccounts();
+                    await fetchSettlements();
+                  } else {
+                    showNotification(data.error || 'No se pudo verificar la sincronización.', 'error');
+                  }
+                } catch (err: any) {
+                  showNotification('Error de red al sincronizar con la nube.', 'error');
+                } finally {
+                  setIsVerifyingCloud(false);
+                }
+              }}
+              disabled={isVerifyingCloud}
+              className="px-3.5 py-2 text-[10px] font-bold uppercase tracking-wider rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 hover:bg-slate-100 dark:bg-slate-900 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 transition flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0 disabled:opacity-50"
+            >
+              <RefreshCw size={12} className={isVerifyingCloud ? 'animate-spin text-indigo-500' : 'text-indigo-500'} />
+              {isVerifyingCloud ? 'Sincronizando...' : 'Sincronizar Nube'}
+            </button>
+          )}
+
+          {/* Pestañas (Solo Admin/Propietario ve ambas, Vendedor también para consultar sus liquidaciones) */}
+          <div className="flex gap-2 p-1 bg-slate-100 dark:bg-black/45 border border-slate-200/40 dark:border-slate-800/80 rounded-xl flex-1 sm:flex-none">
+            <button
+              onClick={() => setActiveTab('estado')}
+              className={`flex-1 sm:flex-none px-4 py-2 text-[10px] uppercase font-bold rounded-lg transition cursor-pointer flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 ${
+                activeTab === 'estado' 
+                  ? 'bg-white dark:bg-[#0f1424] text-indigo-650 dark:text-indigo-400 shadow-sm border border-slate-200/50' 
+                  : 'text-slate-400 hover:text-slate-650'
+              }`}
+            >
+              <UserCheck size={12} />
+              Estado de Cajas
+            </button>
+            <button
+              onClick={() => setActiveTab('cierres')}
+              className={`flex-1 sm:flex-none px-4 py-2 text-[10px] uppercase font-bold rounded-lg transition cursor-pointer flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 ${
+                activeTab === 'cierres' 
+                  ? 'bg-white dark:bg-[#0f1424] text-indigo-650 dark:text-indigo-400 shadow-sm border border-slate-200/50' 
+                  : 'text-slate-400 hover:text-slate-650'
+              }`}
+            >
+              <History size={12} />
+              Liquidaciones Históricas
+            </button>
+          </div>
         </div>
       </div>
 
@@ -521,7 +556,7 @@ export default function CajasView() {
                     <span>Ventas vigentes sin liquidar:</span>
                     <span className="font-mono font-black text-white">{movements.filter(m => m.type === 'venta' && m.status === 'pendiente').length} tickets</span>
                   </div>
-                  {(isAdminOrPropietario || hasPermission(user, 'reset_own_cash')) ? (
+                  {isAdminOrPropietario ? (
                     <div className="flex flex-col gap-2 mt-2">
                       <button
                         onClick={() => handleQuickResetToZero(selectedAccount)}
@@ -542,7 +577,7 @@ export default function CajasView() {
                     </div>
                   ) : (
                     <div className="text-center text-[9px] text-indigo-200 bg-white/10 p-2 rounded-lg leading-snug font-medium">
-                      * El administrador debe realizar tu arqueo físico de caja para resetear tu saldo a cero.
+                      * Solo el Propietario o Administrador puede liquidar y resetear tu saldo acumulado a cero.
                     </div>
                   )}
                 </div>

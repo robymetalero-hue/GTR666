@@ -1,52 +1,81 @@
-# Plan de Corrección Definitiva: Persistencia de Ventas/Inventario y Reseteo de Caja Acumulada
+# Plan de Cierre y Blindaje Final en Producción — GTR POS
 
-## 1. Diagnóstico de Causas Raíz Identificadas
+Este plan implementa las tres mejoras finales de seguridad, control de acceso y verificación de sincronización en vivo para dejar el entorno productivo (`gtr_pos.db` + Cloud Firestore) completamente blindado y sin brechas operativas.
 
-1. **Desvío global a `sandbox` en `src/main.tsx` (Causa de registros invisibles y fallos en vista previa)**:
-   - Aunque `AppContext.tsx` y `server.ts` se configuraron en modo `production`, el interceptor global `patchedFetch` en `src/main.tsx` (líneas 97–105) forzaba `headersObj['x-app-environment'] = 'sandbox'` siempre que `window.location.hostname` contenía `ais-dev` o `localhost`.
-   - Esto desviaba las peticiones del navegador hacia `gtr_pos_sandbox.db` y las colecciones `sandbox_*` en lugar de la base productiva `gtr_pos.db` y las colecciones reales de Firestore.
+## Revisión del Usuario y Decisiones Confirmadas
 
-2. **Fallo al resetear la Caja Acumulada y resurrección de saldos (`CajasView.tsx`, `server.ts`, `firebaseSync.ts`)**:
-   - **Bloqueo en interfaz (`CajasView.tsx`)**: El modal de arqueo abría por defecto en "Modo Ciego" (`isBlindCashSettlement = true`) con el monto vacío y ocultando los botones de autocompletar, impidiendo resetear la caja directamente a cero sin digitar manualmente el monto. Además, `getHeaders()` en `CajasView.tsx` no incluía explícitamente el token `Authorization`.
-   - **Condición de carrera en sincronización (`firebaseSync.ts` y `selfHealCashAccounts`)**: Al liquidar una caja (`UPDATE cash_movements SET status = 'liquidado'`), `pullFirestoreToLocal()` carecía de un escudo de estado para `cash_movements`. Si ocurría una lectura de Firestore antes de completarse la subida del lote de movimientos liquidados, `pullFirestoreToLocal()` sobrescribía los movimientos de vuelta a `'pendiente'` y `selfHealCashAccounts()` volvía a sumar esos tickets y revivía el saldo acumulado de la caja.
-
-3. **Cambios de inventario y registros locales no reflejados en Firestore (`Inventory.tsx`, `server.ts`, `firebaseSync.ts`)**:
-   - En `server.ts` (`PUT /api/products/:id`, línea 3686), `const safeStock = Number(oldProd.stock || 0)` ignoraba `req.body.stock` incluso cuando un administrador enviaba un ajuste explícito de stock, y en `Inventory.tsx` el campo de stock estaba bloqueado al editar un producto.
-   - En `firebaseSync.ts` (`pullFirestoreToLocal`), cuando un producto local tenía fecha `updated_at` más reciente que Firestore (`localUpdated > remoteUpdated`), solo se preservaba `stock`, sobrescribiendo cambios locales de precios, costos, nombre o categoría con datos antiguos de Firestore.
-   - Al iniciar el servidor (`server.ts`), solo se ejecutaba `pullFirestoreToLocal()` sin invocar posteriormente `pushAllLocalToFirestore()`, dejando sin subir los registros creados localmente mientras la conexión estuvo interrumpida.
+> [!IMPORTANT]
+> **Decisiones confirmadas por el usuario en la Fase 1:**
+> - **Alcance de Cierre (`Aplicar las 3 mejoras de blindaje y desplegar reglas`)**: Se aplicará el blindaje de permisos en servidor/cliente, la limpieza y despliegue oficial de `firestore.rules` hacia Firebase, y el verificador de sincronización en vivo con la nube.
+> - **Control de Acceso Estricto (`Solo Propietario y Administradores`)**: Tanto la edición directa de stock en productos como el reseteo/liquidación de cajas acumuladas quedan restringidos exclusivamente a usuarios con rol **`propietario`**, **`admin`** o **`administrador`**.
 
 ---
 
-## 2. Cambios Propuestos
+## 1. Visión General y Objetivo Operativo
 
-### A. Unificación del Entorno de Producción en el Interceptor HTTP (`src/main.tsx`)
-- Eliminar la detección por nombre de host (`ais-dev` / `localhost`) en `patchedFetch` dentro de `src/main.tsx`.
-- Enviar siempre `headersObj['x-app-environment'] = 'production'` por defecto, cambiando a `'sandbox'` únicamente si `localStorage.getItem('gtr_sandbox_mode') === 'true'`.
-
-### B. Reseteo Directo a Cero de Caja Acumulada y Blindaje Anti-Resurrección (`src/views/CajasView.tsx`, `server.ts`, `firebaseSync.ts`)
-- **Reseteo directo autocompletando el saldo actual (`src/views/CajasView.tsx`)**:
-  - Cambiar `isBlindCashSettlement` a `false` por defecto y autocompletar automáticamente `deliveredAmount` con el saldo acumulado actual (`selectedAccount.current_balance.toFixed(2)`) al abrir el modal de liquidación.
-  - Añadir un botón de acción directa **"Resetear a Cero"** en la tarjeta de cada caja acumulada y en el modal de detalle para que el administrador/propietario liquide y ponga en `0.00 Bs` la caja de inmediato con un solo clic, archivando los movimientos pendientes en el historial de liquidaciones.
-  - Incluir `Authorization: Bearer ${token}` y `x-app-environment` en `getHeaders()` de `CajasView.tsx`.
-- **Blindaje de movimientos liquidados (`firebaseSync.ts` y `server.ts`)**:
-  - En `POST /api/cash-accounts/:sellerId/settle` (`server.ts`): registrar `last_settlement_at` y `updated_at` con timestamp ISO (`getBoliviaISOString()`), permitir enviar `delivered_amount` opcional (tomando por defecto `sellerAcc.current_balance` para reseteo exacto a cero), y sincronizar inmediatamente a Firestore `cash_accounts`, `cash_movements` y `cash_settlements`.
-  - En `pullFirestoreToLocal` (`firebaseSync.ts`): agregar un escudo de estado para `cash_movements` de modo que si un movimiento local ya tiene `status === 'liquidado'` (o su `sale_id` ya figura en una liquidación de `cash_settlements`), jamás sea revertido a `'pendiente'` por un documento remoto desactualizado.
-  - En `selfHealCashAccounts` (`server.ts`): impedir que se recreen como `'pendiente'` movimientos de ventas ocurridas en o antes de `last_settlement_at` o ya incluidas en `cash_settlements`.
-
-### C. Persistencia de Ventas e Inventario con Cero Duplicados (`src/views/Inventory.tsx`, `server.ts`, `firebaseSync.ts`)
-- **Edición de productos y existencias (`src/views/Inventory.tsx` y `server.ts`)**:
-  - En `Inventory.tsx`: habilitar la edición de stock dentro del modal de edición de producto para administradores/propietarios (o usuarios con permiso `inventory_adjustments`), enviando `payload.stock` e `inventoryAdjustmentReason` únicamente cuando el usuario haya modificado el valor de stock respecto al original.
-  - En `PUT /api/products/:id` (`server.ts`): conservar `oldProd.stock` cuando `req.body.stock` sea `undefined` (protegiendo ediciones de solo precio/nombre), pero aplicar el nuevo stock y generar su registro de Kárdex en `inventory_audit_logs` cuando `req.body.stock` sea enviado explícitamente por un usuario autorizado.
-- **Protección integral de cambios locales y sincronización sin duplicados (`firebaseSync.ts` y `server.ts`)**:
-  - En `pullFirestoreToLocal` (`firebaseSync.ts`): cuando un producto local tenga `localUpdated > remoteUpdated`, preservar todos sus campos actualizados localmente (`name`, `category`, `sku`, `stock`, `price_unit`, `price_bulk`, `price_cost`, `stock_alarm`, `image`, `updated_at`) sin pisarlos con valores antiguos de Firestore.
-  - En el arranque de `server.ts` y en `/api/sync`: ejecutar `pushAllLocalToFirestore()` inmediatamente después de `pullFirestoreToLocal()` para asegurar que toda venta, ingreso de stock (`stock_arrivals`), producto o liquidación pendiente en SQLite quede respaldada en Firestore.
-  - Mantener el candado de idempotencia (`client_operation_id` en `processed_operations` y `lastSyncedDigestCache` SHA-256) para impedir cualquier duplicación de ventas, movimientos de caja o ajustes de stock.
+- **Qué resuelve**:
+  1. **Autorización exclusiva para Propietario y Administradores**: Garantiza que el rol `propietario` tenga autoridad total reconocida en el backend (`PUT /api/products/:id` y `POST /api/cash-accounts/:sellerId/settle`) sin bloqueos falsos (`403`), mientras impide que cualquier cuenta de `vendedor` modifique existencias o reinicie cajas acumuladas.
+  2. **Endurecimiento y despliegue de `firestore.rules`**: Elimina las referencias a correos fijos no verificados (`server-sync@gtrpos.com`, `sync@gtrpos.com`) en `isSyncDaemon()`, exige `email_verified == true` para toda autoridad por correo o reclamo de sincronización, mantiene bloqueada la alteración no autorizada de stock en `products` y despliega las reglas directamente en el proyecto de Firebase.
+  3. **Verificación y Reconciliación Activa con Cloud Firestore**: Incorpora un endpoint y control de verificación inmediata en el panel de **Configuraciones** (y acceso rápido desde **Cajas**) que comprueba el conteo exacto de ventas, productos y cuentas de caja en `gtr_pos.db`, fuerza el envío de cualquier cambio local pendiente a Cloud Firestore y muestra el resumen de integridad con numerales tabulares.
 
 ---
 
-## 3. Verificación
-- Compilar la aplicación (`compile_applet`) verificando cero errores de TypeScript.
-- Verificar en la base de datos de producción (`gtr_pos.db` y Firestore) que:
-  1. Las ventas e inventario reales se cargan y persisten en modo `production`.
-  2. La liquidación/reseteo de caja acumulada pone `current_balance = 0.00 Bs`, cambia todos los `cash_movements` a `'liquidado'`, persiste el cierre en `cash_settlements` y no revive el saldo tras ejecutar ciclos de sincronización con Firestore.
-  3. El registro de ventas y cambios de inventario guarda y sincroniza en Firestore con cero registros duplicados.
+## 2. Experiencia de Usuario y Diseño Visual
+
+- **Flujos de Usuario Clave**:
+  1. **Reseteo de Caja Exclusivo para Propietario/Admin**: En la vista **Cajas**, únicamente el Propietario y los Administradores visualizan y ejecutan el botón **Resetear a 0.00 Bs** y el modal de **Arqueo con Conteo**. Los vendedores ven únicamente su estado informativo sin controles de autoliquidación.
+  2. **Edición de Stock Protegida por Rol**: En **Inventario**, al abrir el modal de edición de un producto existente, el campo de stock físico solo es editable para `propietario`, `admin` y `administrador` (registrando automáticamente el ajuste en el Kárdex). Para cualquier otro rol, el campo permanece bloqueado y el servidor conserva intacto el stock anterior (`oldProd.stock`).
+  3. **Verificador de Sincronización Cloud en Vivo**: En **Configuraciones**, el administrador o propietario dispone de un botón de acción directa **Verificar y Sincronizar con Cloud Firestore**, que ejecuta una conciliación completa (`pushAllLocalToFirestore`) y muestra el estado verificado de ventas, productos y cajas sin recargar la página.
+- **Identidad Visual y Disciplina de Interfaz**:
+  - **Estética SaaS de Alta Densidad**: Superficies limpias de un solo nivel de elevación con bordes sutiles de `1px` (`border-slate-200 dark:border-slate-800`), respetando el modo claro/oscuro existente.
+  - **Tipografía y Numerales Tabulares**: Todas las cifras financieras, conteos de tickets, unidades de stock y marcas de tiempo emplean `font-mono tabular-nums` para alineación vertical exacta.
+  - **Disciplina Cero-Píldoras en Metadatos**: Los indicadores informativos usan texto limpio con separadores tipográficos (`·`), reservando los botones rellenos exclusivamente para acciones interactivas reales.
+
+---
+
+## 3. Decisiones Técnicas y de Seguridad
+
+- **Decisión 1: Validación de Rol en Servidor Basada en `verifiedUser` + Invariante `K02/F10`**
+  - *Enfoque elegido*: En `PUT /api/products/:id`, el servidor identifica al usuario mediante `req.verifiedUser` (token JWT verificado) además de las cabeceras de contexto, reconociendo explícitamente a `propietario`, `admin` y `administrador` como roles autorizados para modificar stock directo. Si un usuario no administrador edita metadatos permitidos de un producto, el servidor conserva `oldProd.stock` sin alterarlo. En `POST /api/cash-accounts/:sellerId/settle`, solo `propietario`, `admin` y `administrador` pueden ejecutar la liquidación o reseteo a cero.
+  - *Por qué*: Cumple simultáneamente la política de máxima seguridad solicitada por el propietario y las pruebas de auditoría (`K02/F10`), evitando que el propietario sufra rechazos `403` al editar productos.
+- **Decisión 2: Reglas de Firestore (`firestore.rules`) Sin Correos Fijos No Verificados**
+  - *Enfoque elegido*: En `isSyncDaemon()`, se retiran los correos literales `['server-sync@gtrpos.com', 'sync@gtrpos.com']` sin verificación de correo, permitiendo únicamente tokens con `email_verified == true` y rol/claim de sincronización o el correo verificado del propietario (`robymetalero@gmail.com`), o el UID técnico autorizado del servidor. En la colección `/products/{productId}`, toda escritura o actualización exige `isAuthorizedSyncOrAdmin()` junto con `hasValidIntegrityEnvelope()` y `hasValidNumericInvariants()`.
+  - *Por qué*: Cierra los hallazgos `M13` y `L06` del informe de auditoría y garantiza que las reglas desplegadas en producción coincidan con el código auditado.
+
+---
+
+## 4. Arquitectura Técnica y Flujo de Datos
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│                   CLIENTE POS (React + Contexto Producción)                │
+│                                                                            │
+│  ┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────┐  │
+│  │   Vista Inventario   │  │     Vista Cajas      │  │ Configuraciones  │  │
+│  │ Stock editable solo  │  │ "Resetear a 0.00 Bs" │  │ Botón Verificar  │  │
+│  │ Propietario / Admin  │  │ solo Propietario/Adm │  │ Sincronización   │  │
+│  └──────────┬───────────┘  └──────────┬───────────┘  └────────┬─────────┘  │
+└─────────────┼─────────────────────────┼───────────────────────┼────────────┘
+              │ PUT /api/products/:id   │ POST /settle          │ POST /api/sync/verify
+              ▼                         ▼                       ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│                     SERVIDOR EXPRESS + SQLITE (gtr_pos.db)                 │
+│                                                                            │
+│  1. Verifica JWT (verifiedUser): exige rol propietario | admin             │
+│  2. Transacción ACID en gtr_pos.db + Registro en Kárdex / Cash Settlements │
+│  3. Replicación inmediata pushLocalToFirestore + Escudo Anti-Sobrescritura │
+└───────────────────────────────────────┬────────────────────────────────────┘
+                                        │
+                                        ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│         CLOUD FIRESTORE (Reglas firestore.rules Desplegadas vía RPC)       │
+│  • isAuthorizedSyncOrAdmin() con email_verified == true                    │
+│  • Verificación de sobre criptográfico SHA-256 (_tx_hash, _tx_timestamp)   │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Mapa de Componentes e Interacciones
+- **Módulo de Inventario (`PUT /api/products/:id`)**: Verifica `isOwnerOrAdmin` (`propietario`, `admin`, `administrador`). Si es administrador/propietario y envía un nuevo `stock`, actualiza la existencia y escribe el registro en `inventory_audit_logs` y `system_audit_logs` dentro de la misma transacción SQLite, disparando `syncAfterWrite` hacia Firestore.
+- **Módulo de Cajas (`POST /api/cash-accounts/:sellerId/settle`)**: Verifica `isOwnerOrAdmin`. Registra el corte en `cash_settlements`, cambia los movimientos pendientes a `'liquidado'`, fija `current_balance = 0.0` con `last_settlement_at` en formato ISO canónico y empuja de inmediato los tres documentos a Firestore.
+- **Verificador de Sincronización (`POST /api/sync/verify-and-push`)**: Ejecuta `pushAllLocalToFirestore()` en el contexto de producción y devuelve el conteo actualizado de ventas, productos, clientes y cajas sincronizadas para mostrar confirmación inmediata en la interfaz.
+- **Despliegue de Reglas (`firestore.rules`)**: Tras actualizar el archivo de reglas, se ejecuta el despliegue hacia Firebase para que las reglas queden activas en la base de datos de producción.

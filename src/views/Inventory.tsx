@@ -1588,9 +1588,10 @@ export default function Inventory() {
             forceCreate: forceCreateOverride
         };
 
+        const isOwnerOrAdminUser = user?.role === 'admin' || user?.role === 'propietario' || user?.role === 'administrador';
         if (!editingProduct) {
             payload.stock = Number(stock);
-        } else if (stock !== "" && Number(stock) !== Number(editingProduct.stock)) {
+        } else if (isOwnerOrAdminUser && stock !== "" && Number(stock) !== Number(editingProduct.stock)) {
             payload.stock = Math.max(0, Number(stock));
             payload.reason = 'Ajuste directo de existencias desde edición de producto';
         }
@@ -2941,7 +2942,7 @@ export default function Inventory() {
 
                                 <div className="flex flex-col gap-1.5">
                                     {(() => {
-                                        const canDirectEditStock = !editingProduct || user?.role === 'admin' || user?.role === 'propietario' || user?.role === 'administrador' || Boolean((user as any)?.permissions?.inventory_adjustments);
+                                        const canDirectEditStock = !editingProduct || user?.role === 'admin' || user?.role === 'propietario' || user?.role === 'administrador';
                                         return (
                                             <>
                                                 <label className="text-[9px] font-extrabold uppercase tracking-widest text-slate-400">

@@ -27,8 +27,7 @@ service cloud.firestore {
             request.auth.token.sync_daemon == true ||
             isVerifiedAdminEmail()
           )) ||
-          request.auth.uid == 'JcSLNUDemFdbcfegNBqMFoV2Onb2' ||
-          request.auth.token.email in ['server-sync@gtrpos.com', 'sync@gtrpos.com']
+          request.auth.uid == 'JcSLNUDemFdbcfegNBqMFoV2Onb2'
         );
     }
 
@@ -155,13 +154,10 @@ service cloud.firestore {
       allow read, write: if isAuthenticated() && settingId != 'jwt_secret';
     }
 
-    // Products catalog (Protected against anonymous cost leakage and unauthorized positive stock manipulation)
+    // Products catalog (Protected against anonymous cost leakage and unauthorized stock/price manipulation)
     match /products/{productId} {
       allow read: if isAuthenticated();
-      allow create: if isAuthorizedSyncOrAdmin()
-        && hasValidIntegrityEnvelope()
-        && hasValidNumericInvariants('products', productId);
-      allow update: if (isAuthorizedSyncOrAdmin() || (request.resource.data.stock <= resource.data.stock && isAuthorizedSyncOrAdmin()))
+      allow create, update: if isAuthorizedSyncOrAdmin()
         && hasValidIntegrityEnvelope()
         && hasValidNumericInvariants('products', productId);
       allow delete: if isAuthorizedSyncOrAdmin();

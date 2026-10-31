@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan de implementacion para corregir el desvio a sandbox en main.tsx, habilitar el reseteo directo a cero de cajas acumuladas sin resurreccion de saldo, y garantizar la persistencia y sincronizacion de ventas e inventario sin duplicados.",
-  "updatedAt":  "2026-10-31T00:55:26.346577820Z",
+  "summary":  "Plan de cierre final de blindaje en producción para GTR POS: restricción exclusiva a Propietario y Administradores para edición directa de stock y reseteo de cajas, endurecimiento y despliegue de reglas de seguridad de Firestore (firestore.rules), y verificación/sincronización inmediata con Cloud Firestore.",
+  "updatedAt":  "2026-10-31T07:47:19.576458698Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

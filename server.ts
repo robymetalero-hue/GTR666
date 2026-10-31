@@ -3682,9 +3682,13 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         return res.status(404).json({ error: "Producto no encontrado." });
       }
 
-      // Preserve current server stock on metadata/price edits when stock is omitted; apply explicit stock edits when provided
+      const verifiedUser = (req as any).verifiedUser;
+      const effectiveRole = String(verifiedUser?.role || req.headers['x-user-role'] || '').toLowerCase().trim();
+      const isOwnerOrAdmin = ['admin', 'administrador', 'propietario'].includes(effectiveRole) || Boolean(verifiedUser && isMainAdmin(verifiedUser));
+
+      // Preserve current server stock on metadata/price edits when stock is omitted or user is not Owner/Admin; apply explicit stock edits only for Propietario/Admin
       const hasExplicitStock = stock !== undefined && stock !== null && String(stock).trim() !== '' && !Number.isNaN(Number(stock));
-      const safeStock = hasExplicitStock ? Math.max(0, Number(stock)) : Number(oldProd.stock || 0);
+      const safeStock = (isOwnerOrAdmin && hasExplicitStock) ? Math.max(0, Number(stock)) : Number(oldProd.stock || 0);
       const safePriceUnit = Math.max(0, Number(price_unit !== undefined && price_unit !== null ? price_unit : oldProd.price_unit || 0));
       const safePriceBulk = Math.max(0, Number(price_bulk !== undefined && price_bulk !== null ? price_bulk : oldProd.price_bulk || 0));
       const safePriceCost = Math.max(0, Number(price_cost !== undefined ? price_cost : (oldProd.price_cost || (price_unit ? price_unit * 0.6 : 0))));
@@ -3712,14 +3716,18 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       }
 
       // Granular Security check based on changed fields:
-      const requesterRole = req.headers['x-user-role'];
-      if (requesterRole && requesterRole !== 'admin' && requesterRole !== 'administrador') {
+      if (effectiveRole && !isOwnerOrAdmin) {
         const userPermissionsRaw = req.headers['x-user-permissions'];
         let perms: any = {};
-        try { if (userPermissionsRaw) perms = JSON.parse(String(userPermissionsRaw)); } catch (err) {}
+        try {
+          if (verifiedUser?.permissions) {
+            perms = typeof verifiedUser.permissions === 'string' ? JSON.parse(verifiedUser.permissions) : verifiedUser.permissions;
+          } else if (userPermissionsRaw) {
+            perms = JSON.parse(String(userPermissionsRaw));
+          }
+        } catch (err) {}
 
         const isChangingPrice = (oldProd.price_unit !== safePriceUnit) || (oldProd.price_bulk !== safePriceBulk) || (oldProd.price_cost !== safePriceCost);
-        const isChangingStock = (oldProd.stock !== safeStock);
         const isChangingMeta = (oldProd.name !== name.trim()) || 
           (oldProd.sku !== sku.trim()) || 
           (oldProd.category !== category.trim()) || 
@@ -3728,9 +3736,6 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
         if (isChangingPrice && !perms.edit_prices && !perms.modify_prices) {
           return res.status(403).json({ error: "No tienes privilegios para modificar precios o costos (edit_prices)." });
-        }
-        if (isChangingStock && !perms.inventory_adjustments) {
-          return res.status(403).json({ error: "No tienes privilegios para ajustar el stock físico directamente (inventory_adjustments)." });
         }
         if (isChangingMeta && !perms.edit_products) {
           return res.status(403).json({ error: "No tienes privilegios para modificar los datos básicos de los productos (edit_products)." });
@@ -13228,7 +13233,7 @@ DIRECTIVAS CRÍTICAS:
     }
   });
 
-  // Liquidar/Cerrar periodo de acumulación y reiniciar caja del vendedor a cero
+  // Liquidar/Cerrar periodo de acumulación y reiniciar caja del vendedor a cero (Exclusivo Propietario / Administrador)
   app.post("/api/cash-accounts/:sellerId/settle", (req, res) => {
     const sellerId = Number(req.params.sellerId);
     const { delivered_amount, notes } = req.body;
@@ -13239,14 +13244,8 @@ DIRECTIVAS CRÍTICAS:
     }
     const uRole = String(verifiedUser.role || '').toLowerCase();
     const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
-    let userPerms: any = {};
-    try {
-      userPerms = typeof verifiedUser.permissions === 'string' ? JSON.parse(verifiedUser.permissions) : (verifiedUser.permissions || {});
-    } catch (_) {}
-    const canSelfReset = Number(verifiedUser.id) === sellerId && Boolean(userPerms.reset_own_cash);
-    const canOtherReset = Boolean(userPerms.reset_other_cash);
 
-    if (!isAdmin && !canSelfReset && !canOtherReset) {
+    if (!isAdmin) {
       return res.status(403).json({ error: "Acceso denegado: Solo el administrador o propietario puede liquidar o resetear cuentas de caja." });
     }
 
@@ -13376,6 +13375,50 @@ DIRECTIVAS CRÍTICAS:
       res.json({ success: true, calculated, delivered, difference });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Verificación activa y sincronización inmediata con Cloud Firestore (Exclusivo Propietario / Administrador)
+  app.post("/api/sync/verify-and-push", async (req, res) => {
+    const verifiedUser = (req as any).verifiedUser;
+    if (!verifiedUser) {
+      return res.status(401).json({ error: "Sesión requerida." });
+    }
+    const uRole = String(verifiedUser.role || '').toLowerCase();
+    const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+    if (!isAdmin) {
+      return res.status(403).json({ error: "Solo el propietario o administrador puede ejecutar la sincronización con Cloud Firestore." });
+    }
+
+    try {
+      await dbAsyncLocalStorage.run({ isSandbox: false }, async () => {
+        selfHealCashAccounts();
+        await pushAllLocalToFirestore();
+      });
+
+      const stats = dbAsyncLocalStorage.run({ isSandbox: false }, () => {
+        const salesCount = (db.prepare("SELECT COUNT(*) as c FROM sales").get() as any)?.c || 0;
+        const productsCount = (db.prepare("SELECT COUNT(*) as c FROM products").get() as any)?.c || 0;
+        const clientsCount = (db.prepare("SELECT COUNT(*) as c FROM clients").get() as any)?.c || 0;
+        const cashAccountsCount = (db.prepare("SELECT COUNT(*) as c FROM cash_accounts").get() as any)?.c || 0;
+        const pendingCashTotalBs = (db.prepare("SELECT COALESCE(SUM(current_balance), 0) as total FROM cash_accounts").get() as any)?.total || 0;
+        return {
+          salesCount: Number(salesCount),
+          productsCount: Number(productsCount),
+          clientsCount: Number(clientsCount),
+          cashAccountsCount: Number(cashAccountsCount),
+          pendingCashTotalBs: Math.round(Number(pendingCashTotalBs) * 100) / 100,
+          timestamp: getBoliviaISOString()
+        };
+      });
+
+      res.json({
+        success: true,
+        message: "Base de datos de producción sincronizada y verificada con Cloud Firestore.",
+        ...stats
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message || "Error al verificar sincronización con Cloud Firestore." });
     }
   });
 
