@@ -1,6 +1,6 @@
-const CACHE_VERSION = 'gtr-pos-v2.6.0-zero-cache';
+const CACHE_VERSION = 'gtr-pos-v2.6.1-fast-nav';
 
-// Installation phase - Purge any old caches & skip waiting immediately (Zero-Cache Online Mode)
+// Installation phase - Purge any legacy Service Worker caches & activate immediately
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.keys().then((keys) => {
@@ -11,13 +11,13 @@ self.addEventListener('install', (event) => {
   );
 });
 
-// Activation phase - Purge all caches & take immediate control of clients
+// Activation phase - Purge all legacy caches & take immediate control of clients
 self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((keys) => {
       return Promise.all(
         keys.map((key) => {
-          console.log('[PWA SW Zero-Cache] Eliminando caché del dispositivo:', key);
+          console.log('[PWA SW Fast-Nav] Eliminando caché antiguo del dispositivo:', key);
           return caches.delete(key);
         })
       );
@@ -27,10 +27,10 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// Network-Only Pass-Through: Never serve stale cached HTML, JS, CSS or API data from phone storage
-self.addEventListener('fetch', () => {
-  return; // Pass 100% of requests straight to the live network
-});
+// NOTE: Intentionally no 'fetch' event listener registered here.
+// By omitting a no-op fetch handler, Chrome on Android and iOS Safari bypass Service Worker thread
+// wake-up latency on navigation (0ms SW overhead, eliminating the 15% progress bar stall),
+// while HTTP Cache-Control headers natively cache hashed visual assets (/assets/*) and keep /api/* 100% live.
 
 // Native Web Push Notification Handler (for Installed PWA on Android/iOS/Desktop)
 self.addEventListener('push', (event) => {

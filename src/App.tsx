@@ -45,9 +45,11 @@ const lazyWithRetries = (componentImport: () => Promise<any>) =>
     }
   });
 
-// Code Splitting with React.lazy
-const POS = lazyWithRetries(() => import('./views/POS'));
-const LoginScreen = lazyWithRetries(() => import('./views/LoginScreen'));
+// Eagerly import primary entry views (LoginScreen & POS) so initial load renders on the very first frame (0ms extra chunk waterfall)
+import POS from './views/POS';
+import LoginScreen from './views/LoginScreen';
+
+// Code Splitting with React.lazy for secondary administrative/analytical views
 const Dashboard = lazyWithRetries(() => import('./views/Dashboard'));
 const Inventory = lazyWithRetries(() => import('./views/Inventory'));
 const PermissionsConsole = lazyWithRetries(() => import('./views/PermissionsConsole'));
@@ -612,7 +614,7 @@ function AppLayout() {
                 </div>
             )}
 
-            {/* FULL-SCREEN MANDATORY ONLINE CONNECTION GATE (Blocks app when offline to prevent stale cache conflicts) */}
+            {/* FULL-SCREEN MANDATORY ONLINE CONNECTION GATE (Blocks app when offline to prevent stale cache conflicts while preserving active cart) */}
             {!isUpdateGateActive && isOfflineGateActive && (
                 <div className="fixed inset-0 z-[9998] bg-slate-950/95 backdrop-blur-xl flex items-center justify-center p-4 select-none">
                     <div className="max-w-md w-full bg-slate-900 border border-rose-500/40 rounded-3xl p-6 sm:p-8 shadow-2xl text-white flex flex-col items-center text-center gap-5">
@@ -630,6 +632,23 @@ function AppLayout() {
                                 <strong>GTR POS opera exclusivamente 100% en línea</strong> contra la Base de Datos Principal para evitar registros duplicados o desajustes de stock por cachés antiguos. Conecte el dispositivo a internet para continuar.
                             </p>
                         </div>
+
+                        {cart && cart.length > 0 && (
+                            <div className="w-full rounded-2xl bg-emerald-950/60 border border-emerald-500/40 px-4 py-3 text-left flex items-start gap-3">
+                                <div className="w-8 h-8 rounded-xl bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 shrink-0 mt-0.5">
+                                    <ShoppingCart size={16} />
+                                </div>
+                                <div className="space-y-0.5">
+                                    <p className="text-xs font-black uppercase tracking-wider text-emerald-300">
+                                        Carrito Protegido ({cart.length} {cart.length === 1 ? 'ítem' : 'ítems'} / {cart.reduce((acc, it) => acc + Number(it?.cartQuantity || (it as any)?.quantity || 1), 0)} unid.)
+                                    </p>
+                                    <p className="text-[11px] text-emerald-100/90 leading-snug">
+                                        Tus productos en preparación siguen intactos en pantalla. En cuanto vuelva la señal podrás cobrar sin volver a registrarlos.
+                                    </p>
+                                </div>
+                            </div>
+                        )}
+
                         <button
                             type="button"
                             disabled={retryingConnection}

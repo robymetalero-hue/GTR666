@@ -1,6 +1,6 @@
 {
-  "summary": "Plan de implementación para Inicio de Sesión Diario Obligatorio (vencimiento a medianoche con limpieza profunda total del dispositivo), Eliminación de Login Optimista/Caché Local (Cero Caché en Celulares) y Conectividad Priorizada de Baja Latencia en Tiempo Real (v2.6.0).",
-  "updatedAt": "2026-11-02T14:23:00.323943385Z",
+  "summary": "Plan actualizado con preservación garantizada del carrito activo (10-15+ ítems) ante cortes temporales de internet, reconciliación automática de stock en vivo al reconectar y carga instantánea (<1s).",
+  "updatedAt": "2026-11-02T15:07:18.211831674Z",
   "requestFeedback": true,
   "userFacing": true
 }

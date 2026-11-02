@@ -256,15 +256,7 @@ export function safeLocalStorageSetItem(key: string, value: string): boolean {
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-    const [isInitializing, setIsInitializing] = useState(() => {
-        try {
-            const hasCachedProds = !!localStorage.getItem('cached_products');
-            const hasUser = !!localStorage.getItem('user');
-            return !hasCachedProds && !hasUser;
-        } catch {
-            return false;
-        }
-    });
+    const [isInitializing, setIsInitializing] = useState(false);
     const [kioskMode, setKioskMode] = useState(() => localStorage.getItem('kioskMode') === 'true');
     const [isSupervisorUnlocked, setIsSupervisorUnlocked] = useState(false);
     const [supervisorInfo, setSupervisorInfo] = useState<{ id: number; username: string; role: string } | null>(null);
@@ -1227,16 +1219,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     useEffect(() => {
         if (user && user.username && user.username !== 'none') {
-            const hasLocalData = products.length > 0 || !!localStorage.getItem('cached_products');
-            if (!hasLocalData) {
-                setIsInitializing(true);
-            } else {
-                setIsInitializing(false);
-            }
-
-            const safetyTimeout = setTimeout(() => {
-                setIsInitializing(false);
-            }, 1000);
+            setIsInitializing(false);
 
             Promise.allSettled([
                 fetchProducts(),
@@ -1246,7 +1229,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 fetchDepartments(),
                 fetchKioskMode()
             ]).finally(() => {
-                clearTimeout(safetyTimeout);
                 setIsInitializing(false);
             });
         } else {
@@ -1423,6 +1405,43 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             setTotalProducts(total);
             setHasMoreProducts(false);
             setIsOffline(false);
+
+            // Reconcile active cart and multi-comanda tabs with live server stock & catalog metadata upon reconnect/refresh
+            if (!searchQuery && prods.length > 0) {
+                const liveMap = new Map<number, Product>();
+                for (const p of prods) {
+                    if (p && p.id !== undefined) {
+                        liveMap.set(Number(p.id), p);
+                    }
+                }
+                setCart(prevCart => {
+                    if (!prevCart || prevCart.length === 0) return prevCart;
+                    let changed = false;
+                    const updatedCart = prevCart.map(item => {
+                        if (!item || item.id === undefined) return item;
+                        const liveProd = liveMap.get(Number(item.id));
+                        if (!liveProd) return item;
+                        if (
+                            item.stock !== liveProd.stock ||
+                            item.price_unit !== liveProd.price_unit ||
+                            item.price_bulk !== liveProd.price_bulk ||
+                            item.name !== liveProd.name
+                        ) {
+                            changed = true;
+                            return {
+                                ...item,
+                                stock: liveProd.stock,
+                                price_unit: liveProd.price_unit,
+                                price_bulk: liveProd.price_bulk,
+                                name: liveProd.name,
+                                sku: liveProd.sku
+                            };
+                        }
+                        return item;
+                    });
+                    return changed ? updatedCart : prevCart;
+                });
+            }
 
             // Update local versions via fallback endpoint ONLY if response headers were omitted
             if (!catHeader || !invHeader) {

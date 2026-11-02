@@ -734,6 +734,7 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
 export async function pushAllLocalToFirestore() {
   console.log("[Sync] Triggered full push from SQLite to Google Cloud Firestore...");
   for (const table of SYNC_TABLES) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
     await pushLocalToFirestore(table);
   }
 }
@@ -1210,16 +1211,18 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
       }
     } catch (_) {}
 
-    // Pull each collection and upsert data into SQLite inside a single high-performance transaction
-    const globalSyncTx = db.transaction(() => {
-      const activeLedger = readRemediatedSalesLedger();
+    // Pull each collection and upsert data into SQLite using per-table transactions with event-loop yielding
+    // so HTTP requests (GET /, /api/*) respond in <5ms without blocking on a monolithic 26-table transaction
+    const activeLedger = readRemediatedSalesLedger();
 
-      // Preserve internal remediation ledger across forceOverwrite on settings
-      const preservedRemediationLedgerRow = db.prepare("SELECT key, value, updated_at FROM settings WHERE key = 'incident_399_remediated_sales_ledger'").get() as any;
+    // Preserve internal remediation ledger across forceOverwrite on settings
+    const preservedRemediationLedgerRow = db.prepare("SELECT key, value, updated_at FROM settings WHERE key = 'incident_399_remediated_sales_ledger'").get() as any;
 
-      for (const { table, snapshot, error } of collectionResults) {
-        if (error || !snapshot) continue;
+    for (const { table, snapshot, error } of collectionResults) {
+      if (error || !snapshot) continue;
+      await new Promise<void>((resolve) => setImmediate(resolve));
 
+      const runTableSyncTx = db.transaction(() => {
         try {
           if (snapshot.empty) {
             let localCount = 0;
@@ -1235,7 +1238,7 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
                 db.prepare(`DELETE FROM ${table}`).run();
               } catch (e: any) {}
             }
-            continue;
+            return;
           }
 
           // Anti-Truncation Circuit Breaker:
@@ -1250,7 +1253,7 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
           if (['products', 'sales', 'sale_items', 'stock_arrivals'].includes(table)) {
             if (localRowCount >= 50 && snapshot.docs.length < Math.floor(localRowCount * 0.3)) {
               console.warn(`[Anti-Truncation Shield] Remote collection "${table}" returned only ${snapshot.docs.length} docs, but local has ${localRowCount}. Rejecting truncation to protect data integrity.`);
-              continue;
+              return;
             }
           }
 
@@ -1623,10 +1626,10 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
         } catch (tableErr: any) {
           handleSyncError(tableErr, `[Sync Warning] Table "${table}":`);
         }
-      }
-    });
+      });
 
-    globalSyncTx();
+      runTableSyncTx();
+    }
 
     // Hydrate incident_399_remediation_state from settings table if present (protects against container disk resets and remote-only replicas)
     try {

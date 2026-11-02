@@ -11,8 +11,8 @@ import { hardRefreshApp } from './appRefresh';
 declare const __APP_VERSION__: string | undefined;
 declare const __APP_BUILD_TIME__: number | undefined;
 
-export const CLIENT_VERSION: string = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : "2.6.0";
-export const CLIENT_BUILD_TIME: number = typeof __APP_BUILD_TIME__ !== 'undefined' ? Number(__APP_BUILD_TIME__) : 1771550000000;
+export const CLIENT_VERSION: string = typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : "2.6.1";
+export const CLIENT_BUILD_TIME: number = typeof __APP_BUILD_TIME__ !== 'undefined' ? Number(__APP_BUILD_TIME__) : 1771600000000;
 
 export interface VersionComparisonResult {
     clientVersion: string;

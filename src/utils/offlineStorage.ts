@@ -36,8 +36,25 @@ let memoryQueue: OfflineSale[] = [];
 let memoryActionsQueue: OfflineAction[] = [];
 const memoryStateCache: Record<string, any> = {};
 
+let activeDbInstance: IDBDatabase | null = null;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, fallbackValue?: T): Promise<T | undefined> {
+    return new Promise((resolve) => {
+        const timer = setTimeout(() => resolve(fallbackValue), ms);
+        promise
+            .then((val) => {
+                clearTimeout(timer);
+                resolve(val);
+            })
+            .catch(() => {
+                clearTimeout(timer);
+                resolve(fallbackValue);
+            });
+    });
+}
+
 /**
- * Safely opens IndexedDB
+ * Safely opens IndexedDB with onblocked protection
  */
 function openDB(): Promise<IDBDatabase> {
     return new Promise((resolve, reject) => {
@@ -53,8 +70,18 @@ function openDB(): Promise<IDBDatabase> {
                 reject(request.error || new Error('Database open failed'));
             };
 
+            request.onblocked = () => {
+                reject(new Error('Database open blocked'));
+            };
+
             request.onsuccess = () => {
-                resolve(request.result);
+                const db = request.result;
+                activeDbInstance = db;
+                db.onversionchange = () => {
+                    try { db.close(); } catch {}
+                    if (activeDbInstance === db) activeDbInstance = null;
+                };
+                resolve(db);
             };
 
             request.onupgradeneeded = (event: any) => {
@@ -833,24 +860,27 @@ export async function purgeStaleOfflineQueuesAndCaches(): Promise<void> {
         }
     }
 
-    try {
-        const db = await openDB();
-        const stores = [STORE_NAME, ACTIONS_STORE_NAME, STATE_CACHE_STORE].filter(s => db.objectStoreNames.contains(s));
-        if (stores.length > 0) {
-            const tx = db.transaction(stores, 'readwrite');
-            for (const s of stores) {
-                try {
-                    tx.objectStore(s).clear();
-                } catch {}
+    await withTimeout((async () => {
+        try {
+            const db = await openDB();
+            const stores = [STORE_NAME, ACTIONS_STORE_NAME, STATE_CACHE_STORE].filter(s => db.objectStoreNames.contains(s));
+            if (stores.length > 0) {
+                const tx = db.transaction(stores, 'readwrite');
+                for (const s of stores) {
+                    try {
+                        tx.objectStore(s).clear();
+                    } catch {}
+                }
+                await new Promise<void>((res) => {
+                    tx.oncomplete = () => { try { db.close(); } catch {} res(); };
+                    tx.onerror = () => { try { db.close(); } catch {} res(); };
+                    tx.onabort = () => { try { db.close(); } catch {} res(); };
+                });
+            } else {
+                db.close();
             }
-            await new Promise<void>((res) => {
-                tx.oncomplete = () => { db.close(); res(); };
-                tx.onerror = () => { db.close(); res(); };
-            });
-        } else {
-            db.close();
-        }
-    } catch {}
+        } catch {}
+    })(), 350);
 
     safeDispatchEvent('offline_queue_changed', { detail: { action: 'purged_all' } });
 }
@@ -877,6 +907,7 @@ export function getBoliviaDateString(): string {
  * IndexedDB databases, localForage, and window.caches) when a new calendar day starts
  * or right before logging in, preserving only version acknowledgement & visual theme keys
  * so the device starts completely clean without any stale records.
+ * Strictly time-bounded (<= 400ms) so mobile IndexedDB locks never stall page load.
  */
 export async function performDailyDeepDeviceWipe(preserveAuth = false): Promise<void> {
     memoryQueue = [];
@@ -891,6 +922,7 @@ export async function performDailyDeepDeviceWipe(preserveAuth = false): Promise<
                 'pwa_build_timestamp',
                 'last_auto_version_reload',
                 'auto_version_reload_count',
+                'last_logged_username',
                 'darkMode',
                 'theme',
                 'rgb_theme_settings'
@@ -918,35 +950,59 @@ export async function performDailyDeepDeviceWipe(preserveAuth = false): Promise<
         } catch {}
     }
 
-    if (typeof window !== 'undefined' && 'caches' in window && window.caches) {
+    // Close any open IndexedDB handle first so deleteDatabase/clear never triggers onblocked
+    if (activeDbInstance) {
         try {
-            const cacheNames = await window.caches.keys();
-            await Promise.all(cacheNames.map(name => window.caches.delete(name)));
+            activeDbInstance.close();
         } catch {}
+        activeDbInstance = null;
     }
 
-    try {
-        const db = await openDB();
-        const stores = [STORE_NAME, ACTIONS_STORE_NAME, STATE_CACHE_STORE].filter(s => db.objectStoreNames.contains(s));
-        if (stores.length > 0) {
-            const tx = db.transaction(stores, 'readwrite');
-            for (const s of stores) {
-                try { tx.objectStore(s).clear(); } catch {}
-            }
-            await new Promise<void>((res) => {
-                tx.oncomplete = () => { db.close(); res(); };
-                tx.onerror = () => { db.close(); res(); };
-            });
-        } else {
-            db.close();
-        }
-    } catch {}
-
-    if (typeof window !== 'undefined' && 'indexedDB' in window && window.indexedDB) {
-        try {
-            window.indexedDB.deleteDatabase('GTR_POS_APP');
-        } catch {}
-    }
+    // Run Cache Storage and IndexedDB purges in parallel with a strict 400ms ceiling
+    await withTimeout(
+        Promise.allSettled([
+            (async () => {
+                if (typeof window !== 'undefined' && 'caches' in window && window.caches) {
+                    const cacheNames = await window.caches.keys();
+                    await Promise.all(cacheNames.map(name => window.caches.delete(name)));
+                }
+            })(),
+            (async () => {
+                try {
+                    const db = await openDB();
+                    const stores = [STORE_NAME, ACTIONS_STORE_NAME, STATE_CACHE_STORE].filter(s => db.objectStoreNames.contains(s));
+                    if (stores.length > 0) {
+                        const tx = db.transaction(stores, 'readwrite');
+                        for (const s of stores) {
+                            try { tx.objectStore(s).clear(); } catch {}
+                        }
+                        await new Promise<void>((res) => {
+                            tx.oncomplete = () => { try { db.close(); } catch {} res(); };
+                            tx.onerror = () => { try { db.close(); } catch {} res(); };
+                            tx.onabort = () => { try { db.close(); } catch {} res(); };
+                        });
+                    } else {
+                        db.close();
+                    }
+                } catch {}
+            })(),
+            new Promise<void>((resolve) => {
+                if (typeof window !== 'undefined' && 'indexedDB' in window && window.indexedDB) {
+                    try {
+                        const delReq = window.indexedDB.deleteDatabase('GTR_POS_APP');
+                        delReq.onsuccess = () => resolve();
+                        delReq.onerror = () => resolve();
+                        delReq.onblocked = () => resolve();
+                    } catch {
+                        resolve();
+                    }
+                } else {
+                    resolve();
+                }
+            })
+        ]),
+        400
+    );
 }
 
 
