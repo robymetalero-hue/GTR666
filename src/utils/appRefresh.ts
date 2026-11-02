@@ -11,8 +11,6 @@
 const CRITICAL_LOCAL_STORAGE_KEYS = [
     'user',
     'auth_token',
-    'gtr_offline_sales_queue',
-    'gtr_offline_actions_queue',
     'gtr_completed_operation_ids',
     'gtr_hardware_config',
     'cached_sales_tabs',
@@ -200,21 +198,24 @@ export async function hardRefreshApp(): Promise<void> {
         console.warn("[hardRefreshApp] Error clearing localStorage selectively:", lsErr);
     }
 
-    // 4. Controlled IndexedDB Clear (preserving offline_sales, offline_actions, and cached_sales_tabs)
+    // 4. Controlled IndexedDB Clear (purging offline_sales, offline_actions, and stale catalog caches in 100% Online Mode)
     if ('indexedDB' in window && window.indexedDB) {
         try {
             await new Promise<void>((resolve) => {
                 const req = window.indexedDB.open('gtr_pos_offline_db');
                 req.onsuccess = () => {
                     const db = req.result;
-                    if (db.objectStoreNames.contains('app_state_cache')) {
-                        try {
-                            const tx = db.transaction('app_state_cache', 'readwrite');
-                            const store = tx.objectStore('app_state_cache');
-                            // Only delete stale catalog caches; keep cached_sales_tabs and cached_exchange_rate intact
-                            ['cached_products', 'cached_clients', 'cached_departments'].forEach(staleKey => {
-                                try { store.delete(staleKey); } catch {}
-                            });
+                    try {
+                        const storeNames = Array.from(db.objectStoreNames).filter(
+                            n => n === 'offline_sales' || n === 'offline_actions' || n === 'app_state_cache'
+                        );
+                        if (storeNames.length > 0) {
+                            const tx = db.transaction(storeNames, 'readwrite');
+                            for (const sName of storeNames) {
+                                try {
+                                    tx.objectStore(sName).clear();
+                                } catch {}
+                            }
                             tx.oncomplete = () => {
                                 db.close();
                                 resolve();
@@ -223,11 +224,11 @@ export async function hardRefreshApp(): Promise<void> {
                                 db.close();
                                 resolve();
                             };
-                        } catch {
+                        } else {
                             db.close();
                             resolve();
                         }
-                    } else {
+                    } catch {
                         db.close();
                         resolve();
                     }
@@ -235,11 +236,11 @@ export async function hardRefreshApp(): Promise<void> {
                 req.onerror = () => resolve();
             });
 
-            // Delete non-critical third-party or temporary IndexedDB databases if listed
+            // Delete non-critical or legacy localforage IndexedDB databases so no stale product cache survives
             if (typeof window.indexedDB.databases === 'function') {
                 const dbs = await window.indexedDB.databases();
                 for (const dbInfo of dbs) {
-                    if (dbInfo.name && dbInfo.name !== 'gtr_pos_offline_db' && !dbInfo.name.includes('offline') && !dbInfo.name.includes('localforage')) {
+                    if (dbInfo.name && dbInfo.name !== 'gtr_pos_offline_db') {
                         window.indexedDB.deleteDatabase(dbInfo.name);
                     }
                 }

@@ -140,7 +140,8 @@ function AppLayout() {
         isOfflineModalOpen, setIsOfflineModalOpen, isPwaInstallModalOpen, setIsPwaInstallModalOpen,
         hasPwaUpdate, isUpdatingPwa, pwaUpdateStepMessage, pwaVersionInfo, checkForPwaUpdates, applyPwaUpdate, handlePwaPrimaryAction,
         isSupervisorUnlocked, setIsSupervisorUnlocked, supervisorInfo, setSupervisorInfo, relockKiosk, isFullscreen, toggleFullscreen, showNotification,
-        inventoryLock, isKioskLocked, requestSupervisorAuth, cart, tabs, activeTabId, clientName, clientPhone, discount, discountType, paymentMethod, pendingSalesCount, pendingActionsCount
+        inventoryLock, isKioskLocked, requestSupervisorAuth, cart, tabs, activeTabId, clientName, clientPhone, discount, discountType, paymentMethod, pendingSalesCount, pendingActionsCount,
+        fetchProducts, fetchClients, fetchExchangeRate
     } = useAppContext();
     
     const isRgb = theme === 'rgb';
@@ -248,16 +249,10 @@ function AppLayout() {
         }
     }, [user]);
 
-    // localForage persistence cache layer for user profile and minimal product catalog
+    // localForage persistence cache layer for user profile only (products are 100% live from server)
     useEffect(() => {
         initLocalForageCache();
     }, []);
-
-    useEffect(() => {
-        if (products && products.length > 0) {
-            setCachedMinimalProducts(products);
-        }
-    }, [products]);
 
     useEffect(() => {
         if (user && (user.role as string) !== 'none' && user.username !== 'none') {
@@ -550,11 +545,114 @@ function AppLayout() {
         }
     }, [view, user]);
 
+    const isUpdateGateActive = Boolean(updateAvailable || showUpdateWarning || hasPwaUpdate);
+    const isOfflineGateActive = Boolean(isOffline || (typeof navigator !== 'undefined' && !navigator.onLine));
+    const [retryingConnection, setRetryingConnection] = useState(false);
+
+    const handleRetryOnlineConnection = async () => {
+        setRetryingConnection(true);
+        try {
+            const res = await fetch(`/api/health?_t=${Date.now()}`, { cache: 'no-store' });
+            if (res.ok) {
+                await checkAppVersion();
+                await Promise.allSettled([
+                    fetchProducts(undefined, true),
+                    fetchClients(),
+                    fetchExchangeRate()
+                ]);
+            }
+        } catch (err) {
+            console.warn("Connection check failed:", err);
+        } finally {
+            setRetryingConnection(false);
+        }
+    };
+
+    const mandatoryGatesOverlay = (
+        <>
+            {/* FULL-SCREEN MANDATORY UPDATE GATE (Blocks entire app until updated to latest server version) */}
+            {isUpdateGateActive && (
+                <div className="fixed inset-0 z-[9999] bg-slate-950/95 backdrop-blur-xl flex items-center justify-center p-4 select-none">
+                    <div className="max-w-md w-full bg-slate-900 border border-indigo-500/40 rounded-3xl p-6 sm:p-8 shadow-2xl text-white flex flex-col items-center text-center gap-5">
+                        <div className="w-16 h-16 rounded-2xl bg-indigo-600/20 border border-indigo-500/40 flex items-center justify-center text-indigo-400 shadow-lg">
+                            <RefreshCw size={32} className={isRefreshing ? "animate-spin text-indigo-300" : "animate-pulse"} />
+                        </div>
+                        <div className="space-y-2">
+                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-[11px] font-black uppercase tracking-widest bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-mono">
+                                Actualización Obligatoria · v{serverVersion || pwaVersionInfo.latestVersion || CLIENT_VERSION}
+                            </span>
+                            <h2 className="text-xl sm:text-2xl font-black tracking-tight text-white">
+                                Nueva Versión del Sistema Requerida
+                            </h2>
+                            <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
+                                Para proteger la integridad de la <strong>Base de Datos Principal</strong>, el inventario y los registros de caja, es obligatorio actualizar tu dispositivo a la última versión antes de operar.
+                            </p>
+                            {releaseNotes && (
+                                <p className="text-[11px] font-mono text-indigo-200/90 bg-indigo-950/60 border border-indigo-500/20 rounded-xl px-3 py-2 mt-2">
+                                    {releaseNotes}
+                                </p>
+                            )}
+                        </div>
+                        <button
+                            type="button"
+                            disabled={isRefreshing}
+                            onClick={() => handleForceUpdate(serverVersion || pwaVersionInfo.latestVersion, serverBuildTime)}
+                            className="w-full py-3.5 px-5 bg-indigo-600 hover:bg-indigo-500 active:scale-98 text-white rounded-2xl text-xs sm:text-sm font-black uppercase tracking-wider shadow-xl shadow-indigo-600/30 transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+                        >
+                            <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""} />
+                            <span>
+                                {isRefreshing
+                                    ? "Purificando Caché y Actualizando..."
+                                    : updateCountdown !== null && updateCountdown > 0
+                                    ? `Actualizar Ahora (${updateCountdown}s)`
+                                    : "Actualizar Ahora a la Última Versión"}
+                            </span>
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* FULL-SCREEN MANDATORY ONLINE CONNECTION GATE (Blocks app when offline to prevent stale cache conflicts) */}
+            {!isUpdateGateActive && isOfflineGateActive && (
+                <div className="fixed inset-0 z-[9998] bg-slate-950/95 backdrop-blur-xl flex items-center justify-center p-4 select-none">
+                    <div className="max-w-md w-full bg-slate-900 border border-rose-500/40 rounded-3xl p-6 sm:p-8 shadow-2xl text-white flex flex-col items-center text-center gap-5">
+                        <div className="w-16 h-16 rounded-2xl bg-rose-600/20 border border-rose-500/40 flex items-center justify-center text-rose-400 shadow-lg">
+                            <AlertTriangle size={32} className="animate-bounce" />
+                        </div>
+                        <div className="space-y-2">
+                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-[11px] font-black uppercase tracking-widest bg-rose-500/20 text-rose-300 border border-rose-500/30 font-mono">
+                                Conexión en Vivo Requerida
+                            </span>
+                            <h2 className="text-xl sm:text-2xl font-black tracking-tight text-white">
+                                Sin Conexión con el Servidor Principal
+                            </h2>
+                            <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
+                                <strong>GTR POS opera exclusivamente 100% en línea</strong> contra la Base de Datos Principal para evitar registros duplicados o desajustes de stock por cachés antiguos. Conecte el dispositivo a internet para continuar.
+                            </p>
+                        </div>
+                        <button
+                            type="button"
+                            disabled={retryingConnection}
+                            onClick={handleRetryOnlineConnection}
+                            className="w-full py-3.5 px-5 bg-rose-600 hover:bg-rose-500 active:scale-98 text-white rounded-2xl text-xs sm:text-sm font-black uppercase tracking-wider shadow-xl shadow-rose-600/30 transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+                        >
+                            <RefreshCw size={16} className={retryingConnection ? "animate-spin" : ""} />
+                            <span>{retryingConnection ? "Verificando Servidor..." : "Reintentar Conexión con el Servidor"}</span>
+                        </button>
+                    </div>
+                </div>
+            )}
+        </>
+    );
+
     if (!user || (user.role as string) === 'none' || user.username === 'none') {
         return (
-            <React.Suspense fallback={<LoadingViewFallback />}>
-                <LoginScreen />
-            </React.Suspense>
+            <>
+                {mandatoryGatesOverlay}
+                <React.Suspense fallback={<LoadingViewFallback />}>
+                    <LoginScreen />
+                </React.Suspense>
+            </>
         );
     }
 
@@ -1146,6 +1244,7 @@ function AppLayout() {
 
     return (
         <div className={`flex h-screen w-full select-none ${darkMode ? 'dark bg-[#070a10] text-[#cacfd2]' : 'bg-neutral-50/40 text-slate-900'}`}>
+            {mandatoryGatesOverlay}
             
             {/* Desktop and Tablet persistent sidebar drawer */}
             <div className={`hidden md:block ${sidebarCollapsed ? 'w-[70px]' : 'w-[260px]'} h-full shrink-0 transition-all duration-200 z-30`}>

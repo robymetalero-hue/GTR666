@@ -1,81 +1,43 @@
-# Plan de Cierre y Blindaje Final en Producción — GTR POS
+# Plan de Implementación: Inicio de Sesión Diario Obligatorio, Cero Caché en Dispositivos y Conectividad Priorizada en Tiempo Real (v2.6.0)
 
-Este plan implementa las tres mejoras finales de seguridad, control de acceso y verificación de sincronización en vivo para dejar el entorno productivo (`gtr_pos.db` + Cloud Firestore) completamente blindado y sin brechas operativas.
+## 1. Diagnóstico y Objetivo Principal
+Para garantizar que ningún celular o terminal conserve datos antiguos, sesiones eternas o cachés que alteren el inventario y las ventas, implementaremos una arquitectura **Stateless Client (Cliente Sin Estado Local)** con **Re-autenticación Diaria a Medianoche** y **Canal de Conectividad Priorizado de Alta Velocidad**:
 
-## Revisión del Usuario y Decisiones Confirmadas
+1. **Vencimiento Diario de Sesión a Medianoche (`America/La_Paz`) + Limpieza Profunda Automática**:
+   - Cada sesión autenticada registrará la fecha calendario de Bolivia (`YYYY-MM-DD`, ej. `2026-11-02`) tanto en el token del servidor como en el cliente (`gtr_session_date`).
+   - Al abrir la aplicación cada nuevo día calendario (o si un dispositivo estuvo guardado días o semanas), el sistema detectará que la fecha de sesión no coincide con el día actual de Bolivia y ejecutará automáticamente una **Limpieza Profunda Total (`performDailyDeepDeviceWipe`)**:
+     - Borrado de `localStorage`, `sessionStorage`, todas las bases `IndexedDB` (`gtr_pos_offline_db`, `GTR_POS_APP`, `localforage`) y `window.caches`.
+     - Cierre inmediato de sesión y redirección obligatoria a la pantalla de **Iniciar Sesión (Usuario y Contraseña)** conectada en vivo al servidor.
 
-> [!IMPORTANT]
-> **Decisiones confirmadas por el usuario en la Fase 1:**
-> - **Alcance de Cierre (`Aplicar las 3 mejoras de blindaje y desplegar reglas`)**: Se aplicará el blindaje de permisos en servidor/cliente, la limpieza y despliegue oficial de `firestore.rules` hacia Firebase, y el verificador de sincronización en vivo con la nube.
-> - **Control de Acceso Estricto (`Solo Propietario y Administradores`)**: Tanto la edición directa de stock en productos como el reseteo/liquidación de cajas acumuladas quedan restringidos exclusivamente a usuarios con rol **`propietario`**, **`admin`** o **`administrador`**.
+2. **Eliminación Total del Login Optimista y Cachés en Celulares (`LoginScreen.tsx` & `sw.js`)**:
+   - En `src/views/LoginScreen.tsx`, se eliminará por completo el **Login Optimista** (`getCachedUserByUsername` y `setUser(optimisticUser)`), que permitía entrar a la interfaz usando perfiles guardados en caché antes de que el servidor respondiera.
+   - Ahora el inicio de sesión será **100% en línea contra `/api/auth/login`**: primero limpia cualquier rastro de caché antigua en el celular, valida usuario y contraseña directamente en la base de datos principal y recién entonces abre el sistema con los datos frescos del servidor.
+   - En `public/sw.js`, se desactivará el almacenamiento en caché de HTML/JS/CSS (`Network-Only` estricto para navegación y datos, manteniendo únicamente el receptor de notificaciones Web Push), evitando que los celulares sirvan archivos antiguos sin internet.
 
----
-
-## 1. Visión General y Objetivo Operativo
-
-- **Qué resuelve**:
-  1. **Autorización exclusiva para Propietario y Administradores**: Garantiza que el rol `propietario` tenga autoridad total reconocida en el backend (`PUT /api/products/:id` y `POST /api/cash-accounts/:sellerId/settle`) sin bloqueos falsos (`403`), mientras impide que cualquier cuenta de `vendedor` modifique existencias o reinicie cajas acumuladas.
-  2. **Endurecimiento y despliegue de `firestore.rules`**: Elimina las referencias a correos fijos no verificados (`server-sync@gtrpos.com`, `sync@gtrpos.com`) en `isSyncDaemon()`, exige `email_verified == true` para toda autoridad por correo o reclamo de sincronización, mantiene bloqueada la alteración no autorizada de stock en `products` y despliega las reglas directamente en el proyecto de Firebase.
-  3. **Verificación y Reconciliación Activa con Cloud Firestore**: Incorpora un endpoint y control de verificación inmediata en el panel de **Configuraciones** (y acceso rápido desde **Cajas**) que comprueba el conteo exacto de ventas, productos y cuentas de caja en `gtr_pos.db`, fuerza el envío de cualquier cambio local pendiente a Cloud Firestore y muestra el resumen de integridad con numerales tabulares.
-
----
-
-## 2. Experiencia de Usuario y Diseño Visual
-
-- **Flujos de Usuario Clave**:
-  1. **Reseteo de Caja Exclusivo para Propietario/Admin**: En la vista **Cajas**, únicamente el Propietario y los Administradores visualizan y ejecutan el botón **Resetear a 0.00 Bs** y el modal de **Arqueo con Conteo**. Los vendedores ven únicamente su estado informativo sin controles de autoliquidación.
-  2. **Edición de Stock Protegida por Rol**: En **Inventario**, al abrir el modal de edición de un producto existente, el campo de stock físico solo es editable para `propietario`, `admin` y `administrador` (registrando automáticamente el ajuste en el Kárdex). Para cualquier otro rol, el campo permanece bloqueado y el servidor conserva intacto el stock anterior (`oldProd.stock`).
-  3. **Verificador de Sincronización Cloud en Vivo**: En **Configuraciones**, el administrador o propietario dispone de un botón de acción directa **Verificar y Sincronizar con Cloud Firestore**, que ejecuta una conciliación completa (`pushAllLocalToFirestore`) y muestra el estado verificado de ventas, productos y cajas sin recargar la página.
-- **Identidad Visual y Disciplina de Interfaz**:
-  - **Estética SaaS de Alta Densidad**: Superficies limpias de un solo nivel de elevación con bordes sutiles de `1px` (`border-slate-200 dark:border-slate-800`), respetando el modo claro/oscuro existente.
-  - **Tipografía y Numerales Tabulares**: Todas las cifras financieras, conteos de tickets, unidades de stock y marcas de tiempo emplean `font-mono tabular-nums` para alineación vertical exacta.
-  - **Disciplina Cero-Píldoras en Metadatos**: Los indicadores informativos usan texto limpio con separadores tipográficos (`·`), reservando los botones rellenos exclusivamente para acciones interactivas reales.
+3. **Conectividad Priorizada de Baja Latencia y Sincronización Instantánea en Vivo**:
+   - **WebSocket de Reconexión Rápida y Heartbeat Ligero (`AppContext.tsx` & `server.ts`)**:
+     - Reducción del tiempo de reconexión automática de `10s` a `1.5s` con ping/pong cada `8s` y reconexión instantánea al desbloquear la pantalla del celular (`visibilitychange` / `focus` / `online`).
+   - **Difusión en Tiempo Real de Cambios de Stock y Ventas (`catalog_updated`)**:
+     - Cada vez que se registre una venta, ingreso de mercadería, edición de producto o movimiento de caja en el servidor (`server.ts`), el servidor emitirá una señal inmediata por WebSocket (`type: 'catalog_updated'`) a todos los celulares conectados para que actualicen el stock en pantalla al instante desde la base de datos principal sin esperas ni lentitud.
+   - **Protección Estricta de Operaciones de Escritura**:
+     - Toda creación/edición de productos, ventas, ingresos o salidas verificará conectividad activa con el servidor principal antes de ejecutarse, impidiendo cualquier movimiento si el dispositivo no está en línea.
 
 ---
 
-## 3. Decisiones Técnicas y de Seguridad
+## 2. Archivos a Modificar
 
-- **Decisión 1: Validación de Rol en Servidor Basada en `verifiedUser` + Invariante `K02/F10`**
-  - *Enfoque elegido*: En `PUT /api/products/:id`, el servidor identifica al usuario mediante `req.verifiedUser` (token JWT verificado) además de las cabeceras de contexto, reconociendo explícitamente a `propietario`, `admin` y `administrador` como roles autorizados para modificar stock directo. Si un usuario no administrador edita metadatos permitidos de un producto, el servidor conserva `oldProd.stock` sin alterarlo. En `POST /api/cash-accounts/:sellerId/settle`, solo `propietario`, `admin` y `administrador` pueden ejecutar la liquidación o reseteo a cero.
-  - *Por qué*: Cumple simultáneamente la política de máxima seguridad solicitada por el propietario y las pruebas de auditoría (`K02/F10`), evitando que el propietario sufra rechazos `403` al editar productos.
-- **Decisión 2: Reglas de Firestore (`firestore.rules`) Sin Correos Fijos No Verificados**
-  - *Enfoque elegido*: En `isSyncDaemon()`, se retiran los correos literales `['server-sync@gtrpos.com', 'sync@gtrpos.com']` sin verificación de correo, permitiendo únicamente tokens con `email_verified == true` y rol/claim de sincronización o el correo verificado del propietario (`robymetalero@gmail.com`), o el UID técnico autorizado del servidor. En la colección `/products/{productId}`, toda escritura o actualización exige `isAuthorizedSyncOrAdmin()` junto con `hasValidIntegrityEnvelope()` y `hasValidNumericInvariants()`.
-  - *Por qué*: Cierra los hallazgos `M13` y `L06` del informe de auditoría y garantiza que las reglas desplegadas en producción coincidan con el código auditado.
-
----
-
-## 4. Arquitectura Técnica y Flujo de Datos
-
-```
-┌────────────────────────────────────────────────────────────────────────────┐
-│                   CLIENTE POS (React + Contexto Producción)                │
-│                                                                            │
-│  ┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────┐  │
-│  │   Vista Inventario   │  │     Vista Cajas      │  │ Configuraciones  │  │
-│  │ Stock editable solo  │  │ "Resetear a 0.00 Bs" │  │ Botón Verificar  │  │
-│  │ Propietario / Admin  │  │ solo Propietario/Adm │  │ Sincronización   │  │
-│  └──────────┬───────────┘  └──────────┬───────────┘  └────────┬─────────┘  │
-└─────────────┼─────────────────────────┼───────────────────────┼────────────┘
-              │ PUT /api/products/:id   │ POST /settle          │ POST /api/sync/verify
-              ▼                         ▼                       ▼
-┌────────────────────────────────────────────────────────────────────────────┐
-│                     SERVIDOR EXPRESS + SQLITE (gtr_pos.db)                 │
-│                                                                            │
-│  1. Verifica JWT (verifiedUser): exige rol propietario | admin             │
-│  2. Transacción ACID en gtr_pos.db + Registro en Kárdex / Cash Settlements │
-│  3. Replicación inmediata pushLocalToFirestore + Escudo Anti-Sobrescritura │
-└───────────────────────────────────────┬────────────────────────────────────┘
-                                        │
-                                        ▼
-┌────────────────────────────────────────────────────────────────────────────┐
-│         CLOUD FIRESTORE (Reglas firestore.rules Desplegadas vía RPC)       │
-│  • isAuthorizedSyncOrAdmin() con email_verified == true                    │
-│  • Verificación de sobre criptográfico SHA-256 (_tx_hash, _tx_timestamp)   │
-└────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Mapa de Componentes e Interacciones
-- **Módulo de Inventario (`PUT /api/products/:id`)**: Verifica `isOwnerOrAdmin` (`propietario`, `admin`, `administrador`). Si es administrador/propietario y envía un nuevo `stock`, actualiza la existencia y escribe el registro en `inventory_audit_logs` y `system_audit_logs` dentro de la misma transacción SQLite, disparando `syncAfterWrite` hacia Firestore.
-- **Módulo de Cajas (`POST /api/cash-accounts/:sellerId/settle`)**: Verifica `isOwnerOrAdmin`. Registra el corte en `cash_settlements`, cambia los movimientos pendientes a `'liquidado'`, fija `current_balance = 0.0` con `last_settlement_at` en formato ISO canónico y empuja de inmediato los tres documentos a Firestore.
-- **Verificador de Sincronización (`POST /api/sync/verify-and-push`)**: Ejecuta `pushAllLocalToFirestore()` en el contexto de producción y devuelve el conteo actualizado de ventas, productos, clientes y cajas sincronizadas para mostrar confirmación inmediata en la interfaz.
-- **Despliegue de Reglas (`firestore.rules`)**: Tras actualizar el archivo de reglas, se ejecuta el despliegue hacia Firebase para que las reglas queden activas en la base de datos de producción.
+- **`public/version.json` y `src/utils/versionCheck.ts`**:
+  - Actualizar versión a **`2.6.0`** para forzar la actualización inmediata y limpieza de todos los celulares al conectarse.
+- **`public/sw.js`**:
+  - Convertir el Service Worker a modo **`Network-Only` (`v2.6.0-zero-cache`)**: eliminar toda caché de páginas y scripts locales al activarse y pasar todas las peticiones directamente a la red.
+- **`src/utils/offlineStorage.ts` y `src/utils/localForageCache.ts`**:
+  - Añadir `performDailyDeepDeviceWipe()` para destruir todas las bases IndexedDB (`gtr_pos_offline_db`, `GTR_POS_APP`), `window.caches`, `localStorage` y `sessionStorage` cuando inicia un nuevo día o antes de iniciar sesión.
+  - Desactivar el guardado de catálogos o perfiles cacheados en `localForageCache.ts`.
+- **`src/views/LoginScreen.tsx`**:
+  - Eliminar el login optimista basado en caché; exigir conexión activa a internet, limpiar residuos locales antes de autenticar y validar credenciales estrictamente contra `/api/auth/login` registrando la fecha del día (`gtr_session_date`).
+- **`src/context/AppContext.tsx` y `src/App.tsx`**:
+  - Verificar al iniciar la app y cada minuto si cambió el día calendario en Bolivia (`America/La_Paz`); si es un nuevo día, ejecutar `performDailyDeepDeviceWipe()` y exigir usuario y contraseña.
+  - Priorizar la conectividad en vivo con reconexión rápida de WebSocket (`1.5s`), refresco instantáneo al volver a abrir el celular (`visibilitychange`) y escucha del evento `catalog_updated` para actualizar productos y stock al instante desde el servidor.
+- **`server.ts`**:
+  - Emitir evento WebSocket `catalog_updated` tras cualquier venta o cambio de inventario para que todos los dispositivos vean el stock exacto de la base de datos principal en tiempo real.
+  - Incluir `sessionDate` (fecha actual de Bolivia `YYYY-MM-DD`) en `/api/auth/login` y validar en `/api/auth/me` que la sesión pertenezca al día en curso.

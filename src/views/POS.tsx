@@ -1014,19 +1014,7 @@ export default function POS() {
                 clientOperationId: opId
             };
             if (!navigator.onLine) {
-                await saveOfflineAction('create_pending_sale', '/api/pending-sales', 'POST', payload);
-                clearCart(true);
-                setLocalPriceInputs({});
-                setSelectedCartItemId(null);
-                setIsMobileCartOpen(false);
-                setPendingClientName("");
-                setPendingDestination("");
-                setPendingClientPhone("");
-                setPendingTransportCompany("");
-                setPendingNotes("");
-                setPendingClientOpId("");
-                setIsPendingSaleModalOpen(false);
-                showNotification("📦 Registro guardado offline. Se sincronizará automáticamente al recuperar internet.", "success");
+                showNotification("⚠️ Conexión a internet requerida: GTR POS opera exclusivamente en línea con el servidor principal para evitar conflictos de stock.", "error");
                 return;
             }
 
@@ -1741,38 +1729,26 @@ export default function POS() {
         setIsCheckoutProcessing(true);
 
         try {
+            if (!navigator.onLine) {
+                showNotification("⚠️ Sin conexión al servidor principal: Conéctate a internet para procesar la venta en vivo.", "error");
+                return;
+            }
+
             // Register client details if provided. By hitting POST /api/clients first, we retrieve/create clientId
             let clientId: any = null;
             if (clientName.trim()) {
-                if (navigator.onLine) {
-                    try {
-                        const clientRes = await fetch('/api/clients', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ name: clientName, phone: clientPhone })
-                        });
-                        if (clientRes.ok) {
-                            const clientData = await clientRes.json();
-                            clientId = clientData.id;
-                        }
-                    } catch (e) {
-                        console.error("Client registration error:", e);
+                try {
+                    const clientRes = await fetch('/api/clients', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name: clientName, phone: clientPhone })
+                    });
+                    if (clientRes.ok) {
+                        const clientData = await clientRes.json();
+                        clientId = clientData.id;
                     }
-                } else {
-                    // Generate a unique temporary client ID
-                    const tempId = `client_temp_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-                    clientId = tempId;
-
-                    // Save client creation as an offline action
-                    await saveOfflineAction(
-                        'create_client',
-                        '/api/clients',
-                        'POST',
-                        { name: clientName, phone: clientPhone },
-                        { tempId }
-                    );
-
-                    console.log(`[POS Offline] Saved offline client action with temp ID: ${tempId}`);
+                } catch (e) {
+                    console.error("Client registration error:", e);
                 }
             }
 
@@ -1880,7 +1856,7 @@ export default function POS() {
             };
 
             if (!navigator.onLine) {
-                await saveOffline();
+                showNotification("⚠️ Sin conexión al servidor principal: No se permiten ventas en modo offline para proteger el inventario y la caja.", "error");
                 return;
             }
 
@@ -1978,8 +1954,9 @@ export default function POS() {
                     showNotification(`Error: ${errData.error}`, "error");
                 }
             } catch (err) {
-                console.error("Checkout failure, saving offline:", err);
-                await saveOffline();
+                console.error("Checkout network failure:", err);
+                triggerVibrate([150, 100, 150]);
+                showNotification("⚠️ Error de conexión con el servidor principal. Verifica tu internet e intenta nuevamente (tu carrito sigue intacto).", "error");
             }
         } finally {
             setIsCheckoutProcessing(false);

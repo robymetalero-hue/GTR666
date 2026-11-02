@@ -911,9 +911,7 @@ export default function ConfiguracionesView() {
         setIsUpdatingPoints(true);
         try {
             if (!navigator.onLine) {
-                await saveOfflineAction('adjust_points', `/api/clients/${clientId}/points`, 'POST', { points });
-                showNotification?.("✓ Acción registrada offline. Los puntos se actualizarán al recuperar conexión a internet.", "success");
-                setEditingClientPointsId(null);
+                showNotification?.("⚠️ Conexión a internet requerida para actualizar puntos en la base de datos principal.", "error");
                 return;
             }
 

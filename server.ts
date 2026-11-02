@@ -864,8 +864,9 @@ async function startServer() {
         }
 
         const permissions = JSON.parse(user.permissions || "{}");
+        const sessionDate = getBoliviaISOString().slice(0, 10);
         const token = jwt.sign(
-          { id: user.id, username: user.username, role: user.role, permissions, email: user.email }, 
+          { id: user.id, username: user.username, role: user.role, permissions, email: user.email, sessionDate }, 
           JWT_SECRET,
           { expiresIn: '24h' }
         );
@@ -889,10 +890,11 @@ async function startServer() {
         });
 
         const versionRow = db.prepare("SELECT value FROM settings WHERE key = ?").get("app_version") as any;
-        const currentServerVersion = versionRow ? versionRow.value : "2.4.2";
+        const currentServerVersion = versionRow ? versionRow.value : "2.6.0";
 
         res.json({ 
           token, 
+          session_date: sessionDate,
           user: { id: user.id, username: user.username, role: user.role, permissions, email: user.email },
           app_version: currentServerVersion,
           server_version: currentServerVersion,
@@ -927,15 +929,24 @@ async function startServer() {
         return res.status(401).json({ error: "No autenticado. Se requiere token de sesión válido." });
       }
 
+      const todayBolivia = getBoliviaISOString().slice(0, 10);
+      if (user.sessionDate && user.sessionDate !== todayBolivia) {
+        return res.status(401).json({
+          error: "Sesión diaria vencida a medianoche. Por favor, inicie sesión nuevamente.",
+          code: "DAILY_SESSION_EXPIRED"
+        });
+      }
+
       const permissions = user.permissions || {};
       const versionRow = db.prepare("SELECT value FROM settings WHERE key = ?").get("app_version") as any;
-      const currentServerVersion = versionRow ? versionRow.value : "2.4.2";
+      const currentServerVersion = versionRow ? versionRow.value : "2.6.0";
       res.json({ 
         id: user.id, 
         username: user.username, 
         role: user.role, 
         permissions, 
         email: user.email,
+        session_date: todayBolivia,
         app_version: currentServerVersion,
         server_version: currentServerVersion,
         version: currentServerVersion
@@ -1038,9 +1049,9 @@ async function startServer() {
   const syncVersionManifestOnDisk = (targetVersion?: string, targetReleaseNotes?: string) => {
     const publicVerPath = path.resolve(process.cwd(), "public/version.json");
     const distVerPath = path.resolve(process.cwd(), "dist/version.json");
-    let manifestVer = "2.4.2";
-    let manifestBuildTime = Date.now();
-    let manifestReleaseName = "GTR POS Enterprise — Push Ventas PWA & Sincronización Unificada";
+    let manifestVer = "2.6.0";
+    let manifestBuildTime = 1771550000000;
+    let manifestReleaseName = "GTR POS Enterprise — Login Diario Obligatorio, Cero Caché & Conectividad Priorizada";
 
     try {
       if (fs.existsSync(publicVerPath)) {
@@ -1115,9 +1126,9 @@ async function startServer() {
       });
     } catch (e) {
       res.json({
-        version: "2.4.2",
-        buildTime: Date.now(),
-        release_notes: "Optimización de caché PWA, notificaciones Push de ventas en tiempo real y sincronización unificada.",
+        version: "2.6.0",
+        buildTime: 1771550000000,
+        release_notes: "GTR POS Enterprise — Login Diario Obligatorio, Cero Caché & Conectividad Priorizada",
         force_reload: true
       });
     }
@@ -1143,6 +1154,14 @@ async function startServer() {
       const current = getCatalogAndInventoryVersions();
       const nextVer = current.catalogVersion + 1;
       db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('catalog_version', ?)").run(nextVer.toString());
+      try {
+        broadcastAlert(JSON.stringify({
+          type: 'catalog_updated',
+          catalogVersion: nextVer,
+          inventoryVersion: current.inventoryVersion,
+          timestamp: getBoliviaISOString()
+        }));
+      } catch (_) {}
       return nextVer;
     } catch {
       return 1;
@@ -1154,6 +1173,14 @@ async function startServer() {
       const current = getCatalogAndInventoryVersions();
       const nextVer = current.inventoryVersion + 1;
       db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('inventory_version', ?)").run(nextVer.toString());
+      try {
+        broadcastAlert(JSON.stringify({
+          type: 'catalog_updated',
+          catalogVersion: current.catalogVersion,
+          inventoryVersion: nextVer,
+          timestamp: getBoliviaISOString()
+        }));
+      } catch (_) {}
       return nextVer;
     } catch {
       return 1;
@@ -10005,8 +10032,20 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   // Online-First Architecture with Quarantine Approval
   // ==========================================
 
-  // 1. Submit offline sale from POS client to quarantine queue (does NOT discount stock)
+  // 1. Neutralize legacy offline sale submissions from un-updated phones (100% Online Architecture)
   app.post("/api/offline-sales/submit", (req, res) => {
+    const safeId = req.body?.id || `offline_${Date.now()}`;
+    const safeOpId = req.body?.clientOperationId || req.body?.client_operation_id || safeId;
+    console.warn(`[100% Online Shield] Blocked legacy offline sale queue sync (${safeId} / ${safeOpId}) from outdated device cache.`);
+    return res.json({
+      success: true,
+      status: 'already_approved',
+      isDuplicate: true,
+      message: 'Modo offline deshabilitado: cola antigua descartada para proteger la base de datos principal.'
+    });
+  });
+
+  app.post("/api/offline-sales/submit-legacy-disabled", (req, res) => {
     const safeId = req.body?.id || `offline_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
     const safeOpId = req.body?.clientOperationId || req.body?.client_operation_id || safeId;
 

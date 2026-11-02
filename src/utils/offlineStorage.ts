@@ -805,3 +805,148 @@ export async function clearAllOfflineStorage(): Promise<void> {
     }
 }
 
+/**
+ * Automatically purges stale offline sales queues, offline action queues, and cached catalogs
+ * (without logging out the user) so mobile devices reconnecting after days or weeks can never
+ * overwrite or corrupt the main production database.
+ */
+export async function purgeStaleOfflineQueuesAndCaches(): Promise<void> {
+    memoryQueue = [];
+    memoryActionsQueue = [];
+    Object.keys(memoryStateCache).forEach(k => delete memoryStateCache[k]);
+
+    if (typeof window !== 'undefined' && window.localStorage) {
+        const keysToPurge = [
+            'gtr_offline_sales_queue',
+            'gtr_offline_actions_queue',
+            'cached_products',
+            'cached_clients',
+            'cached_departments',
+            'idxdb_fallback_cached_products',
+            'idxdb_fallback_cached_clients',
+            'idxdb_fallback_cached_departments'
+        ];
+        for (const k of keysToPurge) {
+            try {
+                localStorage.removeItem(k);
+            } catch {}
+        }
+    }
+
+    try {
+        const db = await openDB();
+        const stores = [STORE_NAME, ACTIONS_STORE_NAME, STATE_CACHE_STORE].filter(s => db.objectStoreNames.contains(s));
+        if (stores.length > 0) {
+            const tx = db.transaction(stores, 'readwrite');
+            for (const s of stores) {
+                try {
+                    tx.objectStore(s).clear();
+                } catch {}
+            }
+            await new Promise<void>((res) => {
+                tx.oncomplete = () => { db.close(); res(); };
+                tx.onerror = () => { db.close(); res(); };
+            });
+        } else {
+            db.close();
+        }
+    } catch {}
+
+    safeDispatchEvent('offline_queue_changed', { detail: { action: 'purged_all' } });
+}
+
+/**
+ * Returns the current calendar date in Bolivia (America/La_Paz) in YYYY-MM-DD format.
+ */
+export function getBoliviaDateString(): string {
+    try {
+        return new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'America/La_Paz',
+            year: 'numeric',
+            month: '2-digit',
+            day: '2-digit'
+        }).format(new Date());
+    } catch {
+        const now = new Date(Date.now() - 4 * 3600 * 1000);
+        return now.toISOString().slice(0, 10);
+    }
+}
+
+/**
+ * Performs a 100% deep wipe of all local device data (localStorage, sessionStorage,
+ * IndexedDB databases, localForage, and window.caches) when a new calendar day starts
+ * or right before logging in, preserving only version acknowledgement & visual theme keys
+ * so the device starts completely clean without any stale records.
+ */
+export async function performDailyDeepDeviceWipe(preserveAuth = false): Promise<void> {
+    memoryQueue = [];
+    memoryActionsQueue = [];
+    Object.keys(memoryStateCache).forEach(k => delete memoryStateCache[k]);
+
+    if (typeof window !== 'undefined' && window.localStorage) {
+        try {
+            const keysToKeep = [
+                'pwa_acknowledged_server_version',
+                'pwa_app_version',
+                'pwa_build_timestamp',
+                'last_auto_version_reload',
+                'auto_version_reload_count',
+                'darkMode',
+                'theme',
+                'rgb_theme_settings'
+            ];
+            if (preserveAuth) {
+                keysToKeep.push('user', 'auth_token', 'gtr_session_date');
+            }
+            const preserved: Record<string, string> = {};
+            for (const key of keysToKeep) {
+                const val = localStorage.getItem(key);
+                if (val !== null) preserved[key] = val;
+            }
+            localStorage.clear();
+            for (const [k, v] of Object.entries(preserved)) {
+                localStorage.setItem(k, v);
+            }
+        } catch {}
+    }
+
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+        try {
+            const lastErr = sessionStorage.getItem('gtr_login_last_error');
+            sessionStorage.clear();
+            if (lastErr) sessionStorage.setItem('gtr_login_last_error', lastErr);
+        } catch {}
+    }
+
+    if (typeof window !== 'undefined' && 'caches' in window && window.caches) {
+        try {
+            const cacheNames = await window.caches.keys();
+            await Promise.all(cacheNames.map(name => window.caches.delete(name)));
+        } catch {}
+    }
+
+    try {
+        const db = await openDB();
+        const stores = [STORE_NAME, ACTIONS_STORE_NAME, STATE_CACHE_STORE].filter(s => db.objectStoreNames.contains(s));
+        if (stores.length > 0) {
+            const tx = db.transaction(stores, 'readwrite');
+            for (const s of stores) {
+                try { tx.objectStore(s).clear(); } catch {}
+            }
+            await new Promise<void>((res) => {
+                tx.oncomplete = () => { db.close(); res(); };
+                tx.onerror = () => { db.close(); res(); };
+            });
+        } else {
+            db.close();
+        }
+    } catch {}
+
+    if (typeof window !== 'undefined' && 'indexedDB' in window && window.indexedDB) {
+        try {
+            window.indexedDB.deleteDatabase('GTR_POS_APP');
+        } catch {}
+    }
+}
+
+

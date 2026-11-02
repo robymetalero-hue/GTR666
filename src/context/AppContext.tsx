@@ -17,7 +17,10 @@ import {
     getCachedAppState,
     getOfflineStats,
     markOperationCompleted,
-    isOperationCompleted
+    isOperationCompleted,
+    purgeStaleOfflineQueuesAndCaches,
+    getBoliviaDateString,
+    performDailyDeepDeviceWipe
 } from '../utils/offlineStorage';
 import { saveHotUpdateSnapshot, hardRefreshApp } from '../utils/appRefresh';
 import {
@@ -630,11 +633,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
     };
 
-    // Initial load from local cache to prevent load delay, synchronized asynchronously with Firestore
+    // Daily Mandatory Login Check: Only restore user session if gtr_session_date matches today's calendar date in Bolivia
     const [user, setUserState] = useState<User | null>(() => {
-        const u = localStorage.getItem('user');
-        if (u) {
-            try { 
+        try {
+            const sessionDate = localStorage.getItem('gtr_session_date');
+            const todayBolivia = getBoliviaDateString();
+            if (!sessionDate || sessionDate !== todayBolivia) {
+                localStorage.removeItem('user');
+                localStorage.removeItem('auth_token');
+                localStorage.removeItem('gtr_session_date');
+                return null;
+            }
+            const u = localStorage.getItem('user');
+            if (u) {
                 const parsed = JSON.parse(u);
                 if (parsed && parsed.username !== 'none' && parsed.role !== 'none') {
                     if (parsed.permissions) {
@@ -642,9 +653,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                     }
                     return parsed; 
                 }
-            } catch { return null; }
+            }
+        } catch {
+            return null;
         }
-        return null; // Return null so the system requests Login first rather than skipping credentials
+        return null;
     });
 
     // Real-time synchronization is managed locally for each independent terminal session.
@@ -671,6 +684,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             } else {
                 localStorage.removeItem('user');
                 localStorage.removeItem('auth_token');
+                localStorage.removeItem('gtr_session_date');
                 setIsSupervisorUnlocked(false);
                 setSupervisorInfo(null);
             }
@@ -713,19 +727,57 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                         setUser(freshUser);
                     }
                 } else if (res.status === 401) {
-                    console.warn("[Sync] Auth check returned 401. Retaining local cached user session.");
+                    console.warn("[Sync] Session expired or invalidated on server (401). Executing deep wipe and requiring login.");
+                    await performDailyDeepDeviceWipe(false);
+                    sessionStorage.setItem('gtr_login_last_error', 'Tu sesión diaria ha finalizado. Por favor, ingresa tu usuario y contraseña para continuar.');
+                    setUser(null);
                 }
             } catch (err) {
                 console.warn("[Sync] Background session sync failed:", err);
             }
         };
 
-        // Run immediately on mount or user change
-        syncUserSession();
+        const checkDailyMidnightExpiration = async () => {
+            const sessionDate = localStorage.getItem('gtr_session_date');
+            const todayBolivia = getBoliviaDateString();
+            if (!sessionDate || sessionDate !== todayBolivia) {
+                console.warn(`[Daily Auth] New calendar day detected (${sessionDate} -> ${todayBolivia}). Wiping device caches and requiring daily login.`);
+                await performDailyDeepDeviceWipe(false);
+                sessionStorage.setItem('gtr_login_last_error', 'Nuevo día de operación: Se limpiaron todos los registros temporales del dispositivo. Ingrese su usuario y contraseña.');
+                setUser(null);
+                return true;
+            }
+            return false;
+        };
 
-        // Check for updates every 10 seconds for ultra-responsive updates
-        const intervalId = setInterval(syncUserSession, 10000);
-        return () => clearInterval(intervalId);
+        // Run immediately on mount or user change
+        checkDailyMidnightExpiration().then((expired) => {
+            if (!expired) syncUserSession();
+        });
+
+        const handleVis = () => {
+            if (document.visibilityState === 'visible') {
+                checkDailyMidnightExpiration().then((expired) => {
+                    if (!expired && navigator.onLine) {
+                        syncUserSession();
+                        fetchProducts(undefined, true);
+                    }
+                });
+            }
+        };
+        document.addEventListener('visibilitychange', handleVis);
+
+        // Check for updates and midnight expiration every 10 seconds
+        const intervalId = setInterval(async () => {
+            const expired = await checkDailyMidnightExpiration();
+            if (!expired) {
+                syncUserSession();
+            }
+        }, 10000);
+        return () => {
+            document.removeEventListener('visibilitychange', handleVis);
+            clearInterval(intervalId);
+        };
     }, [user?.id]);
 
     const [darkMode, setDarkMode] = useState(() => {
@@ -937,38 +989,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             return t;
         }));
     }, [cart, clientName, clientPhone, discount, discountType, paymentMethod, activeTabId]);
-    const [products, setProducts] = useState<Product[]>(() => {
-        try {
-            const cached = localStorage.getItem('cached_products');
-            if (cached) {
-                const parsed = JSON.parse(cached);
-                if (Array.isArray(parsed) && parsed.length > 0) {
-                    // Cache Health Shield: If cached catalog has an abnormal zero-stock ratio (e.g. > 60% zero stock when items >= 30),
-                    // discard the tainted zero-stock cache from previous sessions to guarantee real quantities from server.
-                    const zeroCount = parsed.filter((p: any) => Number(p.stock) === 0).length;
-                    if (parsed.length >= 30 && zeroCount / parsed.length > 0.6) {
-                        console.warn("[Cache Shield] Stale zero-stock cache detected from previous session. Bypassing in favor of clean verified server catalog.");
-                        return [];
-                    }
-                    return parsed;
-                }
-            }
-            return [];
-        } catch {
-            return [];
-        }
-    });
+    const [products, setProducts] = useState<Product[]>([]);
     const [hasMoreProducts, setHasMoreProducts] = useState(false);
     const [totalProducts, setTotalProducts] = useState(0);
     const [productsOffset, setProductsOffset] = useState(0);
-    const [clients, setClients] = useState<Client[]>(() => {
-        try {
-            const cached = localStorage.getItem('cached_clients');
-            return cached ? JSON.parse(cached) : [];
-        } catch {
-            return [];
-        }
-    });
+    const [clients, setClients] = useState<Client[]>([]);
     const [exchangeRate, setExchangeRateInternal] = useState<number>(() => {
         try {
             const cached = localStorage.getItem('cached_exchange_rate');
@@ -1023,14 +1048,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
     });
 
-    const [departments, setDepartments] = useState<Department[]>(() => {
-        try {
-            const cached = localStorage.getItem('cached_departments');
-            return cached ? JSON.parse(cached) : [];
-        } catch {
-            return [];
-        }
-    });
+    const [departments, setDepartments] = useState<Department[]>([]);
 
     const roundBs = (amount: number): number => {
         if (isNaN(amount) || amount === null || amount === undefined) return 0;
@@ -1188,52 +1206,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         root.style.setProperty('--rgb-direction', direction);
     }, [rgbSettings]);
 
-    // Pre-hydrate state from localForage & IndexedDB instantly on component mount
+    // Automatically purge stale offline queues and enforce daily deep device wipe on startup
     useEffect(() => {
-        const prehydrateFromLocalCache = async () => {
+        const initOnlineSession = async () => {
             try {
-                const [
-                    cachedLfUser,
-                    cachedLfProds,
-                    cachedProds, 
-                    cachedClis, 
-                    cachedDeps, 
-                    cachedRcpt, 
-                    cachedExRate, 
-                    cachedSalesTabs
-                ] = await Promise.all([
-                    getCachedUserProfile(),
-                    getCachedMinimalProducts(),
-                    getCachedAppState<Product[]>('cached_products'),
-                    getCachedAppState<Client[]>('cached_clients'),
-                    getCachedAppState<Department[]>('cached_departments'),
-                    getCachedAppState<ReceiptTemplate>('cached_receipt_template'),
-                    getCachedAppState<number>('cached_exchange_rate'),
-                    getCachedAppState<SaleTab[]>('cached_sales_tabs')
-                ]);
-
-                if (cachedLfUser && (!user || user.username === 'none')) {
-                    setUserState(cachedLfUser);
+                const sessionDate = localStorage.getItem('gtr_session_date');
+                const todayBolivia = getBoliviaDateString();
+                if (!sessionDate || sessionDate !== todayBolivia) {
+                    await performDailyDeepDeviceWipe(false);
+                    setUserState(null);
+                    return;
                 }
-
-                const resolvedProds = (cachedLfProds && cachedLfProds.length > 0) 
-                    ? cachedLfProds 
-                    : (cachedProds && cachedProds.length > 0 ? cachedProds : null);
-
-                if (resolvedProds && resolvedProds.length > 0) {
-                    setProducts(resolvedProds);
-                    setTotalProducts(resolvedProds.length);
-                }
-                if (cachedClis && cachedClis.length > 0) setClients(cachedClis);
-                if (cachedDeps && cachedDeps.length > 0) setDepartments(cachedDeps);
-                if (cachedRcpt) setReceiptTemplate(cachedRcpt);
-                if (cachedExRate) setExchangeRate(cachedExRate);
-                if (cachedSalesTabs && cachedSalesTabs.length > 0) setTabs(cachedSalesTabs);
+                await purgeStaleOfflineQueuesAndCaches();
             } catch (err) {
-                console.warn("[Cache] Hydration error:", err);
+                console.warn("[Online Init] Session init warning:", err);
             }
         };
-        prehydrateFromLocalCache();
+        initOnlineSession();
     }, []);
 
     useEffect(() => {
@@ -1353,26 +1342,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const fetchDepartments = async () => {
         try {
-            const res = await fetchWithRetry('/api/departments');
+            const res = await fetchWithRetry(`/api/departments?_t=${Date.now()}`, { cache: 'no-store' });
             const data = await res.json();
-            setDepartments(data);
-            localStorage.setItem('cached_departments', JSON.stringify(data));
-            cacheAppState('cached_departments', data);
+            setDepartments(Array.isArray(data) ? data : []);
         } catch (e) {
-            console.warn("Failed to fetch departments, using cached value:", e);
-            const cachedIdx = await getCachedAppState<Department[]>('cached_departments');
-            if (cachedIdx && cachedIdx.length > 0) {
-                setDepartments(cachedIdx);
-            } else {
-                const cached = localStorage.getItem('cached_departments');
-                if (cached) {
-                    try {
-                        setDepartments(JSON.parse(cached));
-                    } catch (parseErr) {
-                        console.error("Failed to parse cached departments:", parseErr);
-                    }
-                }
-            }
+            console.warn("Failed to fetch departments from server:", e);
         }
     };
 
@@ -1448,15 +1422,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             setProducts(prods);
             setTotalProducts(total);
             setHasMoreProducts(false);
-            safeLocalStorageSetItem('cached_products', JSON.stringify(prods));
-            cacheAppState('cached_products', prods);
-            setCachedMinimalProducts(prods).catch(() => {});
             setIsOffline(false);
 
             // Update local versions via fallback endpoint ONLY if response headers were omitted
             if (!catHeader || !invHeader) {
                 try {
-                    fetch(`/api/catalog/version?_t=${Date.now()}`)
+                    fetch(`/api/catalog/version?_t=${Date.now()}`, { cache: 'no-store' })
                         .then(r => r.json())
                         .then(v => {
                             if (v && v.catalogVersion && v.inventoryVersion) {
@@ -1468,44 +1439,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 } catch (_) {}
             }
         } catch (e) {
-            console.warn("Failed to fetch products, evaluating cached fallback:", e);
-            const isZeroTainted = (items: Product[]) => {
-                if (!items || items.length < 30) return false;
-                const zeroCount = items.filter(p => Number(p.stock) === 0).length;
-                return (zeroCount / items.length) > 0.6;
-            };
-
-            const userRole = String(user?.role || '').toLowerCase();
-            const userPerms = (user?.permissions || {}) as Record<string, any>;
-            const canSeeCost = userRole === 'admin' || userRole === 'administrador' || userRole === 'propietario' || !!userPerms.view_costs || !!userPerms.view_purchase_prices;
-
-            const sanitizeIfSeller = (items: Product[]): Product[] => {
-                if (canSeeCost) return items;
-                return items.map(p => ({ ...p, price_cost: undefined }));
-            };
-
-            const cachedIdx = await getCachedAppState<Product[]>('cached_products');
-            if (cachedIdx && cachedIdx.length > 0 && !isZeroTainted(cachedIdx)) {
-                const finalProds = sanitizeIfSeller(cachedIdx);
-                setProducts(finalProds);
-                setTotalProducts(finalProds.length);
-                setHasMoreProducts(false);
-            } else {
-                const cached = localStorage.getItem('cached_products');
-                if (cached) {
-                    try {
-                        const parsed = JSON.parse(cached);
-                        if (!isZeroTainted(parsed)) {
-                            const finalProds = sanitizeIfSeller(parsed);
-                            setProducts(finalProds);
-                            setTotalProducts(finalProds.length);
-                            setHasMoreProducts(false);
-                        }
-                    } catch (parseErr) {
-                        console.error("Failed to parse cached products:", parseErr);
-                    }
-                }
-            }
+            console.warn("Failed to fetch live products from server (100% Online Mode):", e);
         }
     };
 
@@ -1547,27 +1481,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const fetchClients = async () => {
         try {
-            const res = await fetchWithRetry('/api/clients');
+            const res = await fetchWithRetry(`/api/clients?_t=${Date.now()}`, { cache: 'no-store' });
             const data = await res.json();
-            setClients(data);
-            localStorage.setItem('cached_clients', JSON.stringify(data));
-            cacheAppState('cached_clients', data);
+            setClients(Array.isArray(data) ? data : []);
             setIsOffline(false);
         } catch (e) {
-            console.warn("Failed to fetch clients, using cached value:", e);
-            const cachedIdx = await getCachedAppState<Client[]>('cached_clients');
-            if (cachedIdx && cachedIdx.length > 0) {
-                setClients(cachedIdx);
-            } else {
-                const cached = localStorage.getItem('cached_clients');
-                if (cached) {
-                    try {
-                        setClients(JSON.parse(cached));
-                    } catch (parseErr) {
-                        console.error("Failed to parse cached clients:", parseErr);
-                    }
-                }
-            }
+            console.warn("Failed to fetch live clients from server:", e);
         }
     };
 
@@ -2065,10 +1984,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setIsSyncing(true);
 
         try {
-            const tempIdMapping: { [key: string]: any } = {};
-            // First synchronize general actions, then sales with shared mapping
-            await syncOfflineActions(tempIdMapping);
-            await syncOfflineSales(tempIdMapping);
+            // 100% Online Architecture: Purge any legacy device offline queues so stale phones never overwrite the main DB
+            await purgeStaleOfflineQueuesAndCaches();
 
             console.log("[PWA Sync] Syncing with Google Cloud Firestore in real-time...");
             const token = localStorage.getItem('auth_token');
@@ -2165,6 +2082,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                         }
                     } else if (data.type === 'app_update' && data.version) {
                         window.dispatchEvent(new CustomEvent('app-update-pushed', { detail: data }));
+                    } else if (data.type === 'catalog_updated' || data.type === 'inventory_reconciled' || data.type === 'low_stock_alert') {
+                        sessionStorage.removeItem('last_catalog_version');
+                        sessionStorage.removeItem('last_inventory_version');
+                        fetchProducts(undefined, true);
                     } else if (data.type === 'sale_push_notification' && isOwnerOrAdminForPush(user)) {
                         safeDispatchEvent('triggerNotification', {
                             detail: {
@@ -2172,6 +2093,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                                 type: 'success'
                             }
                         });
+                        // Also refresh catalog and cash state immediately when a sale occurs
+                        sessionStorage.removeItem('last_inventory_version');
+                        fetchProducts(undefined, true);
                         // Also show OS/PWA notification if permission is granted and Service Worker push did not already show this tag
                         if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
                             setTimeout(async () => {
@@ -2197,7 +2121,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             };
 
             socket.onclose = () => {
-                reconnectTimeout = setTimeout(connect, 10000);
+                reconnectTimeout = setTimeout(connect, 1500);
             };
 
             socket.onerror = () => {};
@@ -2205,7 +2129,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         connect();
 
+        const handleFastReconnect = () => {
+            if (navigator.onLine && (!socket || socket.readyState > 1)) {
+                if (reconnectTimeout) clearTimeout(reconnectTimeout);
+                connect();
+            }
+        };
+        window.addEventListener('online', handleFastReconnect);
+
         return () => {
+            window.removeEventListener('online', handleFastReconnect);
             if (socket) socket.close();
             if (reconnectTimeout) clearTimeout(reconnectTimeout);
         };
@@ -2279,7 +2212,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
 
         checkHealth();
-        timer = setInterval(checkHealth, 15000);
+        timer = setInterval(checkHealth, 8000);
 
         return () => {
             isCancelled = true;

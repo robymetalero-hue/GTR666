@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan de cierre final de blindaje en producción para GTR POS: restricción exclusiva a Propietario y Administradores para edición directa de stock y reseteo de cajas, endurecimiento y despliegue de reglas de seguridad de Firestore (firestore.rules), y verificación/sincronización inmediata con Cloud Firestore.",
-  "updatedAt":  "2026-10-31T07:47:19.576458698Z",
-  "requestFeedback":  true,
-  "userFacing":  true
+  "summary": "Plan de implementación para Inicio de Sesión Diario Obligatorio (vencimiento a medianoche con limpieza profunda total del dispositivo), Eliminación de Login Optimista/Caché Local (Cero Caché en Celulares) y Conectividad Priorizada de Baja Latencia en Tiempo Real (v2.6.0).",
+  "updatedAt": "2026-11-02T14:23:00.323943385Z",
+  "requestFeedback": true,
+  "userFacing": true
 }

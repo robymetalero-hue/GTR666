@@ -1,22 +1,24 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
-    Lock, Eye, EyeOff, Sparkles, ShieldAlert, 
+    Lock, Eye, EyeOff, ShieldAlert, 
     RefreshCw, UserCheck, KeySquare, Store, Zap
 } from 'lucide-react';
 import { useAppContext } from '../context/AppContext';
 import { validateVersionOnLogin, CLIENT_VERSION } from '../utils/versionCheck';
 import { hardRefreshApp } from '../utils/appRefresh';
 import { 
-    getCachedUserByUsername, 
     setCachedUserProfile, 
     setCachedAuthToken, 
     clearAuthCache 
 } from '../utils/localForageCache';
-import { User } from '../types';
+import {
+    getBoliviaDateString,
+    performDailyDeepDeviceWipe
+} from '../utils/offlineStorage';
 
 export default function LoginScreen() {
-    const { setUser } = useAppContext();
+    const { setUser, fetchProducts, fetchClients, fetchExchangeRate, fetchDepartments } = useAppContext();
     const [username, setUsername] = useState(() => {
         return localStorage.getItem('last_logged_username') || '';
     });
@@ -25,7 +27,6 @@ export default function LoginScreen() {
     
     // Status states
     const [loading, setLoading] = useState(false);
-    const [isOptimisticValidating, setIsOptimisticValidating] = useState(false);
     const [error, setError] = useState<string | null>(() => {
         const savedErr = sessionStorage.getItem('gtr_login_last_error');
         if (savedErr) {
@@ -36,7 +37,6 @@ export default function LoginScreen() {
     });
 
     useEffect(() => {
-        // Pre-fill username from last active session if available
         const lastUser = localStorage.getItem('last_logged_username');
         if (lastUser && !username) {
             setUsername(lastUser);
@@ -53,138 +53,98 @@ export default function LoginScreen() {
             return;
         }
 
+        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+            setError("Conexión a internet requerida: Conecte su dispositivo para iniciar sesión contra la Base de Datos Principal.");
+            return;
+        }
+
         setLoading(true);
         setError(null);
         sessionStorage.removeItem('gtr_login_last_error');
 
-        // Check if we have cached profile for this user in localForage
-        let isKnownCachedUser = false;
-        let optimisticUser: User | null = null;
-
         try {
-            const cached = await getCachedUserByUsername(cleanUsername);
-            if (cached && cached.username.toLowerCase() === cleanUsername.toLowerCase()) {
-                isKnownCachedUser = true;
-                optimisticUser = cached;
-            }
-        } catch {}
+            // 1. Deep wipe all old device storage, caches, and queues before authenticating online
+            await performDailyDeepDeviceWipe(false);
+            localStorage.setItem('last_logged_username', cleanUsername);
 
-        if (!optimisticUser) {
-            const isAdminLogin = cleanUsername.toLowerCase() === 'admin';
-            optimisticUser = {
-                id: 1,
-                username: cleanUsername,
-                role: isAdminLogin ? 'admin' : 'trabajador',
-                permissions: isAdminLogin ? {
-                    view_reports: true,
-                    edit_prices: true,
-                    view_inventory: true,
-                    apply_discounts: true,
-                    manage_credits: true,
-                    manage_caja: true,
-                    delete_sales: true,
-                    view_sales: true,
-                    access_ai: true
-                } : {
-                    view_reports: false,
-                    edit_prices: false,
-                    view_inventory: false,
-                    apply_discounts: false,
-                    manage_credits: false,
-                    manage_caja: true,
-                    delete_sales: false,
-                    view_sales: true,
-                    access_ai: false
+            // 2. Authoritative 100% Online Authentication against the main server database
+            const res = await fetch('/api/auth/login', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Cache-Control': 'no-cache, no-store, must-revalidate'
+                },
+                cache: 'no-store',
+                body: JSON.stringify({ username: cleanUsername, password: cleanPassword })
+            });
+
+            const contentType = res.headers.get("content-type") || "";
+            let data: any = null;
+
+            if (contentType.includes("application/json")) {
+                try {
+                    data = await res.json();
+                } catch {
+                    data = null;
                 }
-            };
-        }
+            }
 
-        // OPTIMISTIC LOADING: Instantly transition to app UI while validating in background
-        setIsOptimisticValidating(true);
-        setUser(optimisticUser);
-        localStorage.setItem('last_logged_username', cleanUsername);
+            if (res.ok && data && data.user) {
+                const todayBolivia = data.session_date || getBoliviaDateString();
+                localStorage.setItem('gtr_session_date', todayBolivia);
+                localStorage.setItem('last_logged_username', cleanUsername);
 
-        // Perform authoritative validation in the background
-        (async () => {
-            try {
-                const res = await fetch('/api/auth/login', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username: cleanUsername, password: cleanPassword })
+                if (data.token) {
+                    await setCachedAuthToken(data.token);
+                }
+
+                await setCachedUserProfile(data.user);
+
+                // Check server version before entering
+                const versionCheck = await validateVersionOnLogin(data, {
+                    clientVersionOverride: CLIENT_VERSION,
+                    onVersionMismatch: (result) => {
+                        console.warn(`[Login] Client is outdated: local v${result.clientVersion} vs server v${result.serverVersion}`);
+                    }
                 });
 
-                const contentType = res.headers.get("content-type") || "";
-                let data: any = null;
-
-                if (contentType.includes("application/json")) {
-                    try {
-                        data = await res.json();
-                    } catch {
-                        data = null;
-                    }
+                if (versionCheck.isOutdated) {
+                    sessionStorage.setItem('gtr_login_last_error', `Nueva versión disponible (v${versionCheck.serverVersion}). Actualizando terminal...`);
+                    await hardRefreshApp();
+                    return;
                 }
 
-                if (res.ok && data && data.user) {
-                    // Authoritative login success: update token, user profile and localForage
-                    if (data.token) {
-                        await setCachedAuthToken(data.token);
-                    }
+                setUser(data.user);
 
-                    await setCachedUserProfile(data.user);
-                    setUser(data.user);
+                // Immediately pull fresh live catalog and data from the main database
+                Promise.allSettled([
+                    fetchProducts(undefined, true),
+                    fetchClients(),
+                    fetchExchangeRate(),
+                    fetchDepartments()
+                ]);
+            } else {
+                await clearAuthCache();
+                setUser(null);
 
-                    // Check server version
-                    const versionCheck = await validateVersionOnLogin(data, {
-                        clientVersionOverride: CLIENT_VERSION,
-                        onVersionMismatch: (result) => {
-                            console.warn(`[Login] Client is outdated: local v${result.clientVersion} vs server v${result.serverVersion}`);
-                        }
-                    });
-
-                    if (versionCheck.isOutdated) {
-                        sessionStorage.setItem('gtr_login_last_error', `Nueva versión disponible (v${versionCheck.serverVersion}). Actualizando terminal...`);
-                        await hardRefreshApp();
-                        return;
-                    }
-                } else {
-                    // Authoritative login rejected: Roll back optimistic session
-                    await clearAuthCache();
-                    setUser(null);
-
-                    let errMsg = "Credenciales inválidas de terminal de caja.";
-                    if (data && data.error) {
-                        errMsg = data.error;
-                    } else if (res.status === 502 || res.status === 503 || res.status === 504) {
-                        errMsg = "El servidor fiscal se está actualizando o reiniciando. Reintente en unos segundos.";
-                    } else if (res.status === 404) {
-                        errMsg = "Servicio fiscal no disponible temporalmente.";
-                    }
-                    sessionStorage.setItem('gtr_login_last_error', errMsg);
-                    setError(errMsg);
+                let errMsg = "Credenciales inválidas de terminal de caja.";
+                if (data && data.error) {
+                    errMsg = data.error;
+                } else if (res.status === 502 || res.status === 503 || res.status === 504) {
+                    errMsg = "El servidor fiscal se está actualizando o reiniciando. Reintente en unos segundos.";
+                } else if (res.status === 404) {
+                    errMsg = "Servicio fiscal no disponible temporalmente.";
                 }
-            } catch (err: any) {
-                // If network is disconnected or server is temporarily unreachable
-                if (isKnownCachedUser) {
-                    // Retain cached session in offline mode
-                    window.dispatchEvent(new CustomEvent('triggerNotification', {
-                        detail: {
-                            message: 'Modo Offline: Sesión iniciada con credenciales cacheadas localmente.',
-                            type: 'warn'
-                        }
-                    }));
-                } else {
-                    // Rollback if there is no offline cache for this operator
-                    await clearAuthCache();
-                    setUser(null);
-                    const errMsg = "Error de conexión con el servidor fiscal: " + (err?.message || "Servicio no disponible");
-                    sessionStorage.setItem('gtr_login_last_error', errMsg);
-                    setError(errMsg);
-                }
-            } finally {
-                setLoading(false);
-                setIsOptimisticValidating(false);
+                setError(errMsg);
             }
-        })();
+        } catch (err: any) {
+            await clearAuthCache();
+            setUser(null);
+            const errMsg = "Error de conexión en vivo con el servidor principal: Verifique su acceso a internet e intente nuevamente.";
+            setError(errMsg);
+        } finally {
+            setLoading(false);
+        }
     };
 
     return (
@@ -212,7 +172,7 @@ export default function LoginScreen() {
                         <div className="flex items-center justify-center gap-1.5 mt-1">
                             <Zap size={11} className="text-emerald-500" />
                             <p className="text-[10px] uppercase font-black tracking-widest text-[#6366f1] pr-0.5">
-                                Acceso Instantáneo POS & Sincronización
+                                Conexión 100% en Línea · Sesión Diaria Verificada
                             </p>
                         </div>
                     </div>
@@ -298,12 +258,12 @@ export default function LoginScreen() {
                         {loading ? (
                             <>
                                 <RefreshCw size={13} className="animate-spin" />
-                                <span>Iniciando Sesión Instantánea...</span>
+                                <span>Limpiando Caché y Validando en Servidor...</span>
                             </>
                         ) : (
                             <>
                                 <KeySquare size={13} />
-                                <span>Ingresar al Sistema</span>
+                                <span>Ingresar al Sistema en Línea</span>
                             </>
                         )}
                     </button>
@@ -312,10 +272,10 @@ export default function LoginScreen() {
                 {/* Footer terms / secure notice */}
                 <div className="mt-8 pt-4 border-t border-slate-100 dark:border-slate-850/60 text-center flex flex-col gap-0.5 pointer-events-none">
                     <span className="text-[9px] uppercase font-black text-slate-405 dark:text-slate-504 tracking-wider leading-none">
-                        GTR POS SECURE v2.0
+                        GTR POS SECURE v{CLIENT_VERSION}
                     </span>
                     <span className="text-[8px] font-bold text-slate-400 leading-none mt-1">
-                        Caché local persistente con localForage & Validación en segundo plano
+                        Cero Caché Local · Fuente Única de Verdad en Servidor Principal
                     </span>
                 </div>
             </motion.div>
