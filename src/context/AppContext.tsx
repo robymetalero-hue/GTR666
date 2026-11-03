@@ -169,6 +169,7 @@ interface AppContextType {
     fetchExchangeRate: () => Promise<void>;
     roundBs: (num: number) => number;
     isOffline: boolean;
+    setIsOffline: React.Dispatch<React.SetStateAction<boolean>>;
     receiptTemplate: ReceiptTemplate;
     updateReceiptTemplate: (tpl: ReceiptTemplate) => Promise<void>;
     fetchReceiptTemplate: () => Promise<void>;
@@ -2191,18 +2192,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
     }, []);
 
-    // Periodic network health check to measure latency and detect reconnection
+    // Periodic network health check to measure latency and detect reconnection immediately on wake-up
     useEffect(() => {
         let timer: any = null;
         let isCancelled = false;
+        let consecutiveFailures = 0;
 
         const checkHealth = async () => {
+            if (typeof navigator !== 'undefined' && !navigator.onLine) {
+                if (!isCancelled) {
+                    setNetworkLatency(null);
+                    setNetworkQuality('offline');
+                    setIsOffline(true);
+                }
+                return;
+            }
+
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 6000);
+            const timeoutId = setTimeout(() => controller.abort(), 3500);
             const startTime = performance.now();
 
             try {
-                const res = await fetch('/api/health', {
+                const res = await fetch(`/api/health?_t=${Date.now()}`, {
                     method: 'GET',
                     signal: controller.signal,
                     cache: 'no-store'
@@ -2212,6 +2223,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
                 if (!isCancelled) {
                     if (res.ok) {
+                        consecutiveFailures = 0;
                         setNetworkLatency(latency);
                         const quality = latency > 600 ? 'unstable' : 'online';
                         setNetworkQuality(quality);
@@ -2223,21 +2235,52 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             } catch (err: any) {
                 clearTimeout(timeoutId);
                 if (!isCancelled) {
-                    setNetworkLatency(null);
-                    setNetworkQuality('offline');
-                    setIsOffline(true);
+                    // When screen is off or tab is in background, mobile browsers abort in-flight fetches.
+                    // Do not lock the UI with a false-positive offline state while hidden unless navigator.onLine is false.
+                    const isHidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+                    const browserOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+                    if (isHidden && !browserOffline) {
+                        return;
+                    }
+                    consecutiveFailures++;
+                    if (browserOffline || consecutiveFailures >= 2) {
+                        setNetworkLatency(null);
+                        setNetworkQuality('offline');
+                        setIsOffline(true);
+                    } else {
+                        setNetworkQuality('unstable');
+                        // Retry once quickly (800ms) to confirm whether it was just a wake-up socket reset
+                        setTimeout(() => {
+                            if (!isCancelled) checkHealth();
+                        }, 800);
+                    }
                 }
             }
         };
 
+        const handleWakeUpOrFocus = () => {
+            if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+            checkHealth();
+        };
+
         checkHealth();
-        timer = setInterval(checkHealth, 8000);
+        const intervalMs = isOffline ? 2500 : 8000;
+        timer = setInterval(checkHealth, intervalMs);
+
+        window.addEventListener('focus', handleWakeUpOrFocus);
+        window.addEventListener('pageshow', handleWakeUpOrFocus);
+        window.addEventListener('online', handleWakeUpOrFocus);
+        document.addEventListener('visibilitychange', handleWakeUpOrFocus);
 
         return () => {
             isCancelled = true;
             if (timer) clearInterval(timer);
+            window.removeEventListener('focus', handleWakeUpOrFocus);
+            window.removeEventListener('pageshow', handleWakeUpOrFocus);
+            window.removeEventListener('online', handleWakeUpOrFocus);
+            document.removeEventListener('visibilitychange', handleWakeUpOrFocus);
         };
-    }, []);
+    }, [isOffline]);
 
     // Auto trigger sync when the system transitions to online
     useEffect(() => {
@@ -2329,6 +2372,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             fetchExchangeRate,
             roundBs,
             isOffline,
+            setIsOffline,
             networkLatency,
             networkQuality,
             pendingSalesCount,

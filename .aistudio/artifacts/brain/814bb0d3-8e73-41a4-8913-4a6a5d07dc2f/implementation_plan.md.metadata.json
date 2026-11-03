@@ -1,6 +1,6 @@
 {
-  "summary": "Plan actualizado con preservación garantizada del carrito activo (10-15+ ítems) ante cortes temporales de internet, reconciliación automática de stock en vivo al reconectar y carga instantánea (<1s).",
-  "updatedAt": "2026-11-02T15:07:18.211831674Z",
+  "summary": "Plan quirurgico para lograr reconexion instantanea (<300ms) al responder /api/health o al despertar la pantalla de la tablet/celular, eliminando la espera de 11+ segundos en 'Verificando Servidor...' y los falsos bloqueos por suspension en segundo plano.",
+  "updatedAt": "2026-11-03T12:28:23.235122491Z",
   "requestFeedback": true,
   "userFacing": true
 }

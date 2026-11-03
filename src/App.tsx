@@ -136,7 +136,7 @@ const AnimatedMenuIcon = ({ Icon, targetView, isActive }: AnimatedMenuIconProps)
 
 function AppLayout() {
     const { 
-        darkMode, setDarkMode, user, setUser, view, setView, isOffline, isSyncing, triggerOnlineSync,
+        darkMode, setDarkMode, user, setUser, view, setView, isOffline, setIsOffline, isSyncing, triggerOnlineSync,
         isAutonomousTesting, setIsAutonomousTesting, autonomousStep, setAutonomousStep, autonomousLogs, setAutonomousLogs,
         products, pwaPrompt, installPWA, isPwaInstalled, isInitializing, kioskMode, theme, setTheme, syncError,
         isOfflineModalOpen, setIsOfflineModalOpen, isPwaInstallModalOpen, setIsPwaInstallModalOpen,
@@ -554,14 +554,41 @@ function AppLayout() {
     const handleRetryOnlineConnection = async () => {
         setRetryingConnection(true);
         try {
-            const res = await fetch(`/api/health?_t=${Date.now()}`, { cache: 'no-store' });
-            if (res.ok) {
-                await checkAppVersion();
-                await Promise.allSettled([
-                    fetchProducts(undefined, true),
-                    fetchClients(),
-                    fetchExchangeRate()
-                ]);
+            const pingOnce = async (timeoutMs: number) => {
+                const controller = new AbortController();
+                const tId = setTimeout(() => controller.abort(), timeoutMs);
+                try {
+                    const r = await fetch(`/api/health?_t=${Date.now()}`, {
+                        cache: 'no-store',
+                        signal: controller.signal
+                    });
+                    clearTimeout(tId);
+                    return r.ok;
+                } catch (e) {
+                    clearTimeout(tId);
+                    return false;
+                }
+            };
+
+            // First fast attempt (2.5s), plus immediate fallback if mobile socket was stale after sleep
+            let ok = await pingOnce(2500);
+            if (!ok) {
+                ok = await pingOnce(3500);
+            }
+
+            if (ok) {
+                // Immediately dismiss the blocking modal (<300ms) so the user can operate right away
+                setIsOffline(false);
+                setRetryingConnection(false);
+
+                // Refresh version, products, exchange rate, and clients (if logged in) non-blockingly in the background
+                checkAppVersion().catch(() => {});
+                fetchProducts(undefined, true).catch(() => {});
+                fetchExchangeRate().catch(() => {});
+                if (user && (user.role as string) !== 'none' && user.username !== 'none') {
+                    fetchClients().catch(() => {});
+                }
+                return;
             }
         } catch (err) {
             console.warn("Connection check failed:", err);

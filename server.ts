@@ -26,7 +26,7 @@ import {
 } from "./database.ts";
 import { hashPassword, verifyPassword, isPasswordHashed, getJwtSecret } from "./authSecurity.ts";
 import { normalizeProductName } from "./src/utils/productUtils.ts";
-import { pullFirestoreToLocal, pushFirestoreToLocal, startPeriodicLedgerReconciliation, syncAfterWrite, pushAllLocalToFirestore, firestore, clearAllFirestoreAndLocalData, recordDeletion, deleteFromFirestore, reconcileCatalogStockWithLedger, getCollectionName, getSyncDeduplicationStats, shouldPushRecordToCloud } from "./firebaseSync.ts";
+import { pullFirestoreToLocal, pushFirestoreToLocal, startPeriodicLedgerReconciliation, syncAfterWrite, pushAllLocalToFirestore, firestore, clearAllFirestoreAndLocalData, recordDeletion, deleteFromFirestore, reconcileCatalogStockWithLedger, getCollectionName, getSyncDeduplicationStats, shouldPushRecordToCloud, ensureCloudHydrated, syncSpecificProductsFromCloud } from "./firebaseSync.ts";
 import { getProductForensicTimeline, auditEntireCatalog, searchProductsForAudit, generateForensicMarkdownReport, getAvailableAuditPeriods, auditDatabaseByPeriod, reconcileProductDiscrepancy } from "./forensicAuditEngine.ts";
 import { requestContextStorage, getRecentFirestoreLedger, getFirestoreLedgerStats, validateFirestoreWriteOperation } from "./firestoreIntegrityMiddleware.ts";
 import { collection, getDocs, doc, getDoc, setDoc } from "firebase/firestore";
@@ -587,14 +587,25 @@ async function startServer() {
   let lastMiddlewarePullTimestamp = Date.now();
   const MIDDLEWARE_PULL_COOLDOWN_MS = 5 * 60 * 1000;
 
-  app.use("/api", (req, res, next) => {
+  app.use("/api", async (req, res, next) => {
+    const isFastBypassRoute =
+      req.url.includes('/app-version') ||
+      req.url.includes('/catalog/version') ||
+      req.url.includes('/health') ||
+      req.url.includes('/auth') ||
+      req.url.includes('/chat');
+
+    if (!isFastBypassRoute) {
+      try {
+        const hydrationWaitMs = req.method === "GET" ? 1500 : 6000;
+        await ensureCloudHydrated(hydrationWaitMs);
+      } catch (_) {}
+    }
+
     if (
       req.method === "GET" && 
       !req.url.includes('/sync') && 
-      !req.url.includes('/app-version') && 
-      !req.url.includes('/health') &&
-      !req.url.includes('/auth') &&
-      !req.url.includes('/chat')
+      !isFastBypassRoute
     ) {
       const now = Date.now();
       if (now - lastMiddlewarePullTimestamp > MIDDLEWARE_PULL_COOLDOWN_MS) {
@@ -801,6 +812,9 @@ async function startServer() {
   // Ultra-fast Health & Ping endpoint for offline health detection & latency measurement
   app.get("/api/health", (req, res) => {
     const isSandbox = isCurrentContextSandbox();
+    if (!isSandbox) {
+      ensureCloudHydrated(0).catch(() => {});
+    }
     res.json({
       status: "ok",
       environment: isSandbox ? "sandbox" : "production",
@@ -3457,7 +3471,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   });
 
   // Importación masiva de productos (Sugerencia de Mejora)
-  app.post("/api/products/bulk", enforcePermission('add_products'), (req, res) => {
+  app.post("/api/products/bulk", enforcePermission('add_products'), async (req, res) => {
     const { products, behavior } = req.body; // behavior = 'skip' or 'update_stock' or 'overwrite'
     if (!Array.isArray(products) || products.length === 0) {
       return res.status(400).json({ error: "Debe proveer una lista de productos válida." });
@@ -3466,6 +3480,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     if (checkInventoryLock(res)) return;
 
     try {
+      await ensureCloudHydrated(4000);
       const selectBySkuStmt = db.prepare('SELECT id, name, sku, stock, price_cost, price_unit FROM products WHERE LOWER(TRIM(sku)) = LOWER(?)');
       const insertStmt = db.prepare(`
         INSERT INTO products (name, category, sku, stock, price_unit, price_bulk, price_cost, stock_alarm, image)
@@ -3478,6 +3493,17 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       `);
 
       // Preload existing products for accurate name normalization matching
+      const initialExistingProducts = db.prepare('SELECT id, name, sku, stock, price_cost, price_unit FROM products').all() as any[];
+      if (behavior !== 'skip' && initialExistingProducts.length > 0) {
+        const skuSet = new Set(products.map((p: any) => String(p?.sku || '').trim().toLowerCase()).filter(Boolean));
+        const nameSet = new Set(products.map((p: any) => normalizeProductName(String(p?.name || ''))).filter(Boolean));
+        const matchedIds = initialExistingProducts
+          .filter(ep => (ep.sku && skuSet.has(String(ep.sku).trim().toLowerCase())) || nameSet.has(normalizeProductName(ep.name)))
+          .map(ep => Number(ep.id));
+        if (matchedIds.length > 0 && matchedIds.length <= 50) {
+          await syncSpecificProductsFromCloud(matchedIds);
+        }
+      }
       const allExistingProducts = db.prepare('SELECT id, name, sku, stock, price_cost, price_unit FROM products').all() as any[];
       const normNameMap = new Map<string, any>();
       for (const prod of allExistingProducts) {
@@ -3528,6 +3554,8 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
             if (behavior === 'skip') {
               skipped++;
             } else if (behavior === 'overwrite') {
+              const prevStock = Number(existing.stock || 0);
+              const prevPriceUnit = Number(existing.price_unit || 0);
               overwriteStmt.run(name, category, stock, price_unit, price_bulk, price_cost, stock_alarm, getBoliviaISOString(), existing.id);
               updated++;
               productIdsToSync.push(existing.id);
@@ -3537,7 +3565,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
               existing.stock = stock;
               normNameMap.set(normName, existing);
 
-              const diff = stock - existing.stock;
+              const diff = stock - prevStock;
               if (diff !== 0) {
                 const logType = diff > 0 ? 'ajuste_incremento' : 'ajuste_decremento';
                 const absQty = Math.abs(diff);
@@ -3562,10 +3590,10 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
                     userId: normUserId,
                     userName: normUsername,
                     userRole: normUserRole,
-                    quantityBefore: existing.stock,
+                    quantityBefore: prevStock,
                     quantityChanged: diff,
                     quantityAfter: stock,
-                    priceBefore: existing.price_unit,
+                    priceBefore: prevPriceUnit,
                     priceAfter: price_unit,
                     reason: 'Ajuste de stock por sobreescritura de importación masiva',
                     relatedProductId: existing.id,
@@ -3697,13 +3725,14 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     }
   });
 
-  app.put("/api/products/:id", (req, res) => {
+  app.put("/api/products/:id", async (req, res) => {
     const { name, category, sku, stock, price_unit, price_bulk, price_cost, stock_alarm, image, user_id, username } = req.body;
     const { id } = req.params;
     if (!name || !name.trim() || !sku || !sku.trim() || !category || !category.trim()) {
       return res.status(400).json({ error: "El nombre, SKU y categoría son obligatorios." });
     }
     try {
+      await syncSpecificProductsFromCloud([Number(id)]);
       const oldProd = db.prepare('SELECT * FROM products WHERE id = ?').get(id) as any;
       if (!oldProd) {
         return res.status(404).json({ error: "Producto no encontrado." });
@@ -4086,7 +4115,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   });
 
   // Bulk adjustment of selected products (prices, costs, category, stock_alarm, or physical stock)
-  app.post("/api/products/bulk-adjust", (req, res) => {
+  app.post("/api/products/bulk-adjust", async (req, res) => {
     const {
       product_ids,
       adjustments, // { price_unit?: { mode: 'percent'|'fixed'|'exact', value: number, currency?: 'USD'|'BOB', rounding?: 'none'|'0.50'|'1.00' }, price_bulk?: ..., price_cost?: ..., category?: string, stock_alarm?: number, stock?: { mode: 'delta'|'exact', value: number } }
@@ -4179,6 +4208,8 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const normUsername = auditUser.userName || verifiedUser?.username || 'admin';
       const normRole = auditUser.userRole || verifiedUser?.role || 'admin';
       const auditReason = (reason && String(reason).trim()) ? String(reason).trim() : 'Ajuste masivo de catálogo / inventario';
+
+      await syncSpecificProductsFromCloud(product_ids.map((id: any) => Number(id)));
 
       const updatedProductIds: number[] = [];
       const invLogIds: any[] = [];
@@ -5287,7 +5318,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     }
   });
 
-  app.post("/api/stock-arrivals", enforcePermission('increase_stock'), (req, res) => {
+  app.post("/api/stock-arrivals", enforcePermission('increase_stock'), async (req, res) => {
     const { product_id, quantity, arrival_price } = req.body;
     const clientOpId = req.body.clientOperationId || req.body.client_operation_id || null;
     if (!product_id || !quantity || quantity <= 0) {
@@ -5295,6 +5326,8 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     }
     try {
       if (checkInventoryLock(res)) return;
+
+      await syncSpecificProductsFromCloud([Number(product_id)]);
 
       const parsedPrice = Number(arrival_price);
       // Retrieve old product cost
@@ -7234,7 +7267,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     }
   });
 
-  app.post("/api/sales/refund", enforcePermission('make_refunds'), (req, res) => {
+  app.post("/api/sales/refund", enforcePermission('make_refunds'), async (req, res) => {
     const { sale_id, item_refunds, user_id, username } = req.body;
     const clientOpId = req.body.clientOperationId || req.body.client_operation_id || null;
     try {
@@ -7273,6 +7306,13 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           }
           return res.status(200).json({ ...JSON.parse(existingOp.response_body), isDuplicate: true });
         }
+      }
+
+      const refundProdIds = item_refunds
+        .map((it: any) => Number(it.product_id || 0))
+        .filter((n: number) => n > 0);
+      if (refundProdIds.length > 0) {
+        await syncSpecificProductsFromCloud(refundProdIds);
       }
 
       const stockRestore = db.prepare('UPDATE products SET stock = stock + ?, updated_at = ? WHERE id = ?');
@@ -7708,7 +7748,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     }
   });
 
-  app.post("/api/sales", enforcePermission('create_sales'), (req, res) => {
+  app.post("/api/sales", enforcePermission('create_sales'), async (req, res) => {
     const { total, discount, payment_method, user_id, client_id, items, initial_abono, due_date, redeemed_points, currency, exchange_rate, notes, split_payment } = req.body;
     const clientOpId = req.body.clientOperationId || req.body.client_operation_id || null;
 
@@ -7740,6 +7780,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       const safeTotal = authoritativeTotal;
       const safeCurrency = currency || 'BOB';
       try {
+        await syncSpecificProductsFromCloud(items.map((it: any) => Number(it?.product_id)));
         if (exchange_rate !== undefined && exchange_rate !== null) {
           const clientRate = Number(exchange_rate);
           if (!Number.isFinite(clientRate) || clientRate <= 0) {
@@ -9497,7 +9538,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     }
   });
 
-  app.post("/api/pending-sales/:id/finalize", (req, res) => {
+  app.post("/api/pending-sales/:id/finalize", async (req, res) => {
     const { id } = req.params;
     const { payment_method, user_id, client_id, initial_abono, due_date, redeemed_points } = req.body;
     const clientOpId = req.body.clientOperationId || req.body.client_operation_id || null;
@@ -9583,6 +9624,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         const qty = Number(it.quantity) || 0;
         demandByProduct.set(pId, (demandByProduct.get(pId) || 0) + qty);
       }
+      await syncSpecificProductsFromCloud(Array.from(demandByProduct.keys()));
       for (const [pId, totalOrderQty] of demandByProduct.entries()) {
         const prodRow = db.prepare('SELECT id, name, stock FROM products WHERE id = ?').get(pId) as any;
         if (!prodRow) {
@@ -10000,13 +10042,12 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     isBackSyncing = true;
     try {
       if (isFullSync) {
-        console.log("[PWA API Sync] Explicit full bidirectional sync requested...");
-        await pullFirestoreToLocal();
-        await pushAllLocalToFirestore();
+        console.log("[PWA API Sync] Explicit full Cloud-Authority sync requested...");
+        await pullFirestoreToLocal(true);
       } else {
-        // Routine fast online sync: Push locally updated tables to cloud in non-blocking fashion
-        console.log("[PWA API Sync] Routine fast online sync triggered...");
-        syncAfterWrite(['sales', 'sale_items', 'sale_returns', 'products', 'cash_accounts', 'cash_movements', 'accounts_receivable', 'credit_payments', 'pending_sales', 'pending_sale_items', 'inventory_audit_logs', 'caja_cierres', 'shifts', 'settings', 'exchange_rate_audit', 'system_audit_logs']);
+        // PILAR 4: Routine online sync pulls latest state from Cloud Firestore (never blindly pushes stale full local tables to cloud)
+        console.log("[PWA API Sync] Routine fast online pull from Cloud Firestore triggered...");
+        await pullFirestoreToLocal(false);
       }
       lastSyncTime = new Date().toISOString();
       res.json({ status: "success", lastSyncTime, mode: isFullSync ? "full" : "fast" });
@@ -10291,7 +10332,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   });
 
   // 4. Admin Approves Offline Sale -> Converts atomically into real sale and discounts stock
-  app.post("/api/offline-sales/:id/approve", enforceAdmin, (req, res) => {
+  app.post("/api/offline-sales/:id/approve", enforceAdmin, async (req, res) => {
     const { id } = req.params;
     const forceOverride = Boolean(req.body.force_override || req.body.force);
 
@@ -10328,6 +10369,8 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         existingDemand.totalQty += reqQty;
         demandByProduct.set(item.product_id, existingDemand);
       }
+
+      await syncSpecificProductsFromCloud(Array.from(demandByProduct.keys()));
 
       // Check stock availability on aggregated demand
       const deficitItems: any[] = [];
@@ -11048,10 +11091,8 @@ DIRECTIVAS CRÍTICAS:
 
       // If repair requested and there's a mismatch
       if (repair && (!productsIntegrity || !clientsIntegrity) && firestoreActive) {
-        console.log("[Integrity Repair] Sync conflict detected. Rebuilding master alignment...");
-        // Synchronize: we pull Firestore to local and push local to Firestore
-        await pushAllLocalToFirestore();
-        await pullFirestoreToLocal();
+        console.log("[Integrity Repair] Sync conflict detected. Rebuilding master alignment from Cloud Firestore...");
+        await pullFirestoreToLocal(true);
         repaired = true;
 
         // Recalculate local SQLite aggregates post-repair
@@ -12645,7 +12686,7 @@ DIRECTIVAS CRÍTICAS:
   });
 
   // Actualizar el estado general de una sesión de conteo ('pausado', 'finalizado', 'cancelado')
-  app.put("/api/inventory-counts/:id/status", (req, res) => {
+  app.put("/api/inventory-counts/:id/status", async (req, res) => {
     const { id } = req.params;
     const { status, notes, auto_apply } = req.body;
     try {
@@ -12702,6 +12743,15 @@ DIRECTIVAS CRÍTICAS:
         }
 
         const items = db.prepare('SELECT * FROM inventory_count_items WHERE inventory_count_id = ?').all(id) as any[];
+        const affectedProdIds = items
+          .filter(it => Number(it.difference || 0) !== 0 && it.status !== 'pendiente')
+          .map(it => Number(it.product_id));
+        if (affectedProdIds.length > 0) {
+          await syncSpecificProductsFromCloud(affectedProdIds);
+        }
+
+        const updatedProdIds: number[] = [];
+        const insertedInvLogIds: number[] = [];
         
         const transaction = db.transaction(() => {
           for (const item of items) {
@@ -12715,11 +12765,12 @@ DIRECTIVAS CRÍTICAS:
                 const newStock = Math.max(0, oldStock + diff);
 
                 db.prepare('UPDATE products SET stock = ?, updated_at = ? WHERE id = ?').run(newStock, getBoliviaISOString(), item.product_id);
+                updatedProdIds.push(Number(item.product_id));
 
                 const logType = diff > 0 ? 'ajuste_incremento' : 'ajuste_decremento';
                 const absQty = Math.abs(diff);
 
-                db.prepare(`
+                const invRes = db.prepare(`
                   INSERT INTO inventory_audit_logs 
                   (product_id, product_name, product_sku, type, quantity, price, user_id, username, reference, notes, created_at)
                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -12729,15 +12780,24 @@ DIRECTIVAS CRÍTICAS:
                   `Ajuste directo por control físico (De ${oldStock} a ${newStock} pz).`,
                   getBoliviaISOString()
                 );
+                if (invRes.lastInsertRowid) insertedInvLogIds.push(Number(invRes.lastInsertRowid));
               }
             }
           }
 
           db.prepare(`UPDATE inventory_counts SET status = 'cerrado', completed_at = CURRENT_TIMESTAMP, approved_at = CURRENT_TIMESTAMP, applied_at = CURRENT_TIMESTAMP, approved_by_username = 'admin', notes = ? WHERE id = ?`)
             .run(notes || 'Control físico completado y concilado directamente', id);
+          incrementInventoryVersion();
         });
 
         transaction();
+        try {
+          syncAfterWrite({
+            inventory_counts: [Number(id)],
+            ...(updatedProdIds.length > 0 ? { products: updatedProdIds } : {}),
+            ...(insertedInvLogIds.length > 0 ? { inventory_audit_logs: insertedInvLogIds } : {})
+          });
+        } catch (_) {}
         return res.json({ success: true, applied: true });
       }
 
@@ -12851,7 +12911,7 @@ DIRECTIVAS CRÍTICAS:
   });
 
   // Aprobación de diferencias de inventario por parte del Administrador/Propietario
-  app.post("/api/inventory-counts/:id/approve", enforceAdmin, (req, res) => {
+  app.post("/api/inventory-counts/:id/approve", enforceAdmin, async (req, res) => {
     const { id } = req.params;
     const { admin_id, admin_username, notes } = req.body;
     try {
@@ -12864,6 +12924,12 @@ DIRECTIVAS CRÍTICAS:
       }
 
       const items = db.prepare('SELECT * FROM inventory_count_items WHERE inventory_count_id = ?').all(id) as any[];
+      const approveProdIds = items
+        .filter(it => Number(it.difference || 0) !== 0 && it.status !== 'pendiente')
+        .map(it => Number(it.product_id));
+      if (approveProdIds.length > 0) {
+        await syncSpecificProductsFromCloud(approveProdIds);
+      }
       
       const transaction = db.transaction(() => {
         // Apply stock adjustment to products where difference is non-zero
@@ -15239,20 +15305,15 @@ Responde de forma sumamente atenta, con alta proactividad, y con precisión mate
     console.log(`Server listening on port http://0.0.0.0:${PORT}`);
   });
 
-  // Defer background Firestore synchronization by 5 seconds after server boot so cold-start HTTP navigation
-  // requests (GET /, /assets/*, /api/*) receive 100% of CPU and respond in <10ms without any contention
-  setTimeout(() => {
+  // PILAR 1: Start Cloud Firestore hydration immediately on server boot using event-loop yielding
+  // Static assets (/assets/*, index.html) respond in <10ms while API catalog/write routes await ensureCloudHydrated()
+  setImmediate(() => {
     dbAsyncLocalStorage.run({ isSandbox: false }, () => {
       (async () => {
         try {
-          console.log("[Sync] Synchronizing production SQLite database (gtr_pos.db) from Cloud Firestore in background...");
-          await pullFirestoreToLocal();
-          const localProdSales = (db.prepare("SELECT COUNT(*) as c FROM sales").get() as any)?.c || 0;
-          const localProdProducts = (db.prepare("SELECT COUNT(*) as c FROM products").get() as any)?.c || 0;
-          if (localProdSales < 398 || localProdProducts < 100) {
-            await pushAllLocalToFirestore();
-          }
-          console.log("[Sync] Startup production synchronization check completed.");
+          console.log("[Sync] Hydrating production SQLite database (gtr_pos.db) from Cloud Firestore (Single Source of Truth)...");
+          await ensureCloudHydrated(15000);
+          console.log("[Sync] Startup Cloud-Authority hydration and ledger reconciliation completed.");
 
           // Ensure sandbox database is also initialized from verified production database if empty/outdated
           try {
@@ -15288,7 +15349,7 @@ Responde de forma sumamente atenta, con alta proactividad, y con precisión mate
         }
       })().catch(() => {});
     });
-  }, 5000);
+  });
 }
 
 startServer();

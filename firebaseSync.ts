@@ -40,13 +40,27 @@ import {
   limit,
   orderBy
 } from 'firebase/firestore';
-import { db, isCurrentContextSandbox, dbAsyncLocalStorage, ensureSafeAutoincrementSequence, getBoliviaISOString } from './database.ts';
+import { db, isCurrentContextSandbox, dbAsyncLocalStorage, getActiveDbPath, ensureSafeAutoincrementSequence, getBoliviaISOString } from './database.ts';
 
 export function getCollectionName(tableName: string): string {
   if (isCurrentContextSandbox()) {
     return `sandbox_${tableName}`;
   }
   return tableName;
+}
+
+export function assertEnvironmentDatabaseIsolation(expectedSandbox: boolean, targetCollection: string): void {
+  const activeDbFile = path.basename(getActiveDbPath());
+  const isCollectionSandbox = targetCollection.startsWith('sandbox_');
+  if (expectedSandbox) {
+    if (activeDbFile !== 'gtr_pos_sandbox.db' || !isCollectionSandbox) {
+      throw new Error(`[Firewall Isolation Error] Sandbox operation attempted to access production resource (DB: ${activeDbFile}, Collection: ${targetCollection})`);
+    }
+  } else {
+    if (activeDbFile !== 'gtr_pos.db' || isCollectionSandbox) {
+      throw new Error(`[Firewall Isolation Error] Production operation attempted to access sandbox resource (DB: ${activeDbFile}, Collection: ${targetCollection})`);
+    }
+  }
 }
 import { 
   validateFirestoreWriteOperation, 
@@ -186,9 +200,89 @@ export const SYNC_TABLES = [
 
 export const SENSITIVE_SETTINGS_KEYS = new Set(['jwt_secret']);
 
-let isPullingInProgress = false;
-let lastPullTimestamp = 0;
+const pullStateByEnv: Record<'prod' | 'sandbox', { inProgress: boolean; lastTimestamp: number }> = {
+  prod: { inProgress: false, lastTimestamp: 0 },
+  sandbox: { inProgress: false, lastTimestamp: 0 }
+};
 const PULL_COOLDOWN_MS = 10000; // 10 seconds rate limit for background pulls
+
+let isCloudHydrated = false;
+let initialCloudHydrationPromise: Promise<void> | null = null;
+
+export function isServerCloudHydrated(): boolean {
+  return isCloudHydrated || isCurrentContextSandbox();
+}
+
+export async function ensureCloudHydrated(timeoutMs: number = 6000): Promise<void> {
+  if (isCloudHydrated || isCurrentContextSandbox() || !firestore || checkQuota()) {
+    return;
+  }
+  if (!initialCloudHydrationPromise) {
+    initialCloudHydrationPromise = pullFirestoreToLocal(true).finally(() => {
+      isCloudHydrated = true;
+    });
+  }
+  const timeoutGuard = new Promise<void>((resolve) => setTimeout(resolve, timeoutMs));
+  await Promise.race([initialCloudHydrationPromise, timeoutGuard]);
+}
+
+/**
+ * PILAR 2 (Pre-Mutation Cloud Check):
+ * Before mutating stock on one or more products (sale, stock arrival, or manual edit),
+ * fetches their latest live document from Cloud Firestore and updates local SQLite if
+ * the remote document has a newer updated_at timestamp.
+ */
+export async function syncSpecificProductsFromCloud(productIds: number[]): Promise<void> {
+  if (!firestore || checkQuota() || isCurrentContextSandbox()) return;
+  const uniqueIds = Array.from(new Set(productIds.map(Number).filter(n => Number.isInteger(n) && n > 0)));
+  if (uniqueIds.length === 0) return;
+
+  try {
+    await ensureCloudHydrated(4000);
+    await ensureServerAuth();
+
+    const parseTs = (raw: any): number => {
+      if (!raw) return 0;
+      const s = String(raw).trim();
+      if (!s) return 0;
+      if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?$/.test(s)) {
+        const ms = new Date(s.replace(' ', 'T') + 'Z').getTime();
+        return Number.isFinite(ms) ? ms : 0;
+      }
+      const ms = new Date(s).getTime();
+      return Number.isFinite(ms) ? ms : 0;
+    };
+
+    const fetchTask = Promise.all(
+      uniqueIds.map(async (pid) => {
+        try {
+          const snap = await getDoc(doc(firestore, getCollectionName('products'), String(pid)));
+          if (!snap.exists()) return;
+          const rData = snap.data() as any;
+          if (!rData || rData.stock === undefined) return;
+          const localRow = db.prepare('SELECT stock, updated_at, price_cost, price_unit, price_bulk FROM products WHERE id = ?').get(pid) as any;
+          if (!localRow) return;
+          const localMs = parseTs(localRow.updated_at);
+          const remoteMs = parseTs(rData.updated_at);
+          if (remoteMs > localMs) {
+            db.prepare(
+              'UPDATE products SET stock = ?, price_cost = COALESCE(?, price_cost), price_unit = COALESCE(?, price_unit), price_bulk = COALESCE(?, price_bulk), updated_at = ? WHERE id = ?'
+            ).run(
+              Number(rData.stock),
+              rData.price_cost !== undefined ? Number(rData.price_cost) : null,
+              rData.price_unit !== undefined ? Number(rData.price_unit) : null,
+              rData.price_bulk !== undefined ? Number(rData.price_bulk) : null,
+              String(rData.updated_at),
+              pid
+            );
+          }
+        } catch (_) {}
+      })
+    );
+    const timeoutTask = new Promise<void>((resolve) => setTimeout(resolve, 2500));
+    await Promise.race([fetchTask, timeoutTask]);
+  } catch (_) {}
+}
 
 // List of tables that are append-only to avoid full collection scans & rewrites on sync
 export const APPEND_ONLY_TABLES = [
@@ -306,50 +400,55 @@ export function isRecordDeleted(tableName: string, recordId: string | number): b
  * Deletes document(s) directly and immediately from Firestore.
  */
 export async function deleteFromFirestore(tableName: string, idOrIds: any | any[], userContext?: UserContext) {
-  if (!firestore || checkQuota()) {
-    return;
-  }
-  await ensureServerAuth();
+  const isSandboxCtx = isCurrentContextSandbox();
+  return dbAsyncLocalStorage.run({ isSandbox: isSandboxCtx }, async () => {
+    if (!firestore || checkQuota()) {
+      return;
+    }
+    await ensureServerAuth();
 
-  const ids = Array.isArray(idOrIds) ? idOrIds.map(String) : [String(idOrIds)];
-  if (ids.length === 0) return;
+    const ids = Array.isArray(idOrIds) ? idOrIds.map(String) : [String(idOrIds)];
+    if (ids.length === 0) return;
 
-  try {
-    let batch = writeBatch(firestore);
-    let count = 0;
-    let pendingBatchHashes: string[] = [];
-    for (const id of ids) {
-      // Validate deletion operation and log to tamper-evident transaction ledger
-      let txHash = '';
-      try {
-        const validation = validateFirestoreWriteOperation(tableName, id, 'DELETE', undefined, userContext);
-        txHash = validation.txHash;
-      } catch (valErr: any) {
-        console.warn(`[Firestore Integrity Warning] Blocked delete operation on ${tableName} #${id}:`, valErr.message);
-        continue;
+    const targetCollection = getCollectionName(tableName);
+    try {
+      assertEnvironmentDatabaseIsolation(isSandboxCtx, targetCollection);
+      let batch = writeBatch(firestore);
+      let count = 0;
+      let pendingBatchHashes: string[] = [];
+      for (const id of ids) {
+        // Validate deletion operation and log to tamper-evident transaction ledger
+        let txHash = '';
+        try {
+          const validation = validateFirestoreWriteOperation(tableName, id, 'DELETE', undefined, userContext);
+          txHash = validation.txHash;
+        } catch (valErr: any) {
+          console.warn(`[Firestore Integrity Warning] Blocked delete operation on ${tableName} #${id}:`, valErr.message);
+          continue;
+        }
+
+        const docRef = doc(firestore, targetCollection, String(id));
+        batch.delete(docRef);
+        if (txHash) pendingBatchHashes.push(txHash);
+        count++;
+        if (count >= 400) {
+          await batch.commit();
+          confirmFirestoreWriteInLedger(pendingBatchHashes);
+          pendingBatchHashes = [];
+          batch = writeBatch(firestore);
+          count = 0;
+        }
       }
-
-      const docRef = doc(firestore, getCollectionName(tableName), String(id));
-      batch.delete(docRef);
-      if (txHash) pendingBatchHashes.push(txHash);
-      count++;
-      if (count >= 400) {
+      if (count > 0) {
         await batch.commit();
         confirmFirestoreWriteInLedger(pendingBatchHashes);
         pendingBatchHashes = [];
-        batch = writeBatch(firestore);
-        count = 0;
       }
+      console.log(`[Sync Delete] Successfully deleted ${ids.length} document(s) from Firestore collection "${targetCollection}".`);
+    } catch (err: any) {
+      handleSyncError(err, `[Sync Delete Error] Could not delete from Firestore "${targetCollection}":`);
     }
-    if (count > 0) {
-      await batch.commit();
-      confirmFirestoreWriteInLedger(pendingBatchHashes);
-      pendingBatchHashes = [];
-    }
-    console.log(`[Sync Delete] Successfully deleted ${ids.length} document(s) from Firestore collection "${tableName}".`);
-  } catch (err: any) {
-    handleSyncError(err, `[Sync Delete Error] Could not delete from Firestore "${tableName}":`);
-  }
+  });
 }
 
 /**
@@ -357,13 +456,17 @@ export async function deleteFromFirestore(tableName: string, idOrIds: any | any[
  * Supports targeted synchronization for specific rows to optimize speed and network payload.
  */
 export async function pushLocalToFirestore(tableName: string, idOrIds?: any | any[], userContext?: UserContext) {
-  if (!firestore || checkQuota()) {
-    return;
-  }
-  await ensureServerAuth();
+  const isSandboxCtx = isCurrentContextSandbox();
+  return dbAsyncLocalStorage.run({ isSandbox: isSandboxCtx }, async () => {
+    if (!firestore || checkQuota()) {
+      return;
+    }
+    await ensureServerAuth();
 
-  try {
-    const isSettings = tableName === 'settings';
+    const targetCollection = getCollectionName(tableName);
+    try {
+      assertEnvironmentDatabaseIsolation(isSandboxCtx, targetCollection);
+      const isSettings = tableName === 'settings';
     let rows: any[] = [];
     let idList = idOrIds ? (Array.isArray(idOrIds) ? idOrIds.map(String) : [String(idOrIds)]) : null;
     if (isSettings && idList) {
@@ -396,6 +499,11 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
       }
     } else {
       // Full table sync requested.
+      // PILAR 1 & 4: Block full-table push of mutable catalog/drawer tables if server has not hydrated from Cloud Firestore yet
+      if (!isCurrentContextSandbox() && !isCloudHydrated && !APPEND_ONLY_TABLES.includes(tableName)) {
+        console.warn(`[Cloud-First Shield] Blocked bulk push of table "${tableName}" before initial Cloud Firestore hydration.`);
+        return;
+      }
       if (APPEND_ONLY_TABLES.includes(tableName)) {
         // 1. Obtener ID máximo local en SQLite
         let localMaxId = 0;
@@ -409,15 +517,15 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
           return;
         }
 
-        // 3. Consultar cache local en memoria. Si ya está sincronizado hasta el ID local máximo, omitir
-        const cachedMax = lastSyncedMaxIdCache[tableName];
+        // 3. Consultar cache local en memoria separado por entorno (prod vs sandbox). Si ya está sincronizado hasta el ID local máximo, omitir
+        const cachedMax = lastSyncedMaxIdCache[targetCollection];
         if (cachedMax !== undefined && localMaxId <= cachedMax) {
           return;
         }
 
         // 4. Consultar ID máximo actual en Firestore
         let firestoreMaxId = 0;
-        const colRef = collection(firestore, getCollectionName(tableName));
+        const colRef = collection(firestore, targetCollection);
         try {
           const q = query(colRef, orderBy('id', 'desc'), limit(1));
           const qSnapshot = await getDocs(q);
@@ -456,7 +564,7 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
           rows = [...missedRows, ...newRows];
 
           if (rows.length === 0) {
-            lastSyncedMaxIdCache[tableName] = Math.max(localMaxId, firestoreMaxId);
+            lastSyncedMaxIdCache[targetCollection] = Math.max(localMaxId, firestoreMaxId);
             return;
           }
 
@@ -524,7 +632,7 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
             pendingBatchDigests = [];
           }
 
-          lastSyncedMaxIdCache[tableName] = localMaxId;
+          lastSyncedMaxIdCache[targetCollection] = localMaxId;
           return;
         }
       }
@@ -654,6 +762,26 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
       } catch (_) {}
     }
 
+    // Build remote updated_at map so a stale local row NEVER overwrites a newer remote document in Firestore
+    const remoteUpdatedMsMap = new Map<string, number>();
+    const parseTsForPush = (raw: any): number => {
+      if (!raw) return 0;
+      const s = String(raw).trim();
+      if (!s) return 0;
+      if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?$/.test(s)) {
+        const ms = new Date(s.replace(' ', 'T') + 'Z').getTime();
+        return Number.isFinite(ms) ? ms : 0;
+      }
+      const ms = new Date(s).getTime();
+      return Number.isFinite(ms) ? ms : 0;
+    };
+    for (const rDoc of snapshot.docs) {
+      const rData = rDoc.data() as any;
+      if (rData && rData.updated_at) {
+        remoteUpdatedMsMap.set(String(rDoc.id), parseTsForPush(rData.updated_at));
+      }
+    }
+
     // Start a Firestore batch
     let batch = writeBatch(firestore);
     let opCount = 0;
@@ -663,6 +791,15 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
     // Upsert all local records to Firestore with strict verification
     for (const row of rows) {
       const docId = tableName === 'settings' ? row.key : String(row.id);
+
+      // PILAR 3 & 4: Chronological Guard — never overwrite a newer Cloud Firestore document with an older local row
+      if (['products', 'cash_accounts', 'clients', 'accounts_receivable', 'pending_sales'].includes(tableName)) {
+        const remoteMs = remoteUpdatedMsMap.get(String(docId)) || 0;
+        const localMs = parseTsForPush(row.updated_at);
+        if (remoteMs > 0 && remoteMs > localMs) {
+          continue;
+        }
+      }
       
       const cleanData: any = {};
       for (const [key, val] of Object.entries(row)) {
@@ -722,21 +859,25 @@ export async function pushLocalToFirestore(tableName: string, idOrIds?: any | an
       pendingBatchDigests = [];
     }
 
-    console.log(`[Sync] Successfully synchronized table "${tableName}" to Firestore (Local Row Count: ${rows.length})`);
-  } catch (error: any) {
-    handleSyncError(error, `[Sync Offline Mode] Unable to sync local table "${tableName}" to Firestore (will save locally):`);
-  }
+    console.log(`[Sync] Successfully synchronized table "${targetCollection}" to Firestore (Local Row Count: ${rows.length})`);
+    } catch (error: any) {
+      handleSyncError(error, `[Sync Offline Mode] Unable to sync local table "${targetCollection}" to Firestore (will save locally):`);
+    }
+  });
 }
 
 /**
  * Syncs all SQLite tables to Firestore.
  */
 export async function pushAllLocalToFirestore() {
-  console.log("[Sync] Triggered full push from SQLite to Google Cloud Firestore...");
-  for (const table of SYNC_TABLES) {
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    await pushLocalToFirestore(table);
-  }
+  const isSandboxCtx = isCurrentContextSandbox();
+  return dbAsyncLocalStorage.run({ isSandbox: isSandboxCtx }, async () => {
+    console.log("[Sync] Triggered full push from SQLite to Google Cloud Firestore...");
+    for (const table of SYNC_TABLES) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await pushLocalToFirestore(table);
+    }
+  });
 }
 
 /**
@@ -745,24 +886,28 @@ export async function pushAllLocalToFirestore() {
  * This function handles deletions in Firestore correctly by clearing local records before sync ONLY if forceOverwrite is true.
  */
 export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
-  if (!firestore || checkQuota()) {
-    return;
-  }
-  await ensureServerAuth();
+  const isSandboxCtx = isCurrentContextSandbox();
+  const envKey: 'prod' | 'sandbox' = isSandboxCtx ? 'sandbox' : 'prod';
+  return dbAsyncLocalStorage.run({ isSandbox: isSandboxCtx }, async () => {
+    if (!firestore || checkQuota()) {
+      return;
+    }
+    await ensureServerAuth();
 
-  if (isPullingInProgress) {
-    return;
-  }
+    if (pullStateByEnv[envKey].inProgress) {
+      return;
+    }
 
-  if (!forceOverwrite && (Date.now() - lastPullTimestamp < PULL_COOLDOWN_MS)) {
-    return;
-  }
+    if (!forceOverwrite && (Date.now() - pullStateByEnv[envKey].lastTimestamp < PULL_COOLDOWN_MS)) {
+      return;
+    }
 
-  isPullingInProgress = true;
+    pullStateByEnv[envKey].inProgress = true;
 
-  try {
-    // Determine if Firestore has been initialized/populated already
-    const metaRef = doc(firestore, getCollectionName('sync_metadata'), 'status');
+    try {
+      assertEnvironmentDatabaseIsolation(isSandboxCtx, getCollectionName('products'));
+      // Determine if Firestore has been initialized/populated already
+      const metaRef = doc(firestore, getCollectionName('sync_metadata'), 'status');
     const metaDoc = await getDoc(metaRef);
     
     // Query local database sizes to see if we have actual user records locally to seed
@@ -821,7 +966,7 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
       SYNC_TABLES.map(async (table) => {
         try {
           let snapshot;
-          if (table === 'firestore_transaction_ledger' || table === 'system_audit_logs' || table === 'inventory_audit_logs') {
+          if (table === 'firestore_transaction_ledger' || table === 'system_audit_logs') {
             try {
               snapshot = await getDocs(query(collection(firestore, getCollectionName(table)), orderBy('id', 'desc'), limit(250)));
             } catch (_) {
@@ -1415,14 +1560,10 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
 
                 const localUpdated = parseNormalizedTimestampMs(localUpdatedStr);
                 const remoteUpdated = parseNormalizedTimestampMs(data.updated_at);
-                const remediatedTsStr = activeLedger.products[String(prodIdNum)];
-                const remediatedTs = parseNormalizedTimestampMs(remediatedTsStr);
-                const hasSaleProductRemediation = Object.values(activeLedger.sales || {}).some(
-                  (entry: any) => entry?.netStock && entry.netStock[String(prodIdNum)] !== undefined
-                );
 
-                // If local product row was modified more recently than remote updated_at, preserve all local product fields (name, sku, category, prices, stock)
-                if (localProd && localUpdated > 0 && localUpdated > remoteUpdated) {
+                // PILAR 4: Strict Cloud-Authority & Chronological Truth
+                // Only preserve local product fields if this is NOT a forced cloud overwrite AND local was genuinely modified more recently than remoteUpdated
+                if (!forceOverwrite && localProd && localUpdated > 0 && remoteUpdated > 0 && localUpdated > remoteUpdated) {
                   data.name = localProd.name;
                   data.category = localProd.category;
                   data.sku = localProd.sku;
@@ -1432,15 +1573,6 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
                   data.price_cost = Number(localProd.price_cost ?? data.price_cost ?? 0);
                   data.stock_alarm = Number(localProd.stock_alarm ?? data.stock_alarm ?? 5);
                   if (localProd.image !== undefined) data.image = localProd.image;
-                  if (localUpdatedStr) data.updated_at = localUpdatedStr;
-                } else if (remediatedInThisPull.products.has(prodIdNum) && localStock !== undefined && !isNaN(localStock)) {
-                  data.stock = localStock;
-                  if (localUpdatedStr) data.updated_at = localUpdatedStr;
-                } else if ((remediatedTs > 0 || hasSaleProductRemediation) && remediatedTs >= remoteUpdated && localStock !== undefined && !isNaN(localStock)) {
-                  data.stock = localStock;
-                  if (localUpdatedStr) data.updated_at = localUpdatedStr;
-                } else if (localStock === 0 && localUpdated >= remoteUpdated) {
-                  data.stock = 0;
                   if (localUpdatedStr) data.updated_at = localUpdatedStr;
                 } else if (!isNaN(remoteStock)) {
                   data.stock = remoteStock;
@@ -1641,20 +1773,31 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
       ensureSafeAutoincrementSequence(db);
     } catch (_) {}
 
-    lastPullTimestamp = Date.now();
-    
-    for (const key of Object.keys(lastSyncedMaxIdCache)) {
-      delete lastSyncedMaxIdCache[key];
+      pullStateByEnv[envKey].lastTimestamp = Date.now();
+      if (!isSandboxCtx) {
+        isCloudHydrated = true;
+      }
+      
+      for (const key of Object.keys(lastSyncedMaxIdCache)) {
+        if (isSandboxCtx ? key.startsWith('sandbox_') : !key.startsWith('sandbox_')) {
+          delete lastSyncedMaxIdCache[key];
+        }
+      }
+
+      // PILAR 3: Automatically reconcile any product whose updated_at lags behind its immutable stock_arrivals / sales / sale_returns ledger
+      try {
+        reconcileCatalogStockWithLedger();
+      } catch (_) {}
+      
+      if (forceOverwrite) {
+        console.log(`[Sync] Master database pull (${envKey}) completed successfully (${updatedTableCount} tables synced).`);
+      }
+    } catch (error: any) {
+      // Standalone fallback
+    } finally {
+      pullStateByEnv[envKey].inProgress = false;
     }
-    
-    if (forceOverwrite) {
-      console.log(`[Sync] Master database pull completed successfully (${updatedTableCount} tables synced).`);
-    }
-  } catch (error: any) {
-    // Standalone fallback
-  } finally {
-    isPullingInProgress = false;
-  }
+  });
 }
 
 const pendingCoalescedSyncMap = new Map<string, { fullTable: boolean; ids: Set<string>; timer: NodeJS.Timeout | null }>();
@@ -1894,13 +2037,128 @@ export async function clearAllFirestoreAndLocalData(): Promise<void> {
 }
 
 /**
- * CATALOG STOCK INTEGRITY AUDIT
- * Protects products against accidental zeroing and maintains catalog consistency.
+ * PILAR 3: MATHEMATICAL LEDGER AUTO-RECONCILER
+ * Verifies every product in the catalog against the immutable append-only ledgers
+ * (`stock_arrivals`, `sales`/`sale_items`, and `system_audit_logs` chain continuity).
+ * If any product has stock arrivals or sales recorded after its `updated_at` timestamp
+ * (or a chain break from an older snapshot overwrite), it automatically restores the
+ * exact mathematical stock in SQLite and syncs the healed product to Cloud Firestore.
  */
 export function reconcileCatalogStockWithLedger(): { audited: number; corrected: number; corrections: any[] } {
-  const prods = db.prepare('SELECT id, name, sku, stock FROM products').all() as any[];
-  // Safe: Never arbitrarily overwrite verified product stocks with 0
-  return { audited: prods.length, corrected: 0, corrections: [] };
+  const isSandboxCtx = isCurrentContextSandbox();
+  return dbAsyncLocalStorage.run({ isSandbox: isSandboxCtx }, () => {
+    assertEnvironmentDatabaseIsolation(isSandboxCtx, getCollectionName('products'));
+    const prods = db.prepare('SELECT id, name, sku, stock, price_cost, updated_at FROM products ORDER BY id ASC').all() as any[];
+    const arrivals = db.prepare('SELECT id, product_id, quantity, created_at FROM stock_arrivals ORDER BY id ASC').all() as any[];
+    const deletedSaleRows = db.prepare("SELECT record_id FROM deleted_records WHERE table_name = 'sales'").all() as any[];
+    const deletedSalesSet = new Set<string>(deletedSaleRows.map(r => String(r.record_id)));
+    const sales = db.prepare('SELECT id, created_at FROM sales ORDER BY id ASC').all() as any[];
+    const saleItems = db.prepare('SELECT id, sale_id, product_id, quantity FROM sale_items ORDER BY id ASC').all() as any[];
+    let saleReturns: any[] = [];
+    try {
+      saleReturns = db.prepare('SELECT id, sale_id, product_id, quantity, created_at FROM sale_returns ORDER BY id ASC').all() as any[];
+    } catch (_) {}
+    const sysLogs = db.prepare("SELECT id, event_type, entity_id, quantity_before, quantity_changed, quantity_after, created_at FROM system_audit_logs WHERE entity_type = 'producto' ORDER BY id ASC").all() as any[];
+
+    const salesDateMap = new Map<number, string>();
+    for (const s of sales) {
+      if (!deletedSalesSet.has(String(s.id))) {
+        salesDateMap.set(Number(s.id), String(s.created_at || ''));
+      }
+    }
+
+    const corrections: any[] = [];
+    const correctedProductIds: number[] = [];
+    const correctedAuditIds: number[] = [];
+    const nowIso = getBoliviaISOString();
+
+    db.transaction(() => {
+      for (const p of prods) {
+        const pid = Number(p.id);
+        const prodUpdated = String(p.updated_at || '');
+        if (!prodUpdated) continue;
+
+        const arrAfter = arrivals.filter(a => Number(a.product_id) === pid && String(a.created_at || '') > prodUpdated);
+        const returnsAfter = saleReturns.filter(
+          r => Number(r.product_id) === pid && !deletedSalesSet.has(String(r.sale_id)) && String(r.created_at || '') > prodUpdated
+        );
+        const salesAfter = saleItems
+          .filter(si => Number(si.product_id) === pid && salesDateMap.has(Number(si.sale_id)))
+          .map(si => ({ ...si, created_at: salesDateMap.get(Number(si.sale_id))! }))
+          .filter(si => si.created_at > prodUpdated);
+
+        // Also check if a post-Oct-30 chain break occurred in system_audit_logs before the current updated_at (e.g. SKU 6 on Nov 2)
+        const VALID_STOCK_EVENTS = new Set(['ingreso_compra', 'salida_venta', 'creacion_producto', 'ajuste_incremento', 'ajuste_decremento', 'devolucion_cliente']);
+        const pSysLogs = sysLogs.filter(
+          l => Number(l.entity_id) === pid && VALID_STOCK_EVENTS.has(String(l.event_type)) && l.quantity_after !== null && l.quantity_after !== undefined
+        );
+        let chainBreakDelta = 0;
+        for (let i = 1; i < pSysLogs.length; i++) {
+          if (String(pSysLogs[i].created_at || '') >= '2026-10-31') {
+            const prevAfter = Number(pSysLogs[i - 1].quantity_after);
+            const currBefore = Number(pSysLogs[i].quantity_before);
+            if (Number.isFinite(prevAfter) && Number.isFinite(currBefore) && prevAfter !== currBefore) {
+              chainBreakDelta += (prevAfter - currBefore);
+            }
+          }
+        }
+
+        const arrSum = arrAfter.reduce((acc, a) => acc + Number(a.quantity || 0), 0);
+        const returnsSum = returnsAfter.reduce((acc, r) => acc + Number(r.quantity || 0), 0);
+        const salesSum = salesAfter.reduce((acc, s) => acc + Number(s.quantity || 0), 0);
+        let netDelta = arrSum + returnsSum - salesSum;
+
+        // If no movements after updated_at, check if current stock is still missing a post-Oct-31 chainBreakDelta (e.g., SKU 6)
+        if (netDelta === 0 && chainBreakDelta !== 0 && pSysLogs.length > 0) {
+          const lastSysAfter = Number(pSysLogs[pSysLogs.length - 1].quantity_after);
+          const expectedWithChainBreak = lastSysAfter + chainBreakDelta;
+          if (Number(p.stock) === lastSysAfter && Number(p.stock) !== expectedWithChainBreak) {
+            netDelta = chainBreakDelta;
+          }
+        }
+
+        if (netDelta !== 0) {
+          const oldStock = Number(p.stock || 0);
+          const newStock = Math.max(0, oldStock + netDelta);
+          if (newStock !== oldStock) {
+            db.prepare('UPDATE products SET stock = ?, updated_at = ? WHERE id = ?').run(newStock, nowIso, pid);
+
+            const invType = netDelta > 0 ? 'ajuste_incremento' : 'ajuste_decremento';
+            const absDelta = Math.abs(netDelta);
+            const reasonNote = `Conciliación forense automática con Libro Mayor (Ingresos omitidos: +${arrSum}${returnsSum ? `, Devoluciones omitidas: +${returnsSum}` : ''}, Ventas omitidas: -${salesSum}${chainBreakDelta ? `, Continuidad Kárdex: ${chainBreakDelta > 0 ? '+' + chainBreakDelta : chainBreakDelta}` : ''})`;
+
+            const invRes = db.prepare(`
+              INSERT INTO inventory_audit_logs
+              (product_id, product_name, product_sku, type, quantity, price, user_id, username, reference, notes, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, 4, 'admin', 'CONCILIACION_LIBRO_MAYOR', ?, ?)
+            `).run(pid, p.name, p.sku || '', invType, absDelta, Number(p.price_cost || 0), reasonNote, nowIso);
+
+            correctedProductIds.push(pid);
+            if (invRes.lastInsertRowid) correctedAuditIds.push(Number(invRes.lastInsertRowid));
+            corrections.push({
+              id: pid,
+              sku: p.sku,
+              name: p.name,
+              oldStock,
+              newStock,
+              netDelta,
+              reason: reasonNote
+            });
+          }
+        }
+      }
+    })();
+
+    if (correctedProductIds.length > 0) {
+      console.log(`[Ledger Auto-Reconciler] Healed ${correctedProductIds.length} products against immutable sales/arrivals ledger:`, corrections.map(c => `SKU ${c.sku} (${c.oldStock} -> ${c.newStock})`).join(', '));
+      syncAfterWrite({
+        products: correctedProductIds,
+        ...(correctedAuditIds.length > 0 ? { inventory_audit_logs: correctedAuditIds } : {})
+      });
+    }
+
+    return { audited: prods.length, corrected: corrections.length, corrections };
+  });
 }
 
 let ledgerReconciliationTimer: NodeJS.Timeout | null = null;
