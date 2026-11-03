@@ -1,6 +1,6 @@
 {
-  "summary": "Plan quirurgico para lograr reconexion instantanea (<300ms) al responder /api/health o al despertar la pantalla de la tablet/celular, eliminando la espera de 11+ segundos en 'Verificando Servidor...' y los falsos bloqueos por suspension en segundo plano.",
-  "updatedAt": "2026-11-03T12:28:23.235122491Z",
+  "summary": "Plan de Equilibrio Exacto: Cero Cache en Celulares + Cero Doble Registro (Idempotencia estricta) + Tolerancia de 45 Segundos en Vivo sin bloquear la pantalla en pequenas desconexiones y sincronizacion automatica al terminar los 45s.",
+  "updatedAt": "2026-11-03T14:57:29.328908415Z",
   "requestFeedback": true,
   "userFacing": true
 }

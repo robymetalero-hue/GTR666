@@ -548,7 +548,7 @@ function AppLayout() {
     }, [view, user]);
 
     const isUpdateGateActive = Boolean(updateAvailable || showUpdateWarning || hasPwaUpdate);
-    const isOfflineGateActive = Boolean(isOffline || (typeof navigator !== 'undefined' && !navigator.onLine));
+    const isOfflineGateActive = Boolean(isOffline);
     const [retryingConnection, setRetryingConnection] = useState(false);
 
     const handleRetryOnlineConnection = async () => {

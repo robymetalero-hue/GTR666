@@ -558,8 +558,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const [autonomousLogs, setAutonomousLogs] = useState<string[]>([]);
     const [apiPingResults, setApiPingResults] = useState<any>(null);
 
+    const offlineGraceStartRef = useRef<number | null>(null);
+
     useEffect(() => {
         const handleOnline = () => {
+            offlineGraceStartRef.current = null;
             setIsOffline(false);
             console.log("[Sync] Device returned online. Fetching latest remote database state...");
             fetchProducts();
@@ -567,8 +570,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             fetchExchangeRate();
         };
         const handleOffline = () => {
-            setIsOffline(true);
-            console.warn("[Sync] Device is offline. Standard local database operates standalone.");
+            // Silent Grace Mode (45s): Do NOT lock the screen immediately on transient Wi-Fi/mobile antenna switches.
+            // Start the 45-second silent grace clock; checkHealth will poll every 2s and only lock if still offline after 45s.
+            if (offlineGraceStartRef.current === null) {
+                offlineGraceStartRef.current = Date.now();
+            }
         };
         window.addEventListener('online', handleOnline);
         window.addEventListener('offline', handleOffline);
@@ -2192,19 +2198,74 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
     }, []);
 
-    // Periodic network health check to measure latency and detect reconnection immediately on wake-up
+    // Periodic network health check with 45-second Silent Grace Mode, automatic 45s sync, and zero background consumption
     useEffect(() => {
         let timer: any = null;
+        let fastGraceTimer: any = null;
+        let graceEndTimer: any = null;
         let isCancelled = false;
-        let consecutiveFailures = 0;
+        const SILENT_GRACE_PERIOD_MS = 45000; // 45 seconds of silent tolerance before showing any offline screen
 
-        const checkHealth = async () => {
+        const stopFastGracePolling = () => {
+            if (fastGraceTimer) {
+                clearInterval(fastGraceTimer);
+                fastGraceTimer = null;
+            }
+            if (graceEndTimer) {
+                clearTimeout(graceEndTimer);
+                graceEndTimer = null;
+            }
+        };
+
+        const startFastGracePolling = () => {
+            if (!fastGraceTimer && !isCancelled) {
+                fastGraceTimer = setInterval(() => {
+                    if (!isCancelled) checkHealth(true);
+                }, 2000);
+            }
+            if (!graceEndTimer && !isCancelled && offlineGraceStartRef.current !== null) {
+                const remainingMs = Math.max(500, SILENT_GRACE_PERIOD_MS - (Date.now() - offlineGraceStartRef.current));
+                graceEndTimer = setTimeout(() => {
+                    graceEndTimer = null;
+                    if (!isCancelled) {
+                        // At the exact end of the 45 seconds, automatically attempt live synchronization
+                        checkHealth(true);
+                    }
+                }, remainingMs);
+            }
+        };
+
+        const handleConnectionFailure = () => {
+            if (isCancelled) return;
+            // When screen is off or tab is in background, ignore aborted fetches completely (zero consumption)
+            const isHidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+            if (isHidden) {
+                return;
+            }
+
+            if (offlineGraceStartRef.current === null) {
+                offlineGraceStartRef.current = Date.now();
+            }
+
+            const elapsedMs = Date.now() - offlineGraceStartRef.current;
+            if (elapsedMs >= SILENT_GRACE_PERIOD_MS) {
+                setNetworkLatency(null);
+                setNetworkQuality('offline');
+                setIsOffline(true);
+            } else {
+                // Silent Grace Period active (< 45s): keep isOffline = false, show zero warnings, and poll every 2s
+                startFastGracePolling();
+            }
+        };
+
+        const checkHealth = async (isRecoveryAttempt = false) => {
+            // Zero background consumption when screen is off or browser is minimized
+            if (!isRecoveryAttempt && typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+                return;
+            }
+
             if (typeof navigator !== 'undefined' && !navigator.onLine) {
-                if (!isCancelled) {
-                    setNetworkLatency(null);
-                    setNetworkQuality('offline');
-                    setIsOffline(true);
-                }
+                handleConnectionFailure();
                 return;
             }
 
@@ -2223,49 +2284,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
                 if (!isCancelled) {
                     if (res.ok) {
-                        consecutiveFailures = 0;
+                        const wasRecoveringFromGrace = offlineGraceStartRef.current !== null || isOffline;
+                        offlineGraceStartRef.current = null;
+                        stopFastGracePolling();
                         setNetworkLatency(latency);
                         const quality = latency > 600 ? 'unstable' : 'online';
                         setNetworkQuality(quality);
                         setIsOffline(false);
+                        if (wasRecoveringFromGrace) {
+                            // Notify any active checkout waiting on the 45s grace window and refresh live catalog
+                            window.dispatchEvent(new CustomEvent('gtr-grace-sync-now'));
+                            fetchProducts().catch(() => {});
+                            fetchExchangeRate().catch(() => {});
+                        }
                     } else {
-                        setNetworkQuality('unstable');
+                        handleConnectionFailure();
                     }
                 }
             } catch (err: any) {
                 clearTimeout(timeoutId);
-                if (!isCancelled) {
-                    // When screen is off or tab is in background, mobile browsers abort in-flight fetches.
-                    // Do not lock the UI with a false-positive offline state while hidden unless navigator.onLine is false.
-                    const isHidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
-                    const browserOffline = typeof navigator !== 'undefined' && !navigator.onLine;
-                    if (isHidden && !browserOffline) {
-                        return;
-                    }
-                    consecutiveFailures++;
-                    if (browserOffline || consecutiveFailures >= 2) {
-                        setNetworkLatency(null);
-                        setNetworkQuality('offline');
-                        setIsOffline(true);
-                    } else {
-                        setNetworkQuality('unstable');
-                        // Retry once quickly (800ms) to confirm whether it was just a wake-up socket reset
-                        setTimeout(() => {
-                            if (!isCancelled) checkHealth();
-                        }, 800);
-                    }
-                }
+                handleConnectionFailure();
             }
         };
 
         const handleWakeUpOrFocus = () => {
             if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
-            checkHealth();
+            // Reset grace timer when device screen wakes up so Wi-Fi/4G has a fresh 45s silent window to reconnect
+            if (!isOffline) {
+                offlineGraceStartRef.current = null;
+            }
+            checkHealth(true);
         };
 
-        checkHealth();
-        const intervalMs = isOffline ? 2500 : 8000;
-        timer = setInterval(checkHealth, intervalMs);
+        checkHealth(true);
+        // 30s interval when online to minimize server/network usage; 2s when recovering
+        const intervalMs = isOffline ? 2000 : 30000;
+        timer = setInterval(() => checkHealth(false), intervalMs);
 
         window.addEventListener('focus', handleWakeUpOrFocus);
         window.addEventListener('pageshow', handleWakeUpOrFocus);
@@ -2275,6 +2329,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return () => {
             isCancelled = true;
             if (timer) clearInterval(timer);
+            stopFastGracePolling();
             window.removeEventListener('focus', handleWakeUpOrFocus);
             window.removeEventListener('pageshow', handleWakeUpOrFocus);
             window.removeEventListener('online', handleWakeUpOrFocus);

@@ -1855,11 +1855,6 @@ export default function POS() {
                 }
             };
 
-            if (!navigator.onLine) {
-                showNotification("⚠️ Sin conexión al servidor principal: No se permiten ventas en modo offline para proteger el inventario y la caja.", "error");
-                return;
-            }
-
             try {
                 const authToken = typeof localStorage !== 'undefined' ? localStorage.getItem('auth_token') : null;
                 const saleHeaders: Record<string, string> = {
@@ -1873,11 +1868,62 @@ export default function POS() {
                     saleHeaders['Authorization'] = `Bearer ${authToken}`;
                 }
 
-                const res = await fetch('/api/sales', {
-                    method: 'POST',
-                    headers: saleHeaders,
-                    body: JSON.stringify(salePayload)
-                });
+                // 45-Second Live Grace Synchronization with Idempotent clientOperationId (opId):
+                // Zero local phone cache is used. If a temporary micro-cut (< 45s) occurs when confirming a sale,
+                // keep trying live in memory every 2s (or immediately when signal returns) up to 45s
+                // using the exact same clientOperationId so processed_operations guarantees 0% duplicate records.
+                let res: Response | null = null;
+                let lastFetchErr: any = null;
+                const graceDeadline = Date.now() + 45000;
+                let attempt = 0;
+
+                while (Date.now() < graceDeadline) {
+                    try {
+                        if (attempt > 0) {
+                            await new Promise<void>((resolve) => {
+                                const t = setTimeout(() => {
+                                    window.removeEventListener('online', onSignalWake);
+                                    window.removeEventListener('gtr-grace-sync-now', onSignalWake);
+                                    resolve();
+                                }, 2000);
+                                const onSignalWake = () => {
+                                    clearTimeout(t);
+                                    window.removeEventListener('online', onSignalWake);
+                                    window.removeEventListener('gtr-grace-sync-now', onSignalWake);
+                                    resolve();
+                                };
+                                window.addEventListener('online', onSignalWake, { once: true });
+                                window.addEventListener('gtr-grace-sync-now', onSignalWake, { once: true });
+                            });
+                        }
+                        attempt++;
+                        if (typeof navigator !== 'undefined' && !navigator.onLine) {
+                            lastFetchErr = new Error("Waiting for live connection within 45s grace window");
+                            continue;
+                        }
+                        const controller = new AbortController();
+                        const reqTimeout = setTimeout(() => controller.abort(), 8000);
+                        try {
+                            res = await fetch('/api/sales', {
+                                method: 'POST',
+                                headers: saleHeaders,
+                                body: JSON.stringify(salePayload),
+                                signal: controller.signal
+                            });
+                            clearTimeout(reqTimeout);
+                            lastFetchErr = null;
+                            break;
+                        } catch (innerErr) {
+                            clearTimeout(reqTimeout);
+                            throw innerErr;
+                        }
+                    } catch (fetchErr) {
+                        lastFetchErr = fetchErr;
+                    }
+                }
+                if (!res) {
+                    throw lastFetchErr || new Error("Network error");
+                }
                 if (res.ok) {
                     const data = await res.json();
                     const saleId = data.saleId;
