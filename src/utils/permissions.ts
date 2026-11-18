@@ -88,7 +88,8 @@ export const DEFAULT_PERMISSIONS: Record<string, boolean> = {
  */
 export function canAccessForensicAudit(user: any): boolean {
   if (!user) return false;
-  if (user.role === 'admin' || user.role === 'propietario' || user.role === 'administrador') return true;
+  const r = String(user.role || '').toLowerCase().trim();
+  if (r === 'admin' || r === 'propietario' || r === 'administrador' || r === 'dueño' || r === 'jefe') return true;
   if (isMainAdmin(user)) return true;
   return hasPermission(user, 'access_forensic_audit');
 }
@@ -98,7 +99,8 @@ export function canAccessForensicAudit(user: any): boolean {
  */
 export function isAdminUser(user: any): boolean {
   if (!user) return false;
-  if (user.role === 'admin' || user.role === 'propietario' || user.role === 'administrador') return true;
+  const r = String(user.role || '').toLowerCase().trim();
+  if (r === 'admin' || r === 'propietario' || r === 'administrador' || r === 'dueño' || r === 'jefe') return true;
   return isMainAdmin(user);
 }
 
@@ -153,7 +155,8 @@ export function isMainAdmin(user: any): boolean {
  */
 export function hasPermission(user: any, key: string): boolean {
   if (!user) return false;
-  if (user.role === 'admin' || user.role === 'propietario' || isMainAdmin(user)) return true;
+  const r = String(user.role || '').toLowerCase().trim();
+  if (r === 'admin' || r === 'propietario' || r === 'administrador' || r === 'dueño' || r === 'jefe' || isMainAdmin(user)) return true;
   
   const normalized = normalizePermissions(user.permissions);
   return !!normalized[key];

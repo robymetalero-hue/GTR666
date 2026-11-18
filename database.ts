@@ -1064,7 +1064,7 @@ try {
   for (const d of dupSales) {
     const rows = targetDb.prepare('SELECT id FROM sales WHERE client_operation_id = ? ORDER BY id ASC').all(d.client_operation_id) as any[];
     for (let i = 1; i < rows.length; i++) {
-      targetDb.prepare('UPDATE sales SET client_operation_id = client_operation_id || "-dup-" || id WHERE id = ?').run(rows[i].id);
+      targetDb.prepare("UPDATE sales SET client_operation_id = client_operation_id || '-dup-' || id WHERE id = ?").run(rows[i].id);
     }
   }
   targetDb.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_unique_client_op_id ON sales (client_operation_id) WHERE client_operation_id IS NOT NULL AND client_operation_id != '';");

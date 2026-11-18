@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { jsPDF } from 'jspdf';
 import { useAppContext } from '../context/AppContext';
 import { safeDispatchEvent } from '../utils/events';
-import { hasPermission } from '../utils/permissions';
+import { hasPermission, isAdminUser } from '../utils/permissions';
 import { 
   ClipboardCheck, CheckCircle, AlertTriangle, Play, X, 
   Eye, RefreshCw, Search, Check, ChevronLeft, 
@@ -55,9 +55,19 @@ interface CountItem {
   had_movements_during_count?: number;
 }
 
+interface ConfirmDialogState {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  cancelLabel?: string;
+  variant?: 'indigo' | 'emerald' | 'amber' | 'rose';
+  onConfirm: () => void | Promise<void>;
+  onCancel?: () => void | Promise<void>;
+}
+
 export default function PhysicalCountManager({ onClose, externalViewMode, embeddedMode = false }: PhysicalCountManagerProps) {
   const { user, products, fetchProducts, showNotification, fetchInventoryLockStatus, isKioskLocked, isOffline } = useAppContext();
-  const isAdmin = !isKioskLocked && (user?.role === 'admin' || user?.role === 'propietario' || user?.role === 'administrador' || user?.role === 'dueño' || user?.role === 'jefe');
+  const isAdmin = !isKioskLocked && isAdminUser(user);
   const canPreviewQuantities = !isKioskLocked && (isAdmin || hasPermission(user, 'preview_quantities_in_count'));
 
   // Bloqueo estricto del scroll del body mientras el modal esté abierto
@@ -79,35 +89,54 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
   const [historicalCounts, setHistoricalCounts] = useState<InventoryCount[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
 
   // Estados para inicio de nueva sesión
   const [auditorName, setAuditorName] = useState<string>(user?.username || 'Auditor Almacén');
   const [storeName, setStoreName] = useState<string>('Almacén Principal');
   const [selectedCategory, setSelectedCategory] = useState<string>('Todos');
   const [categories, setCategories] = useState<string[]>([]);
-  const [isBlindMode, setIsBlindMode] = useState<boolean>(!isAdmin && !canPreviewQuantities ? true : true);
+  const [isBlindMode, setIsBlindMode] = useState<boolean>(() => {
+    if (isKioskLocked || externalViewMode === 'blind') return true;
+    return !canPreviewQuantities;
+  });
+  const hasAutoSelectedVisibleRef = useRef<boolean>(Boolean(canPreviewQuantities));
   const [sessionNotes, setSessionNotes] = useState<string>('');
 
-  // Sincronizar forzado de modo a ciegas para operadores sin permisos de previsualización
+  // Sincronizar modo por defecto: Visible (Con Control) para usuarios autorizados, A Ciegas estricto en Kiosco o sin permiso
   useEffect(() => {
-    if (!canPreviewQuantities && !isBlindMode) {
-      setIsBlindMode(true);
+    if (user?.username && auditorName === 'Auditor Almacén') {
+      setAuditorName(user.username);
     }
-  }, [canPreviewQuantities, isBlindMode]);
+  }, [user?.username]);
 
-  // Advertencia de segregación de funciones (solo relevante si el usuario intenta hacer conteo con visibilidad STANDARD)
-  const [overrideSegregation, setOverrideSegregation] = useState<boolean>(false);
+  useEffect(() => {
+    if (isKioskLocked || externalViewMode === 'blind') {
+      setIsBlindMode(true);
+      return;
+    }
+    if (!canPreviewQuantities) {
+      setIsBlindMode(true);
+    } else if (!hasAutoSelectedVisibleRef.current) {
+      hasAutoSelectedVisibleRef.current = true;
+      setIsBlindMode(false);
+    }
+  }, [canPreviewQuantities, isKioskLocked, externalViewMode]);
+
+  // Advertencia de segregación de funciones (informativa)
+  const [overrideSegregation, setOverrideSegregation] = useState<boolean>(true);
   const [overrideReason, setOverrideReason] = useState<string>('');
   const [segregationWarning, setSegregationWarning] = useState<string | null>(null);
   const [isSessionSanitized, setIsSessionSanitized] = useState<boolean>(false);
 
-  // Modo a ciegas activo de forma estricta durante el conteo en progreso y SIEMPRE en Modo Kiosco
+  // Modo a ciegas activo de forma estricta en sesiones BLIND, en Modo Kiosco o cuando el usuario no tiene permiso de previsualización
   const isReviewMode = !isKioskLocked && (activeSession?.status === 'completado' || activeSession?.status === 'finalizado');
-  const isBlindActive = isKioskLocked || !isAdmin 
+  const isBlindActive = isKioskLocked || !canPreviewQuantities
     ? true 
     : isReviewMode 
       ? false 
-      : (activeSession?.mode === 'BLIND' || externalViewMode === 'blind');
+      : (activeSession?.mode === 'BLIND' || externalViewMode === 'blind' || isSessionSanitized);
 
   // Filtros del listado de conteo activo y sincronización en memoria RAM (Cero Caché Local)
   const [itemSearch, setItemSearch] = useState('');
@@ -117,6 +146,7 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
   const inFlightItemsRef = useRef<Map<number, Promise<boolean>>>(new Map<number, Promise<boolean>>());
   const startSessionOpIdRef = useRef<string>("");
   const completeSessionOpIdRef = useRef<string>("");
+  const approveSessionOpIdRef = useRef<string>("");
   const [pendingSyncCount, setPendingSyncCount] = useState(0);
   const [unsyncedItemIds, setUnsyncedItemIds] = useState<number[]>([]);
   const [activeFilter, setActiveFilter] = useState<'todos' | 'pendientes' | 'revisados' | 'diferencias' | 'reconteo'>('todos');
@@ -187,6 +217,12 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
       'x-user-role': effectiveRole,
       'x-kiosk-locked': isKioskLocked ? 'true' : 'false'
     };
+    if (typeof window !== 'undefined') {
+      const token = localStorage.getItem('auth_token');
+      if (token && token.trim()) {
+        headers['Authorization'] = `Bearer ${token.trim()}`;
+      }
+    }
     if (includeJson) {
       headers['Content-Type'] = 'application/json';
     }
@@ -265,9 +301,11 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
       });
       if (res.ok) {
         const counts: InventoryCount[] = await res.json();
-        const active = counts.find(c => c.status === 'en_progreso' || c.status === 'completado' || c.status === 'pausado' || c.status === 'finalizado');
+        const active = counts.find(c => c.status === 'en_progreso' || c.status === 'pausado')
+          || counts.find(c => c.status === 'completado' || c.status === 'finalizado');
         if (active) {
           setActiveSession(active);
+          setSessionError(null);
           await fetchSessionItems(active.id);
         } else {
           setActiveSession(null);
@@ -371,12 +409,17 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
   };
 
   const handleStartSession = async () => {
+    setSessionError(null);
     if (!auditorName.trim()) {
-      showNotification?.("Ingresa el nombre del auditor responsable.", "error");
+      const msg = "Ingresa el nombre del auditor responsable.";
+      setSessionError(msg);
+      showNotification?.(msg, "error");
       return;
     }
     if (isOffline && typeof navigator !== 'undefined' && !navigator.onLine) {
-      showNotification?.("⚠️ Sin conexión al servidor (pasaron 45s de espera): Reconéctate para iniciar el conteo en vivo.", "error");
+      const msg = "⚠️ Sin conexión al servidor (pasaron 45s de espera): Reconéctate para iniciar el conteo en vivo.";
+      setSessionError(msg);
+      showNotification?.(msg, "error");
       return;
     }
 
@@ -409,6 +452,7 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
 
       if (res.ok) {
         startSessionOpIdRef.current = "";
+        setSessionError(null);
         showNotification?.(`✓ Nueva sesión de auditoría física iniciada con éxito.`, "success");
         await fetchProducts();
         await fetchActiveSession();
@@ -419,36 +463,60 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
           await fetchActiveSession();
           return;
         }
-        const replace = confirm(`${responseData.error}\n\n¿Deseas cancelar la sesión anterior e iniciar esta nueva auditoría de inventario?`);
-        if (replace) {
-          const forceOpId = `count_force_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-          const retryRes = await fetchWithLiveGrace('/api/inventory-counts', {
-            method: 'POST',
-            headers: buildCountHeaders(true),
-            body: JSON.stringify({ ...payload, force_new: true, clientOperationId: forceOpId })
-          });
-          if (retryRes.ok) {
-            showNotification?.(`✓ Nueva sesión de auditoría iniciada con éxito.`, "success");
-            await fetchProducts();
+        setConfirmDialog({
+          title: 'Sesión de Conteo en Curso',
+          message: `${responseData.error}\n\n¿Deseas cancelar la sesión anterior e iniciar esta nueva auditoría de inventario?`,
+          confirmLabel: 'Cancelar Anterior e Iniciar Nueva',
+          cancelLabel: 'Continuar Sesión Actual',
+          variant: 'amber',
+          onConfirm: async () => {
+            setConfirmDialog(null);
+            setIsLoading(true);
+            try {
+              const forceOpId = `count_force_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+              const retryRes = await fetchWithLiveGrace('/api/inventory-counts', {
+                method: 'POST',
+                headers: buildCountHeaders(true),
+                body: JSON.stringify({ ...payload, force_new: true, clientOperationId: forceOpId })
+              });
+              if (retryRes.ok) {
+                setSessionError(null);
+                showNotification?.(`✓ Nueva sesión de auditoría iniciada con éxito.`, "success");
+                await fetchProducts();
+                await fetchActiveSession();
+              } else {
+                const errData = await retryRes.json().catch(() => ({ error: 'No se pudo iniciar la sesión.' }));
+                setSessionError(errData.error || "No se pudo iniciar la sesión.");
+                showNotification?.(errData.error || "No se pudo iniciar la sesión.", "error");
+              }
+            } catch {
+              setSessionError("Error de conexión al reemplazar la sesión anterior.");
+              showNotification?.("Error de conexión al reemplazar la sesión anterior.", "error");
+            } finally {
+              setIsLoading(false);
+            }
+          },
+          onCancel: async () => {
+            setConfirmDialog(null);
             await fetchActiveSession();
-          } else {
-            const errData = await retryRes.json();
-            showNotification?.(errData.error || "No se pudo iniciar la sesión.", "error");
           }
-        } else {
-          await fetchActiveSession();
-        }
+        });
       } else if (responseData.segregation_warning) {
         startSessionOpIdRef.current = "";
         setSegregationWarning(responseData.error);
+        setSessionError(responseData.error);
         showNotification?.(responseData.error, "warning");
       } else {
         startSessionOpIdRef.current = "";
-        showNotification?.(`Error al iniciar sesión: ${responseData.error}`, "error");
+        const errMsg = `Error al iniciar sesión: ${responseData.error || 'Error inesperado del servidor'}`;
+        setSessionError(errMsg);
+        showNotification?.(errMsg, "error");
       }
     } catch (err) {
       console.error(err);
-      showNotification?.("⚠️ No se pudo conectar con el servidor tras 45s de espera. Intenta nuevamente al recuperar señal.", "error");
+      const netMsg = "⚠️ No se pudo conectar con el servidor tras 45s de espera. Intenta nuevamente al recuperar señal.";
+      setSessionError(netMsg);
+      showNotification?.(netMsg, "error");
     } finally {
       setIsLoading(false);
     }
@@ -579,7 +647,7 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
     handleUpdateItem(item.id, { counted_stock: item.system_stock, is_checked: 1, status: 'contado' }, true);
   };
 
-  const handleMatchAllPending = async () => {
+  const handleMatchAllPending = () => {
     if (isKioskLocked || isBlindActive || !activeSummary.hasAdminVisibility) return;
     const targetItems = stockSection === 'with_stock' ? itemsWithStock : currentSectionItems;
     const pending = targetItems.filter(it => it.is_checked === 0);
@@ -587,46 +655,31 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
       showNotification?.("No hay productos pendientes por verificar en esta sección.", "info");
       return;
     }
-    if (!confirm(`¿Deseas marcar los ${pending.length} productos pendientes con la cantidad exacta que figura en el POS?`)) return;
-    
-    setIsLoading(true);
-    for (const item of pending) {
-      if (item.system_stock !== undefined) {
-        handleUpdateItem(item.id, { counted_stock: item.system_stock, is_checked: 1, status: 'contado' }, true);
+    setConfirmDialog({
+      title: 'Igualar Pendientes al Stock POS',
+      message: `¿Deseas marcar los ${pending.length} productos pendientes de esta sección con la cantidad exacta que figura actualmente en el POS?`,
+      confirmLabel: `Igualar ${pending.length} Productos`,
+      cancelLabel: 'Cancelar',
+      variant: 'indigo',
+      onConfirm: async () => {
+        setConfirmDialog(null);
+        setIsLoading(true);
+        for (const item of pending) {
+          if (item.system_stock !== undefined) {
+            handleUpdateItem(item.id, { counted_stock: item.system_stock, is_checked: 1, status: 'contado' }, true);
+          }
+        }
+        setIsLoading(false);
+        showNotification?.("✓ Todos los productos pendientes de esta sección han sido verificados con el stock del sistema.", "success");
       }
-    }
-    setIsLoading(false);
-    showNotification?.("✓ Todos los productos pendientes de esta sección han sido verificados con el stock del sistema.", "success");
+    });
   };
 
-  const handleCompleteSession = async () => {
+  const executeCompleteSession = async (uncountedAction: 'omit' | 'zero' = 'omit') => {
     if (!activeSession) return;
-    if (isOffline && typeof navigator !== 'undefined' && !navigator.onLine) {
-      showNotification?.("⚠️ Sin conexión al servidor (pasaron 45s de espera): Reconéctate para enviar el conteo físico en vivo.", "error");
-      return;
-    }
-
-    let uncountedAction = 'omit';
-    const uncounted = sessionItems.filter(it => it.is_checked === 0);
-    if (uncounted.length > 0) {
-      const countedCount = sessionItems.length - uncounted.length;
-      const confirmSend = confirm(
-        `📋 Resumen de Conteo Físico:\n\n` +
-        `• Artículos contados: ${countedCount} de ${sessionItems.length}\n` +
-        `• Artículos no contados: ${uncounted.length}\n\n` +
-        `¿Deseas enviar el reporte con solo los ${countedCount} artículos contados?\n\n` +
-        `✓ [Aceptar]: Los artículos no contados mantendrán su stock actual del sistema sin generar faltantes falsos.\n` +
-        `✕ [Cancelar]: Continuar contando en tienda.`
-      );
-      if (!confirmSend) {
-        return;
-      }
-      uncountedAction = 'omit';
-    }
-
     setIsLoading(true);
     try {
-      // Si estamos en modo visible para admin (nunca en Kiosco), auto-confirmar productos de stock 0 sin movimiento
+      // Si estamos en modo visible con control (nunca en Kiosco), auto-confirmar productos de stock 0 sin movimiento
       if (!isKioskLocked && activeSummary.hasAdminVisibility && !isBlindActive) {
         const uncountedZeroItems = sessionItems.filter(it => (it.system_stock ?? 0) <= 0 && it.is_checked === 0);
         for (const zItem of uncountedZeroItems) {
@@ -690,7 +743,8 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
         });
       } else {
         completeSessionOpIdRef.current = "";
-        showNotification?.("No se pudo completar la sesión de control físico.", "error");
+        const err = await res.json().catch(() => ({ error: "No se pudo completar la sesión de control físico." }));
+        showNotification?.(err.error || "No se pudo completar la sesión de control físico.", "error");
       }
     } catch (err) {
       console.error(err);
@@ -700,21 +754,62 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
     }
   };
 
+  const handleCompleteSession = async () => {
+    if (!activeSession) return;
+    if (isOffline && typeof navigator !== 'undefined' && !navigator.onLine) {
+      showNotification?.("⚠️ Sin conexión al servidor (pasaron 45s de espera): Reconéctate para enviar el conteo físico en vivo.", "error");
+      return;
+    }
+
+    const uncounted = sessionItems.filter(it => {
+      if (!isKioskLocked && activeSummary.hasAdminVisibility && !isBlindActive && (it.system_stock ?? 0) <= 0) {
+        return false;
+      }
+      return it.is_checked === 0;
+    });
+
+    if (uncounted.length > 0) {
+      const countedCount = sessionItems.length - uncounted.length;
+      setConfirmDialog({
+        title: 'Enviar Conteo Físico Parcial',
+        message:
+          `• Artículos verificados: ${countedCount} de ${sessionItems.length}\n` +
+          `• Artículos sin contar: ${uncounted.length}\n\n` +
+          `Los artículos no contados mantendrán su stock actual del sistema sin generar faltantes falsos. ¿Deseas enviar el reporte ahora?`,
+        confirmLabel: 'Enviar Reporte Contado',
+        cancelLabel: 'Seguir Contando',
+        variant: 'amber',
+        onConfirm: async () => {
+          setConfirmDialog(null);
+          await executeCompleteSession('omit');
+        }
+      });
+      return;
+    }
+
+    await executeCompleteSession('omit');
+  };
+
   const handleApproveCount = async () => {
     if (!activeSession || isKioskLocked || !isAdmin) return;
     setIsLoading(true);
     try {
+      if (!approveSessionOpIdRef.current) {
+        approveSessionOpIdRef.current = `count_approve_${activeSession.id}_${Date.now()}`;
+      }
       const res = await fetchWithLiveGrace(`/api/inventory-counts/${activeSession.id}/approve`, {
         method: 'POST',
         headers: buildCountHeaders(true),
         body: JSON.stringify({
           admin_id: user?.id,
           admin_username: user?.username,
-          notes: adminNotes || 'Conciliación aprobada sin discrepancias mayores.'
+          notes: adminNotes || 'Conciliación aprobada sin discrepancias mayores.',
+          clientOperationId: approveSessionOpIdRef.current
         })
       });
 
       if (res.ok) {
+        approveSessionOpIdRef.current = "";
         showNotification?.("✓ Ajustes físicos de inventario aprobados y aplicados correctamente.", "success");
         setAdminNotes('');
         await fetchActiveSession();
@@ -731,6 +826,7 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
         });
         fetchInventoryLockStatus?.();
       } else {
+        approveSessionOpIdRef.current = "";
         const err = await res.json();
         showNotification?.(`Error al aprobar: ${err.error}`, "error");
       }
@@ -742,7 +838,7 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
     }
   };
 
-  const handleRequestRecount = async () => {
+  const handleRequestRecount = () => {
     if (!activeSession || isKioskLocked || !isAdmin) return;
     const discrepancyItems = sessionItems.filter(it => it.counted_stock !== (it.system_stock ?? it.live_stock ?? 0));
     const targetIds = selectedRecountIds.length > 0 
@@ -754,85 +850,103 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
       return;
     }
 
-    if (!confirm(`¿Solicitar reconteo físico de los ${targetIds.length} productos seleccionados? La sesión volverá a estar disponible para el personal con aviso de verificación.`)) {
-      return;
-    }
+    setConfirmDialog({
+      title: 'Solicitar Reconteo de Discrepancias',
+      message: `¿Solicitar reconteo físico de los ${targetIds.length} productos seleccionados? La sesión volverá a estar disponible para verificación.`,
+      confirmLabel: `Solicitar Reconteo (${targetIds.length})`,
+      cancelLabel: 'Cancelar',
+      variant: 'indigo',
+      onConfirm: async () => {
+        setConfirmDialog(null);
+        setIsLoading(true);
+        try {
+          const res = await fetchWithLiveGrace(`/api/inventory-counts/${activeSession.id}/recount`, {
+            method: 'POST',
+            headers: buildCountHeaders(true),
+            body: JSON.stringify({
+              item_ids: targetIds,
+              reason: 'Diferencia detectada en revisión administrativa'
+            })
+          });
 
-    setIsLoading(true);
-    try {
-      const res = await fetchWithLiveGrace(`/api/inventory-counts/${activeSession.id}/recount`, {
-        method: 'POST',
-        headers: buildCountHeaders(true),
-        body: JSON.stringify({
-          item_ids: targetIds,
-          reason: 'Diferencia detectada en revisión administrativa'
-        })
-      });
-
-      if (res.ok) {
-        showNotification?.(`✓ Reconteo solicitado para ${targetIds.length} artículos. Sesión reabierta para el personal.`, "success");
-        await fetchActiveSession();
-        safeDispatchEvent('inventory_operation', {
-          detail: {
-            type: 'recount_requested',
-            id: activeSession.id,
-            user: user?.username || 'admin',
-            timestamp: new Date().toISOString()
+          if (res.ok) {
+            showNotification?.(`✓ Reconteo solicitado para ${targetIds.length} artículos. Sesión reabierta para el personal.`, "success");
+            await fetchActiveSession();
+            safeDispatchEvent('inventory_operation', {
+              detail: {
+                type: 'recount_requested',
+                id: activeSession.id,
+                user: user?.username || 'admin',
+                timestamp: new Date().toISOString()
+              }
+            });
+          } else {
+            const err = await res.json();
+            showNotification?.(`Error al solicitar reconteo: ${err.error || 'Error desconocido'}`, "error");
           }
-        });
-      } else {
-        const err = await res.json();
-        showNotification?.(`Error al solicitar reconteo: ${err.error || 'Error desconocido'}`, "error");
+        } catch (e: any) {
+          console.error(e);
+          showNotification?.("Error de conexión al solicitar reconteo.", "error");
+        } finally {
+          setIsLoading(false);
+        }
       }
-    } catch (e: any) {
-      console.error(e);
-      showNotification?.("Error de conexión al solicitar reconteo.", "error");
-    } finally {
-      setIsLoading(false);
-    }
+    });
   };
 
-  const handleCancelSession = async () => {
+  const handleCancelSession = () => {
     if (!activeSession) return;
-    if (isKioskLocked && Number(activeSession.user_id) !== Number(user?.id)) {
-      showNotification?.("Solo puedes cancelar una sesión de conteo iniciada por tu usuario.", "error");
+    if (!isAdmin && Number(activeSession.user_id) !== Number(user?.id)) {
+      showNotification?.("Solo el usuario que inició la sesión o un administrador puede cancelarla.", "error");
       return;
     }
-    if (!confirm("¿Está seguro que desea cancelar esta sesión de control físico? Los cambios no guardados se descartarán.")) return;
-    setIsLoading(true);
-    try {
-      const res = await fetchWithLiveGrace(`/api/inventory-counts/${activeSession.id}/status`, {
-        method: 'PUT',
-        headers: buildCountHeaders(true),
-        body: JSON.stringify({ status: 'cancelado' })
-      });
-      if (res.ok) {
-        showNotification?.("Sesión de auditoría cancelada e inventario liberado.", "info");
-        setActiveSession(null);
-        setSessionItems([]);
-        await fetchActiveSession();
-        await fetchHistory();
-        await fetchProducts();
+    setConfirmDialog({
+      title: 'Cancelar Sesión de Control Físico',
+      message: '¿Estás seguro de que deseas cancelar esta sesión de control físico? El stock actual del sistema NO se verá afectado.',
+      confirmLabel: 'Sí, Cancelar Sesión',
+      cancelLabel: 'Volver al Conteo',
+      variant: 'rose',
+      onConfirm: async () => {
+        setConfirmDialog(null);
+        setIsLoading(true);
+        try {
+          const res = await fetchWithLiveGrace(`/api/inventory-counts/${activeSession.id}/status`, {
+            method: 'PUT',
+            headers: buildCountHeaders(true),
+            body: JSON.stringify({
+              status: 'cancelado',
+              clientOperationId: `count_cancel_${activeSession.id}_${Date.now()}`
+            })
+          });
+          if (res.ok) {
+            showNotification?.("Sesión de auditoría cancelada sin cambios en el inventario.", "info");
+            setActiveSession(null);
+            setSessionItems([]);
+            await fetchActiveSession();
+            await fetchHistory();
+            await fetchProducts();
 
-        safeDispatchEvent('inventory_operation', {
-          detail: {
-            type: 'physical_count_cancelled',
-            id: activeSession.id,
-            user: user?.username || 'admin',
-            timestamp: new Date().toISOString()
+            safeDispatchEvent('inventory_operation', {
+              detail: {
+                type: 'physical_count_cancelled',
+                id: activeSession.id,
+                user: user?.username || 'admin',
+                timestamp: new Date().toISOString()
+              }
+            });
+            fetchInventoryLockStatus?.();
+          } else {
+            const err = await res.json().catch(() => ({ error: 'No se pudo cancelar la sesión.' }));
+            showNotification?.(err.error || "No se pudo cancelar la sesión.", "error");
           }
-        });
-        fetchInventoryLockStatus?.();
-      } else {
-        const err = await res.json().catch(() => ({ error: 'No se pudo cancelar la sesión.' }));
-        showNotification?.(err.error || "No se pudo cancelar la sesión.", "error");
+        } catch (err) {
+          console.error(err);
+          showNotification?.("Error de conexión al cancelar la sesión.", "error");
+        } finally {
+          setIsLoading(false);
+        }
       }
-    } catch (err) {
-      console.error(err);
-      showNotification?.("Error de conexión al cancelar la sesión.", "error");
-    } finally {
-      setIsLoading(false);
-    }
+    });
   };
 
   const handleViewHistoricCount = (count: InventoryCount) => {
@@ -1090,10 +1204,10 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
     const totalItems = itemsList.length;
     const checkedItems = itemsList.filter(it => it.is_checked === 1 && it.status !== 'requiere_revision' && !it.recount_requested).length;
     
-    // Visibilidad de stock teórico: en revisión administrativa o completada siempre es visible para auditar
-    const isReviewMode = activeSession?.status === 'completado' || activeSession?.status === 'en_revision' || activeSession?.status === 'finalizado';
+    // Visibilidad de stock teórico: habilitada en modo STANDARD para usuarios autorizados (nunca en Kiosco ni en sesiones BLIND activas)
+    const isReviewState = !isKioskLocked && (activeSession?.status === 'completado' || activeSession?.status === 'en_revision' || activeSession?.status === 'finalizado');
     const itemsWithSysStock = itemsList.filter(it => it.system_stock !== undefined || it.live_stock !== undefined);
-    const hasAdminVisibility = itemsWithSysStock.length > 0 && (isAdmin || isReviewMode || !isBlindActive);
+    const hasAdminVisibility = itemsWithSysStock.length > 0 && !isKioskLocked && (canPreviewQuantities || isReviewState) && !isBlindActive;
 
     const pendingItems = isBlindActive || !hasAdminVisibility
       ? itemsList.filter(it => (it.is_checked === 0 || it.status === 'pendiente') || it.status === 'requiere_revision' || Boolean(it.recount_requested)).length
@@ -1460,6 +1574,13 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
                             />
                             <span>Confirmar excepción de auto-conteo</span>
                           </label>
+                        </div>
+                      )}
+
+                      {sessionError && (
+                        <div className="p-2.5 bg-rose-500/10 border border-rose-500/30 rounded-xl flex items-start gap-2 text-rose-700 dark:text-rose-300 text-left">
+                          <AlertCircle size={15} className="shrink-0 mt-0.5 text-rose-500" />
+                          <span className="text-[11px] font-bold leading-snug">{sessionError}</span>
                         </div>
                       )}
 
@@ -1874,8 +1995,8 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
                         </select>
                       )}
 
-                      {/* Botón rápido = Todo al POS para Admin (Solo en modo STANDARD) */}
-                      {isAdmin && !isBlindActive && activeSummary.hasAdminVisibility && activeSummary.pendingItems > 0 && (
+                      {/* Botón rápido = Todo al POS para usuarios con visibilidad autorizada (Solo en modo STANDARD) */}
+                      {canPreviewQuantities && !isBlindActive && activeSummary.hasAdminVisibility && activeSummary.pendingItems > 0 && (
                         <button
                           type="button"
                           onClick={handleMatchAllPending}
@@ -2512,6 +2633,66 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
             >
               Cerrar Detalle
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL DE CONFIRMACIÓN INTERNO (Reemplaza window.confirm para 100% compatibilidad móvil/PWA) */}
+      {confirmDialog && (
+        <div className="fixed inset-0 z-[12000] bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-[#0f172a] rounded-2xl border border-slate-200 dark:border-slate-800 max-w-md w-full p-5 shadow-2xl flex flex-col gap-4">
+            <div className="flex items-start gap-3">
+              <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+                confirmDialog.variant === 'rose'
+                  ? 'bg-rose-500/15 text-rose-500'
+                  : confirmDialog.variant === 'amber'
+                    ? 'bg-amber-500/15 text-amber-500'
+                    : confirmDialog.variant === 'emerald'
+                      ? 'bg-emerald-500/15 text-emerald-500'
+                      : 'bg-indigo-500/15 text-indigo-500'
+              }`}>
+                <AlertTriangle size={20} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <h4 className="text-sm font-black text-slate-900 dark:text-white uppercase tracking-tight">
+                  {confirmDialog.title}
+                </h4>
+                <p className="text-xs text-slate-600 dark:text-slate-300 mt-1.5 whitespace-pre-line leading-relaxed font-medium">
+                  {confirmDialog.message}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800">
+              <button
+                type="button"
+                onClick={() => {
+                  if (confirmDialog.onCancel) {
+                    confirmDialog.onCancel();
+                  } else {
+                    setConfirmDialog(null);
+                  }
+                }}
+                className="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-bold uppercase transition cursor-pointer"
+              >
+                {confirmDialog.cancelLabel || 'Cancelar'}
+              </button>
+              <button
+                type="button"
+                onClick={() => confirmDialog.onConfirm()}
+                className={`px-4 py-2 rounded-xl text-white text-xs font-black uppercase transition cursor-pointer shadow-md ${
+                  confirmDialog.variant === 'rose'
+                    ? 'bg-rose-600 hover:bg-rose-500'
+                    : confirmDialog.variant === 'amber'
+                      ? 'bg-amber-600 hover:bg-amber-500'
+                      : confirmDialog.variant === 'emerald'
+                        ? 'bg-emerald-600 hover:bg-emerald-500'
+                        : 'bg-indigo-600 hover:bg-indigo-500'
+                }`}
+              >
+                {confirmDialog.confirmLabel}
+              </button>
+            </div>
           </div>
         </div>
       )}

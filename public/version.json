@@ -1,5 +1,5 @@
 {
-  "version": "2.6.2",
-  "buildTime": 1795009000000,
-  "releaseName": "GTR POS Enterprise v2.6.2 — Blindaje Total de Inventario, Historial con Productos & Cero Alteraciones Automáticas"
+  "version": "2.6.3",
+  "buildTime": 1795015000000,
+  "releaseName": "GTR POS Enterprise v2.6.3 — Control Físico con Cantidades Visibles, Integración Multi-Usuario & Cero Regresiones SQL"
 }

@@ -807,7 +807,7 @@ function AppLayout() {
                     {renderCollapsedNavItem('ventas_pendientes', 'Créditos / Cuentas por Cobrar', Clock, 'manage_credits')}
                     {renderCollapsedNavItem('productos', 'Inventario de Productos', PackageSearch, 'view_inventory')}
                     {renderCollapsedNavItem('departamentos', 'Departamentos', Folder, 'view_inventory')}
-                    {renderCollapsedNavItem('conteo_fisico', 'Control Físico de Inventario', ClipboardCheck)}
+                    {(hasPermission(user, 'view_inventory') || hasPermission(user, 'physical_control_checklist')) && renderCollapsedNavItem('conteo_fisico', 'Control Físico de Inventario', ClipboardCheck)}
                     {renderCollapsedNavItem('devoluciones', 'Devoluciones y Mermas', Undo2, 'view_inventory')}
                     {renderCollapsedNavItem('reportes', 'Dashboard y Reportes', LayoutDashboard, 'view_reports')}
                     {renderCollapsedNavItem('analisis', 'Analítica y Proyecciones', TrendingUp, 'view_reports')}
@@ -816,7 +816,7 @@ function AppLayout() {
                     {renderCollapsedNavItem('configuraciones', 'Configuraciones', Settings)}
                     {isAdminUser(user) && renderCollapsedNavItem('diagnostico', 'Diagnósticos & IA', Activity, 'view_diagnostics')}
                     {canAccessForensicAudit(user) && renderCollapsedNavItem('auditoria_forense', 'Auditoría Forense IA', ShieldCheck, 'access_forensic_audit')}
-                    {user?.role === 'admin' && renderCollapsedNavItem('usuarios', 'Usuarios', Users)}
+                    {isAdminUser(user) && renderCollapsedNavItem('usuarios', 'Usuarios', Users)}
                 </div>
             </div>
 
@@ -969,7 +969,7 @@ function AppLayout() {
                         {renderNavItem('productos', 'Productos', PackageSearch, 'view_inventory')}
                         {renderNavItem('departamentos', 'Departamentos', Folder, 'view_inventory')}
                         {renderNavItem('inventario', 'Inventario', ClipboardCheck, 'view_inventory')}
-                        {renderNavItem('conteo_fisico', 'Control Físico', ClipboardCheck, 'view_inventory')}
+                        {(hasPermission(user, 'view_inventory') || hasPermission(user, 'physical_control_checklist')) && renderNavItem('conteo_fisico', 'Control Físico', ClipboardCheck)}
                         {renderNavItem('devoluciones', 'Devoluciones', Undo2, 'view_inventory')}
                     </div>
 
@@ -984,7 +984,7 @@ function AppLayout() {
                         {renderNavItem('hardware', 'Conexión de Hardware', Cpu)}
                         {isAdminUser(user) && renderNavItem('diagnostico', 'Diagnósticos & IA', Activity, 'view_diagnostics')}
                         {canAccessForensicAudit(user) && renderNavItem('auditoria_forense', 'Auditoría Forense IA', ShieldCheck, 'access_forensic_audit')}
-                        {user?.role === 'admin' && renderNavItem('usuarios', 'Usuarios', Users)}
+                        {isAdminUser(user) && renderNavItem('usuarios', 'Usuarios', Users)}
                     </div>
                 </div>
             </div>
@@ -1362,7 +1362,7 @@ function AppLayout() {
                                     {renderNavItem('productos', 'Productos', PackageSearch, 'view_inventory')}
                                     {renderNavItem('departamentos', 'Departamentos', Folder, 'view_inventory')}
                                     {renderNavItem('inventario', 'Inventario', ClipboardCheck, 'view_inventory')}
-                                    {renderNavItem('conteo_fisico', 'Control Físico', ClipboardCheck, 'view_inventory')}
+                                    {(hasPermission(user, 'view_inventory') || hasPermission(user, 'physical_control_checklist')) && renderNavItem('conteo_fisico', 'Control Físico', ClipboardCheck)}
                                     {renderNavItem('devoluciones', 'Devoluciones', Undo2, 'view_inventory')}
                                 </motion.div>
 
@@ -1381,7 +1381,7 @@ function AppLayout() {
                                     {renderNavItem('configuraciones', 'Configuraciones', Settings)}
                                     {isAdminUser(user) && renderNavItem('diagnostico', 'Diagnósticos & IA', Activity, 'view_diagnostics')}
                                     {canAccessForensicAudit(user) && renderNavItem('auditoria_forense', 'Auditoría Forense IA', ShieldCheck, 'access_forensic_audit')}
-                                    {user?.role === 'admin' && renderNavItem('usuarios', 'Usuarios', Users)}
+                                    {isAdminUser(user) && renderNavItem('usuarios', 'Usuarios', Users)}
                                 </motion.div>
 
                                 {/* Profile interactive box closely integrated within the mobile dropdown */}
@@ -1659,7 +1659,7 @@ function AppLayout() {
                                 {view === 'devoluciones' && !isKioskLocked && hasPermission(user, 'view_inventory') && <DevolucionesView />}
                                 {view === 'reportes' && !isKioskLocked && hasPermission(user, 'view_reports') && <Dashboard />}
                                 {view === 'analisis' && !isKioskLocked && hasPermission(user, 'view_reports') && <AnalisisView />}
-                                {view === 'usuarios' && !isKioskLocked && user?.role === 'admin' && <PermissionsConsole />}
+                                {view === 'usuarios' && !isKioskLocked && isAdminUser(user) && <PermissionsConsole />}
                                 {view === 'cajas' && hasPermission(user, 'manage_caja') && <CajasView />}
                                 {view === 'conteo_fisico' && <PhysicalCountManager onClose={() => setView('pos')} />}
                                 {view === 'configuraciones' && (!isKioskLocked || isSupervisorUnlocked) && <ConfiguracionesView />}
@@ -1988,7 +1988,15 @@ function AppLayout() {
             </AnimatePresence>
 
             {globalNotification && (
-                <div className={`fixed bottom-6 right-6 p-4 rounded-xl shadow-2xl z-50 flex items-center gap-3 text-white max-w-sm animate-in slide-in-from-bottom-5 ${globalNotification.type === "success" ? "bg-emerald-600" : globalNotification.type === "warn" ? "bg-amber-500" : "bg-rose-600"}`}>
+                <div className={`fixed bottom-6 right-6 p-4 rounded-xl shadow-2xl z-[20000] flex items-center gap-3 text-white max-w-sm animate-in slide-in-from-bottom-5 ${
+                    globalNotification.type === "success"
+                        ? "bg-emerald-600"
+                        : globalNotification.type === "warn" || globalNotification.type === "warning"
+                            ? "bg-amber-500"
+                            : globalNotification.type === "info"
+                                ? "bg-indigo-600"
+                                : "bg-rose-600"
+                }`}>
                     <div className="flex-1 font-bold text-sm">
                         {globalNotification.message}
                     </div>
