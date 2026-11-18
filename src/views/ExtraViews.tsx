@@ -374,11 +374,11 @@ export function HistorialVentasView() {
                 }
             }
 
-            // General query matching ID, client_name or user_name (cashier)
+            // General query matching ID, sold product description, client_name or user_name (cashier)
             if (searchQuery.trim() !== '') {
                 const query = searchQuery.toLowerCase().trim();
                 const searchTerms = query.split(/\s+/);
-                const searchableText = `#${sale.id} ${sale.client_name || ""} ${sale.user_name || "admin"}`.toLowerCase();
+                const searchableText = `#${sale.id} ${sale.items_summary || ""} ${sale.client_name || ""} ${sale.user_name || "admin"}`.toLowerCase();
                 if (!searchTerms.every(term => searchableText.includes(term))) {
                     return false;
                 }
@@ -1313,7 +1313,7 @@ export function HistorialVentasView() {
                                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-500" size={14} />
                                 <input 
                                     type="text"
-                                    placeholder="Buscar por #Ticket, cliente, cajero..."
+                                    placeholder="Buscar por #Ticket, producto vendido, cajero..."
                                     value={searchQuery}
                                     onChange={(e) => setSearchQuery(e.target.value)}
                                     className="w-full pl-9 pr-8 py-2 text-xs bg-white dark:bg-[#070c14] border border-slate-200 dark:border-slate-800 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-500 text-slate-750 dark:text-slate-200 font-medium"
@@ -1419,6 +1419,8 @@ export function HistorialVentasView() {
                             ) : (
                                 filteredSales.map(sale => {
                                     const isSelected = selectedSale?.id === sale.id;
+                                    const rawClient = String(sale.client_name || '').trim();
+                                    const isGenericClient = !rawClient || ['cliente particular', 'particular', 'público general', 'publico general'].includes(rawClient.toLowerCase());
                                     return (
                                         <div
                                             key={sale.id}
@@ -1447,13 +1449,19 @@ export function HistorialVentasView() {
                                                         {sale.payment_method}
                                                     </span>
                                                 </div>
-                                                <div className="font-extrabold text-xs text-slate-800 dark:text-slate-200 truncate uppercase">
-                                                    {sale.client_name || 'Cliente Particular'}
+                                                <div className="font-extrabold text-xs text-slate-850 dark:text-slate-100 leading-snug line-clamp-2 uppercase">
+                                                    {sale.items_summary || 'Venta registrada'}
                                                 </div>
-                                                <div className="text-[10px] text-slate-400 flex items-center gap-2 mt-0.5">
-                                                    <span>{sale.item_count || 1} ítems</span>
+                                                <div className="text-[10px] text-slate-400 flex items-center gap-1.5 flex-wrap mt-0.5">
+                                                    <span>{sale.item_count || 1} {Number(sale.item_count || 1) === 1 ? 'ítem' : 'ítems'}</span>
                                                     <span>•</span>
                                                     <span>@{sale.user_name || 'admin'}</span>
+                                                    {!isGenericClient && (
+                                                        <>
+                                                            <span>•</span>
+                                                            <span className="text-indigo-500 dark:text-indigo-400 font-semibold truncate max-w-[130px]">{rawClient}</span>
+                                                        </>
+                                                    )}
                                                 </div>
                                             </div>
                                             <div className="text-right shrink-0 flex flex-col items-end gap-1">
@@ -1486,7 +1494,8 @@ export function HistorialVentasView() {
                                     <tr>
                                         <th className="p-3.5 pl-5"># Ticket</th>
                                         <th className="p-3.5">Fecha y Hora</th>
-                                        <th className="p-3.5">Cliente</th>
+                                        <th className="p-3.5">Productos Vendidos</th>
+                                        <th className="p-3.5">Vendedor</th>
                                         <th className="p-3.5 text-center">Método</th>
                                         <th className="p-3.5 text-right">Ítems</th>
                                         <th className="p-3.5 text-right pr-5">Total</th>
@@ -1495,13 +1504,15 @@ export function HistorialVentasView() {
                                 <tbody className="divide-y divide-slate-100 dark:divide-slate-850/50 text-[11px] font-bold">
                                     {filteredSales.length === 0 ? (
                                         <tr>
-                                            <td colSpan={6} className="p-10 text-center text-slate-400 font-medium">
+                                            <td colSpan={7} className="p-10 text-center text-slate-400 font-medium">
                                                 Ninguna venta registrada en este período seleccionado.
                                             </td>
                                         </tr>
                                     ) : (
                                         filteredSales.map(sale => {
                                             const isSelected = selectedSale?.id === sale.id;
+                                            const rawClient = String(sale.client_name || '').trim();
+                                            const isGenericClient = !rawClient || ['cliente particular', 'particular', 'público general', 'publico general'].includes(rawClient.toLowerCase());
                                             return (
                                                 <tr 
                                                     key={sale.id}
@@ -1513,11 +1524,19 @@ export function HistorialVentasView() {
                                                     }`}
                                                 >
                                                     <td className="p-3.5 pl-5 font-mono font-bold text-slate-400">#{sale.id}</td>
-                                                    <td className="p-3.5 font-normal text-slate-500 dark:text-slate-400">
+                                                    <td className="p-3.5 font-normal text-slate-500 dark:text-slate-400 whitespace-nowrap">
                                                         {new Date(sale.created_at).toLocaleString()}
                                                     </td>
-                                                    <td className="p-3.5 font-bold text-slate-800 dark:text-slate-200 uppercase truncate max-w-[140px]">
-                                                        {sale.client_name || 'Particular'}
+                                                    <td className="p-3.5 font-extrabold text-slate-800 dark:text-slate-200 uppercase max-w-[280px]">
+                                                        <div className="line-clamp-2 leading-snug">{sale.items_summary || 'Venta registrada'}</div>
+                                                        {!isGenericClient && (
+                                                            <div className="text-[9.5px] font-semibold text-indigo-500 dark:text-indigo-400 mt-0.5 normal-case">
+                                                                Cliente: {rawClient}
+                                                            </div>
+                                                        )}
+                                                    </td>
+                                                    <td className="p-3.5 font-semibold text-slate-500 dark:text-slate-400 whitespace-nowrap">
+                                                        @{sale.user_name || 'admin'}
                                                     </td>
                                                     <td className="p-3.5 text-center">
                                                         <span className={`text-[9px] px-2 py-0.5 rounded-lg border uppercase tracking-wider font-extrabold ${
@@ -1534,8 +1553,8 @@ export function HistorialVentasView() {
                                                             {sale.payment_method}
                                                         </span>
                                                     </td>
-                                                    <td className="p-3.5 text-right font-mono text-slate-500 font-semibold">{sale.item_count} pz</td>
-                                                    <td className="p-3.5 text-right pr-5 font-black text-slate-850 dark:text-white font-mono text-xs">
+                                                    <td className="p-3.5 text-right font-mono text-slate-500 font-semibold whitespace-nowrap">{sale.item_count} pz</td>
+                                                    <td className="p-3.5 text-right pr-5 font-black text-slate-850 dark:text-white font-mono text-xs whitespace-nowrap">
                                                         <div>{sale.currency === 'USD' ? '$' : 'Bs.'} {sale.total.toFixed(2)}</div>
                                                         {Number(sale.returned_amount || 0) > 0 && (
                                                             <div className={`text-[9px] font-extrabold uppercase mt-0.5 ${

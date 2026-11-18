@@ -2361,6 +2361,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         )
     );
 
+    if (typeof window !== 'undefined') {
+        (window as any).__gtrIsKioskLocked = isKioskLocked;
+        (window as any).__gtrSupervisorUnlocked = isSupervisorUnlocked;
+    }
+
     return (
         <AppContext.Provider value={{
             isInitializing,
@@ -2370,15 +2375,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             setDarkMode,
             kioskMode,
             setKioskMode: async (k) => { 
-                setKioskMode(k); 
-                localStorage.setItem('kioskMode', String(k)); 
-                if (k) {
-                    setIsSupervisorUnlocked(false);
-                    setSupervisorInfo(null);
-                }
                 try {
                     const token = typeof localStorage !== 'undefined' ? localStorage.getItem('auth_token') : null;
-                    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+                    const headers: Record<string, string> = {
+                        'Content-Type': 'application/json',
+                        'x-kiosk-locked': 'false'
+                    };
                     if (token) headers['Authorization'] = `Bearer ${token}`;
                     await fetch('/api/settings/kiosk', {
                         method: 'POST',
@@ -2387,6 +2389,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                     });
                 } catch (e) {
                     console.error("Error saving kiosk mode to server", e);
+                }
+                setKioskMode(k); 
+                localStorage.setItem('kioskMode', String(k)); 
+                if (k) {
+                    setIsSupervisorUnlocked(false);
+                    setSupervisorInfo(null);
+                    if (typeof window !== 'undefined') {
+                        (window as any).__gtrIsKioskLocked = true;
+                        (window as any).__gtrSupervisorUnlocked = false;
+                    }
                 }
             },
             isKioskLocked,

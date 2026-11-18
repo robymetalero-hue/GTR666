@@ -1110,88 +1110,15 @@ export function auditDatabaseByPeriod(filter: PeriodAuditFilter): PeriodAuditRes
  */
 export function reconcileProductDiscrepancy(
   productId: number,
-  notes?: string,
-  adminUsername: string = 'admin'
+  _notes?: string,
+  _adminUsername: string = 'sistema'
 ): { success: boolean; message: string; updatedStock: number } {
   const p = db.prepare('SELECT id, name, sku, stock FROM products WHERE id = ?').get(productId) as any;
-  if (!p) throw new Error('Producto no encontrado');
-
-  const timeline = getProductForensicTimeline(productId);
-  if (!timeline) throw new Error('No se pudo calcular el libro mayor inmutable');
-
-  const expectedStock = timeline.calculatedLedgerStock;
-  const currentStock = Number(p.stock) || 0;
-
-  // A02: Insufficient historical baseline prevents imposing inferred or negative stock
-  if (!timeline.hasSufficientHistory || expectedStock < 0) {
-    return {
-      success: false,
-      rejected: true,
-      message: 'Historia incompleta o sin saldo inicial validado; no se puede imponer stock inferido.',
-      updatedStock: currentStock
-    } as any;
-  }
-
-  const diff = expectedStock - currentStock;
-
-  if (diff === 0) {
-    return { success: true, message: `El producto ${p.name} ya está 100% cuadrado (${expectedStock} unidades).`, updatedStock: currentStock };
-  }
-
-  const now = getBoliviaISOString();
-  const isInc = diff > 0;
-  const absDiff = Math.abs(diff);
-
-  const tx = db.transaction(() => {
-    // 1. Update product stock
-    db.prepare('UPDATE products SET stock = ? WHERE id = ?').run(expectedStock, productId);
-
-    // 2. Insert into inventory_audit_logs
-    db.prepare(`
-      INSERT INTO inventory_audit_logs (
-        product_id, type, quantity, price, user_id, username, reference, notes, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      productId,
-      isInc ? 'ajuste_incremento' : 'ajuste_decremento',
-      absDiff,
-      0,
-      1,
-      adminUsername,
-      'Auditoría Forense IA',
-      notes || `Conciliación automática certificada por motor forense (Ajuste de ${currentStock} a ${expectedStock} unidades)`,
-      now
-    );
-
-    // 3. Insert into system_audit_logs
-    db.prepare(`
-      INSERT INTO system_audit_logs (
-        event_type, action, user_name, user_role, entity_type, entity_id,
-        related_product_id, quantity_before, quantity_changed, quantity_after,
-        reason, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      'ajuste_manual',
-      isInc ? 'incremento' : 'decremento',
-      adminUsername,
-      'admin',
-      'product',
-      productId,
-      productId,
-      currentStock,
-      diff,
-      expectedStock,
-      `Auditoría Forense IA: Conciliación automática certificada de desfase histórico (${currentStock} -> ${expectedStock})`,
-      now
-    );
-  });
-
-  tx();
-
+  const currentStock = p ? (Number(p.stock) || 0) : 0;
   return {
-    success: true,
-    message: `Producto ${p.name} (SKU: ${p.sku}) conciliado exitosamente. Stock corregido de ${currentStock} a ${expectedStock} unidades.`,
-    updatedStock: expectedStock
+    success: false,
+    message: 'La conciliación forense automática está permanentemente deshabilitada. El stock solo se modifica mediante ingresos, salidas y ajustes manuales verificados.',
+    updatedStock: currentStock
   };
 }
 

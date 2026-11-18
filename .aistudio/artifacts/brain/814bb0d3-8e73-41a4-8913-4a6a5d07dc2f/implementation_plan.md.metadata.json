@@ -1,6 +1,0 @@
-{
-  "summary": "Plan de Equilibrio Exacto: Cero Cache en Celulares + Cero Doble Registro (Idempotencia estricta) + Tolerancia de 45 Segundos en Vivo sin bloquear la pantalla en pequenas desconexiones y sincronizacion automatica al terminar los 45s.",
-  "updatedAt": "2026-11-03T14:57:29.328908415Z",
-  "requestFeedback": true,
-  "userFacing": true
-}

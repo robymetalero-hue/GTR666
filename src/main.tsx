@@ -138,6 +138,17 @@ const patchedFetch = async function (input: RequestInfo | URL, init?: RequestIni
         console.error("Error parsing user in fetch patch", err);
       }
     }
+
+    // Propagate strict Kiosk Lock state to server so Kiosk terminals can never alter inventory stock or approve counts
+    if (!headersObj['x-kiosk-locked'] && !url.includes('/api/auth/verify-supervisor')) {
+      const runtimeKioskLocked = typeof window !== 'undefined' && (window as any).__gtrIsKioskLocked !== undefined
+        ? Boolean((window as any).__gtrIsKioskLocked)
+        : (localStorage.getItem('kioskMode') === 'true' && !(typeof window !== 'undefined' && (window as any).__gtrSupervisorUnlocked === true));
+      if (runtimeKioskLocked) {
+        headersObj['x-kiosk-locked'] = 'true';
+      }
+    }
+
     init.headers = headersObj;
   }
   return originalFetch(input, init).then(res => {

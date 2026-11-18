@@ -154,6 +154,16 @@ export function validateFirestoreWriteOperation(
       if (payload.quantity !== undefined && Number(payload.quantity) === 0) {
         throw new Error(`[Firestore Anti-Ghost Violation] Inventory log #${idStr} cannot have quantity 0.`);
       }
+      const refStr = String(payload.reference || "").trim();
+      const notesStr = String(payload.notes || "").trim();
+      if (
+        refStr === "CONCILIACION_LIBRO_MAYOR" ||
+        refStr === "Auditoría Forense IA" ||
+        refStr === "INCIDENT_399" ||
+        notesStr.includes("Conciliación forense automática")
+      ) {
+        throw new Error(`[Firestore Integrity Firewall] Blocked forbidden automatic stock adjustment (${refStr}) on log #${idStr}.`);
+      }
     }
   }
 

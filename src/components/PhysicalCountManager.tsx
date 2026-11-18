@@ -56,9 +56,9 @@ interface CountItem {
 }
 
 export default function PhysicalCountManager({ onClose, externalViewMode, embeddedMode = false }: PhysicalCountManagerProps) {
-  const { user, products, fetchProducts, showNotification, fetchInventoryLockStatus } = useAppContext();
-  const isAdmin = user?.role === 'admin' || user?.role === 'propietario' || user?.role === 'administrador' || user?.role === 'dueño' || user?.role === 'jefe';
-  const canPreviewQuantities = isAdmin || hasPermission(user, 'preview_quantities_in_count');
+  const { user, products, fetchProducts, showNotification, fetchInventoryLockStatus, isKioskLocked, isOffline } = useAppContext();
+  const isAdmin = !isKioskLocked && (user?.role === 'admin' || user?.role === 'propietario' || user?.role === 'administrador' || user?.role === 'dueño' || user?.role === 'jefe');
+  const canPreviewQuantities = !isKioskLocked && (isAdmin || hasPermission(user, 'preview_quantities_in_count'));
 
   // Bloqueo estricto del scroll del body mientras el modal esté abierto
   useEffect(() => {
@@ -101,17 +101,24 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
   const [segregationWarning, setSegregationWarning] = useState<string | null>(null);
   const [isSessionSanitized, setIsSessionSanitized] = useState<boolean>(false);
 
-  // Modo a ciegas activo de forma estricta durante el conteo en progreso (en revisión administrativa el admin siempre ve diferencias)
-  const isReviewMode = activeSession?.status === 'completado' || activeSession?.status === 'finalizado';
-  const isBlindActive = !isAdmin 
+  // Modo a ciegas activo de forma estricta durante el conteo en progreso y SIEMPRE en Modo Kiosco
+  const isReviewMode = !isKioskLocked && (activeSession?.status === 'completado' || activeSession?.status === 'finalizado');
+  const isBlindActive = isKioskLocked || !isAdmin 
     ? true 
     : isReviewMode 
       ? false 
       : (activeSession?.mode === 'BLIND' || externalViewMode === 'blind');
 
-  // Filtros del listado de conteo activo
+  // Filtros del listado de conteo activo y sincronización en memoria RAM (Cero Caché Local)
   const [itemSearch, setItemSearch] = useState('');
   const itemDebounceRef = useRef<Record<number, any>>({});
+  const itemSeqRef = useRef<Record<number, number>>({});
+  const pendingItemPayloadsRef = useRef<Map<number, { sessionId: number; newStock: number; nextChecked: number; nextStatus: string; notes: string | null | undefined }>>(new Map<number, { sessionId: number; newStock: number; nextChecked: number; nextStatus: string; notes: string | null | undefined }>());
+  const inFlightItemsRef = useRef<Map<number, Promise<boolean>>>(new Map<number, Promise<boolean>>());
+  const startSessionOpIdRef = useRef<string>("");
+  const completeSessionOpIdRef = useRef<string>("");
+  const [pendingSyncCount, setPendingSyncCount] = useState(0);
+  const [unsyncedItemIds, setUnsyncedItemIds] = useState<number[]>([]);
   const [activeFilter, setActiveFilter] = useState<'todos' | 'pendientes' | 'revisados' | 'diferencias' | 'reconteo'>('todos');
   const [adminReviewFilter, setAdminReviewFilter] = useState<'todos' | 'diferencias' | 'coincidentes'>('todos');
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<string>('ALL');
@@ -173,11 +180,88 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
     showNotification?.("✓ Datos y existencias sincronizados con el Punto de Venta.", "info");
   };
 
+  const buildCountHeaders = (includeJson = false): Record<string, string> => {
+    const effectiveRole = isKioskLocked ? 'vendedor' : (user?.role || '');
+    const headers: Record<string, string> = {
+      'x-user-id': String(user?.id || 1),
+      'x-user-role': effectiveRole,
+      'x-kiosk-locked': isKioskLocked ? 'true' : 'false'
+    };
+    if (includeJson) {
+      headers['Content-Type'] = 'application/json';
+    }
+    return headers;
+  };
+
+  // Espera silenciosa de 45s en memoria RAM sin caché local (0 lecturas extra en Firestore)
+  const fetchWithLiveGrace = async (
+    url: string,
+    init: RequestInit,
+    shouldAbort?: () => boolean
+  ): Promise<Response> => {
+    const graceDeadline = Date.now() + 45000;
+    let attempt = 0;
+    let lastErr: any = null;
+
+    while (Date.now() < graceDeadline) {
+      if (shouldAbort?.()) {
+        throw new Error('SUPERSEDED');
+      }
+      if (attempt > 0) {
+        await new Promise<void>((resolve) => {
+          const t = setTimeout(() => {
+            window.removeEventListener('online', onWake);
+            window.removeEventListener('gtr-grace-sync-now', onWake);
+            resolve();
+          }, 2000);
+          const onWake = () => {
+            clearTimeout(t);
+            window.removeEventListener('online', onWake);
+            window.removeEventListener('gtr-grace-sync-now', onWake);
+            resolve();
+          };
+          window.addEventListener('online', onWake, { once: true });
+          window.addEventListener('gtr-grace-sync-now', onWake, { once: true });
+        });
+      }
+      if (shouldAbort?.()) {
+        throw new Error('SUPERSEDED');
+      }
+      attempt++;
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        lastErr = new Error('Esperando reconexión dentro de la ventana de 45s');
+        continue;
+      }
+
+      const controller = new AbortController();
+      const reqTimeout = setTimeout(() => controller.abort(), 8000);
+      try {
+        const res = await fetch(url, {
+          ...init,
+          signal: controller.signal
+        });
+        clearTimeout(reqTimeout);
+        if (res.status === 502 || res.status === 503 || res.status === 504) {
+          lastErr = new Error(`HTTP ${res.status}`);
+          continue;
+        }
+        return res;
+      } catch (err) {
+        clearTimeout(reqTimeout);
+        lastErr = err;
+      }
+    }
+
+    throw lastErr || new Error('Tiempo de espera de 45s agotado');
+  };
+
   const fetchActiveSession = async () => {
     setIsLoading(true);
     try {
-      const res = await fetch(`/api/inventory-counts?user_role=${user?.role || ''}`, {
-        headers: { 'x-user-role': user?.role || '' }
+      const effectiveRole = isKioskLocked ? 'vendedor' : (user?.role || '');
+      const kioskQuery = isKioskLocked ? '&kiosk_locked=true' : '';
+      const res = await fetch(`/api/inventory-counts?user_role=${effectiveRole}${kioskQuery}`, {
+        headers: buildCountHeaders()
       });
       if (res.ok) {
         const counts: InventoryCount[] = await res.json();
@@ -199,8 +283,10 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
 
   const fetchHistory = async () => {
     try {
-      const res = await fetch(`/api/inventory-counts?user_role=${user?.role || ''}`, {
-        headers: { 'x-user-role': user?.role || '' }
+      const effectiveRole = isKioskLocked ? 'vendedor' : (user?.role || '');
+      const kioskQuery = isKioskLocked ? '&kiosk_locked=true' : '';
+      const res = await fetch(`/api/inventory-counts?user_role=${effectiveRole}${kioskQuery}`, {
+        headers: buildCountHeaders()
       });
       if (res.ok) {
         const counts: InventoryCount[] = await res.json();
@@ -214,12 +300,14 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
 
   const fetchSessionItems = async (countId: number, isHistoric = false) => {
     try {
-      const res = await fetch(`/api/inventory-counts/${countId}?user_role=${user?.role || ''}`, {
-        headers: { 'x-user-role': user?.role || '' }
+      const effectiveRole = isKioskLocked ? 'vendedor' : (user?.role || '');
+      const auditorParam = isKioskLocked ? '&is_auditor_view=true&kiosk_locked=true' : '';
+      const res = await fetch(`/api/inventory-counts/${countId}?user_role=${effectiveRole}${auditorParam}`, {
+        headers: buildCountHeaders()
       });
       if (res.ok) {
         const data = await res.json();
-        const isSanitized = data.is_blind_sanitized === true;
+        const isSanitized = isKioskLocked || data.is_blind_sanitized === true;
         if (!isHistoric) {
           setIsSessionSanitized(isSanitized);
         }
@@ -244,7 +332,7 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
             };
           }
 
-          // Priorizar stock autoritativo del servidor (live_stock / expected_quantity) sobre el caché del frontend
+          // Priorizar stock autoritativo del servidor (live_stock / expected_quantity) sobre el estado del frontend
           const authoritativeServerStock = (it.live_stock !== undefined && it.live_stock !== null)
             ? Number(it.live_stock)
             : (it.expected_quantity !== undefined && it.expected_quantity !== null)
@@ -287,10 +375,17 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
       showNotification?.("Ingresa el nombre del auditor responsable.", "error");
       return;
     }
+    if (isOffline && typeof navigator !== 'undefined' && !navigator.onLine) {
+      showNotification?.("⚠️ Sin conexión al servidor (pasaron 45s de espera): Reconéctate para iniciar el conteo en vivo.", "error");
+      return;
+    }
 
     setIsLoading(true);
     try {
-      const finalBlind = !canPreviewQuantities ? true : isBlindMode;
+      const finalBlind = isKioskLocked || !canPreviewQuantities ? true : isBlindMode;
+      if (!startSessionOpIdRef.current) {
+        startSessionOpIdRef.current = `count_start_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+      }
       const payload = {
         user_id: user?.id || 1,
         username: user?.username || 'admin',
@@ -299,37 +394,38 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
         notes: sessionNotes || `Control Físico de Almacén${finalBlind ? ' a Ciegas' : ''}`,
         category_filter: selectedCategory === 'Todos' ? null : selectedCategory,
         mode: finalBlind ? 'BLIND' : 'STANDARD',
-        override_segregation: overrideSegregation ? 1 : 0,
-        override_reason: overrideSegregation ? overrideReason : null
+        override_segregation: (!isKioskLocked && overrideSegregation) ? 1 : 0,
+        override_reason: (!isKioskLocked && overrideSegregation) ? overrideReason : null,
+        clientOperationId: startSessionOpIdRef.current
       };
 
-      const res = await fetch('/api/inventory-counts', {
+      const res = await fetchWithLiveGrace('/api/inventory-counts', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-user-id': String(user?.id || 1),
-          'x-user-role': user?.role || ''
-        },
+        headers: buildCountHeaders(true),
         body: JSON.stringify(payload)
       });
 
       const responseData = await res.json();
 
       if (res.ok) {
+        startSessionOpIdRef.current = "";
         showNotification?.(`✓ Nueva sesión de auditoría física iniciada con éxito.`, "success");
         await fetchProducts();
         await fetchActiveSession();
       } else if (responseData.has_active_session) {
+        startSessionOpIdRef.current = "";
+        if (isKioskLocked || !isAdmin) {
+          showNotification?.(responseData.error || "Ya existe una sesión activa. Cargando sesión en curso...", "info");
+          await fetchActiveSession();
+          return;
+        }
         const replace = confirm(`${responseData.error}\n\n¿Deseas cancelar la sesión anterior e iniciar esta nueva auditoría de inventario?`);
         if (replace) {
-          const retryRes = await fetch('/api/inventory-counts', {
+          const forceOpId = `count_force_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+          const retryRes = await fetchWithLiveGrace('/api/inventory-counts', {
             method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-user-id': String(user?.id || 1),
-              'x-user-role': user?.role || ''
-            },
-            body: JSON.stringify({ ...payload, force_new: true })
+            headers: buildCountHeaders(true),
+            body: JSON.stringify({ ...payload, force_new: true, clientOperationId: forceOpId })
           });
           if (retryRes.ok) {
             showNotification?.(`✓ Nueva sesión de auditoría iniciada con éxito.`, "success");
@@ -343,17 +439,84 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
           await fetchActiveSession();
         }
       } else if (responseData.segregation_warning) {
+        startSessionOpIdRef.current = "";
         setSegregationWarning(responseData.error);
         showNotification?.(responseData.error, "warning");
       } else {
+        startSessionOpIdRef.current = "";
         showNotification?.(`Error al iniciar sesión: ${responseData.error}`, "error");
       }
     } catch (err) {
       console.error(err);
-      showNotification?.("Fallo de red al crear sesión.", "error");
+      showNotification?.("⚠️ No se pudo conectar con el servidor tras 45s de espera. Intenta nuevamente al recuperar señal.", "error");
     } finally {
       setIsLoading(false);
     }
+  };
+
+  const dispatchItemSync = (itemId: number): Promise<boolean> => {
+    const queued = pendingItemPayloadsRef.current.get(itemId);
+    if (!queued) {
+      return inFlightItemsRef.current.get(itemId) || Promise.resolve(true);
+    }
+    pendingItemPayloadsRef.current.delete(itemId);
+    if (itemDebounceRef.current[itemId]) {
+      clearTimeout(itemDebounceRef.current[itemId]);
+      delete itemDebounceRef.current[itemId];
+    }
+
+    const seq = (itemSeqRef.current[itemId] || 0) + 1;
+    itemSeqRef.current[itemId] = seq;
+    const opId = `count_item_${queued.sessionId}_${itemId}_${seq}_${queued.newStock}_${queued.nextStatus}`;
+
+    const syncPromise = (async (): Promise<boolean> => {
+      setPendingSyncCount(c => c + 1);
+      try {
+        const res = await fetchWithLiveGrace(
+          `/api/inventory-counts/${queued.sessionId}/items/${itemId}`,
+          {
+            method: 'PUT',
+            headers: buildCountHeaders(true),
+            body: JSON.stringify({
+              physical_quantity: queued.newStock,
+              status: queued.nextStatus,
+              notes: queued.notes,
+              clientOperationId: opId
+            })
+          },
+          () => itemSeqRef.current[itemId] !== seq
+        );
+
+        if (itemSeqRef.current[itemId] === seq) {
+          if (res.ok) {
+            setUnsyncedItemIds(prev => prev.filter(id => id !== itemId));
+            return true;
+          } else {
+            setUnsyncedItemIds(prev => prev.includes(itemId) ? prev : [...prev, itemId]);
+            setSessionItems(prev => prev.map(it => it.id === itemId ? { ...it, is_checked: 0, status: 'pendiente' } : it));
+            return false;
+          }
+        }
+        return true;
+      } catch (err: any) {
+        if (err?.message === 'SUPERSEDED' || itemSeqRef.current[itemId] !== seq) {
+          return true;
+        }
+        console.error("Network error while updating count item after 45s grace:", err);
+        setUnsyncedItemIds(prev => prev.includes(itemId) ? prev : [...prev, itemId]);
+        setSessionItems(prev => prev.map(it => it.id === itemId ? { ...it, is_checked: 0, status: 'pendiente' } : it));
+        showNotification?.("⚠️ No se pudo confirmar el conteo del artículo tras 45s sin señal. Vuelve a marcarlo cuando regrese el internet.", "error");
+        return false;
+      } finally {
+        setPendingSyncCount(c => Math.max(0, c - 1));
+        if (inFlightItemsRef.current.get(itemId) === syncPromise) {
+          inFlightItemsRef.current.delete(itemId);
+        }
+      }
+    })();
+
+    inFlightItemsRef.current.set(itemId, syncPromise);
+    return syncPromise;
   };
 
   const handleUpdateItem = (itemId: number, updatedFields: { counted_stock?: number; is_checked?: number; status?: string; notes?: string }, immediate = false) => {
@@ -364,10 +527,11 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
     const newStock = updatedFields.counted_stock !== undefined ? Math.max(0, updatedFields.counted_stock) : item.counted_stock;
     const nextChecked = updatedFields.is_checked !== undefined ? updatedFields.is_checked : item.is_checked;
     const nextStatus = updatedFields.status !== undefined ? updatedFields.status : (nextChecked === 0 ? 'pendiente' : 'contado');
+    const nextNotes = updatedFields.notes !== undefined ? updatedFields.notes : item.notes;
 
-    const diff = item.system_stock !== undefined ? newStock - item.system_stock : undefined;
+    const diff = (!isKioskLocked && item.system_stock !== undefined) ? newStock - item.system_stock : undefined;
 
-    // Actualización optimista inmediata en interfaz
+    // Actualización inmediata en memoria RAM (Cero caché en teléfono)
     setSessionItems(prev => prev.map(it => it.id === itemId ? { 
       ...it, 
       counted_stock: newStock,
@@ -375,39 +539,28 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
       status: nextStatus,
       difference: diff,
       recount_requested: 0,
-      notes: updatedFields.notes !== undefined ? updatedFields.notes : it.notes
+      notes: nextNotes
     } : it));
+
+    pendingItemPayloadsRef.current.set(itemId, {
+      sessionId: activeSession.id,
+      newStock,
+      nextChecked,
+      nextStatus,
+      notes: nextNotes
+    });
 
     if (itemDebounceRef.current[itemId]) {
       clearTimeout(itemDebounceRef.current[itemId]);
+      delete itemDebounceRef.current[itemId];
     }
 
-    const sendRequest = async () => {
-      try {
-        const res = await fetch(`/api/inventory-counts/${activeSession.id}/items/${itemId}`, {
-          method: 'PUT',
-          headers: { 
-            'Content-Type': 'application/json',
-            'x-user-role': user?.role || ''
-          },
-          body: JSON.stringify({ 
-            physical_quantity: newStock,
-            status: nextStatus,
-            notes: updatedFields.notes !== undefined ? updatedFields.notes : item.notes
-          })
-        });
-        if (!res.ok) {
-          console.error("Failed to update count item on server");
-        }
-      } catch (err) {
-        console.error("Network error while updating count item:", err);
-      }
-    };
-
     if (immediate) {
-      sendRequest();
+      dispatchItemSync(itemId);
     } else {
-      itemDebounceRef.current[itemId] = setTimeout(sendRequest, 250);
+      itemDebounceRef.current[itemId] = setTimeout(() => {
+        dispatchItemSync(itemId);
+      }, 250);
     }
   };
 
@@ -422,12 +575,12 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
   };
 
   const handleSetStockToSystem = async (item: CountItem) => {
-    if (item.system_stock === undefined || isBlindActive) return;
+    if (isKioskLocked || item.system_stock === undefined || isBlindActive) return;
     handleUpdateItem(item.id, { counted_stock: item.system_stock, is_checked: 1, status: 'contado' }, true);
   };
 
   const handleMatchAllPending = async () => {
-    if (isBlindActive || !activeSummary.hasAdminVisibility) return;
+    if (isKioskLocked || isBlindActive || !activeSummary.hasAdminVisibility) return;
     const targetItems = stockSection === 'with_stock' ? itemsWithStock : currentSectionItems;
     const pending = targetItems.filter(it => it.is_checked === 0);
     if (pending.length === 0) {
@@ -448,6 +601,10 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
 
   const handleCompleteSession = async () => {
     if (!activeSession) return;
+    if (isOffline && typeof navigator !== 'undefined' && !navigator.onLine) {
+      showNotification?.("⚠️ Sin conexión al servidor (pasaron 45s de espera): Reconéctate para enviar el conteo físico en vivo.", "error");
+      return;
+    }
 
     let uncountedAction = 'omit';
     const uncounted = sessionItems.filter(it => it.is_checked === 0);
@@ -469,32 +626,54 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
 
     setIsLoading(true);
     try {
-      // Si estamos en modo visible para admin, auto-confirmar productos de stock 0 sin movimiento
-      if (activeSummary.hasAdminVisibility && !isBlindActive) {
+      // Si estamos en modo visible para admin (nunca en Kiosco), auto-confirmar productos de stock 0 sin movimiento
+      if (!isKioskLocked && activeSummary.hasAdminVisibility && !isBlindActive) {
         const uncountedZeroItems = sessionItems.filter(it => (it.system_stock ?? 0) <= 0 && it.is_checked === 0);
         for (const zItem of uncountedZeroItems) {
           handleUpdateItem(zItem.id, { counted_stock: 0, is_checked: 1, status: 'contado' }, true);
         }
       }
 
-      const res = await fetch(`/api/inventory-counts/${activeSession.id}/status`, {
+      // 1. Vaciar cualquier conteo con debounce pendiente en memoria RAM
+      for (const queuedItemId of Array.from(pendingItemPayloadsRef.current.keys())) {
+        dispatchItemSync(Number(queuedItemId));
+      }
+
+      // 2. Esperar a que todos los ítems en vuelo terminen de confirmarse con el servidor (hasta 45s de gracia)
+      if (inFlightItemsRef.current.size > 0) {
+        const syncResults = await Promise.all(Array.from(inFlightItemsRef.current.values()));
+        if (syncResults.some(ok => !ok)) {
+          showNotification?.("⚠️ Algunos artículos contados no pudieron confirmarse con el servidor. Verifica tu conexión antes de finalizar.", "error");
+          return;
+        }
+      }
+
+      if (unsyncedItemIds.length > 0) {
+        showNotification?.(`⚠️ Hay ${unsyncedItemIds.length} artículo(s) sin confirmar en el servidor. Vuelve a marcarlos con señal activa antes de cerrar.`, "error");
+        return;
+      }
+
+      if (!completeSessionOpIdRef.current) {
+        completeSessionOpIdRef.current = `count_complete_${activeSession.id}_${Date.now()}`;
+      }
+
+      const res = await fetchWithLiveGrace(`/api/inventory-counts/${activeSession.id}/status`, {
         method: 'PUT',
-        headers: { 
-          'Content-Type': 'application/json',
-          'x-user-role': user?.role || ''
-        },
+        headers: buildCountHeaders(true),
         body: JSON.stringify({ 
           status: 'completado',
-          auto_apply: false, // NUNCA auto-aplicar al enviar; la aprobación debe ser explícita
-          uncounted_action: uncountedAction
+          auto_apply: false, // NUNCA auto-aplicar al enviar; la aprobación debe ser explícita fuera de Kiosco
+          uncounted_action: uncountedAction,
+          clientOperationId: completeSessionOpIdRef.current
         })
       });
 
       if (res.ok) {
+        completeSessionOpIdRef.current = "";
         showNotification?.(
           isAdmin 
             ? "✓ Conteo físico completado. Revisa las diferencias antes de conciliar."
-            : "✓ Conteo físico finalizado. Reporte enviado a Administración sin discrepancias artificiales.", 
+            : "✓ Conteo físico finalizado. Reporte enviado a Administración sin alterar el inventario.", 
           "success"
         );
         await fetchProducts();
@@ -510,26 +689,24 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
           }
         });
       } else {
+        completeSessionOpIdRef.current = "";
         showNotification?.("No se pudo completar la sesión de control físico.", "error");
       }
     } catch (err) {
       console.error(err);
+      showNotification?.("⚠️ Error de conexión tras 45s de espera al enviar el reporte. Tus conteos siguen en pantalla.", "error");
     } finally {
       setIsLoading(false);
     }
   };
 
   const handleApproveCount = async () => {
-    if (!activeSession) return;
+    if (!activeSession || isKioskLocked || !isAdmin) return;
     setIsLoading(true);
     try {
-      const res = await fetch(`/api/inventory-counts/${activeSession.id}/approve`, {
+      const res = await fetchWithLiveGrace(`/api/inventory-counts/${activeSession.id}/approve`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-user-id': String(user?.id || 1),
-          'x-user-role': user?.role || ''
-        },
+        headers: buildCountHeaders(true),
         body: JSON.stringify({
           admin_id: user?.id,
           admin_username: user?.username,
@@ -559,13 +736,14 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
       }
     } catch (err) {
       console.error(err);
+      showNotification?.("Error de conexión al aprobar la conciliación.", "error");
     } finally {
       setIsLoading(false);
     }
   };
 
   const handleRequestRecount = async () => {
-    if (!activeSession) return;
+    if (!activeSession || isKioskLocked || !isAdmin) return;
     const discrepancyItems = sessionItems.filter(it => it.counted_stock !== (it.system_stock ?? it.live_stock ?? 0));
     const targetIds = selectedRecountIds.length > 0 
       ? selectedRecountIds 
@@ -582,12 +760,9 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
 
     setIsLoading(true);
     try {
-      const res = await fetch(`/api/inventory-counts/${activeSession.id}/recount`, {
+      const res = await fetchWithLiveGrace(`/api/inventory-counts/${activeSession.id}/recount`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-user-role': user?.role || ''
-        },
+        headers: buildCountHeaders(true),
         body: JSON.stringify({
           item_ids: targetIds,
           reason: 'Diferencia detectada en revisión administrativa'
@@ -619,15 +794,16 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
 
   const handleCancelSession = async () => {
     if (!activeSession) return;
+    if (isKioskLocked && Number(activeSession.user_id) !== Number(user?.id)) {
+      showNotification?.("Solo puedes cancelar una sesión de conteo iniciada por tu usuario.", "error");
+      return;
+    }
     if (!confirm("¿Está seguro que desea cancelar esta sesión de control físico? Los cambios no guardados se descartarán.")) return;
     setIsLoading(true);
     try {
-      const res = await fetch(`/api/inventory-counts/${activeSession.id}/status`, {
+      const res = await fetchWithLiveGrace(`/api/inventory-counts/${activeSession.id}/status`, {
         method: 'PUT',
-        headers: { 
-          'Content-Type': 'application/json',
-          'x-user-role': user?.role || ''
-        },
+        headers: buildCountHeaders(true),
         body: JSON.stringify({ status: 'cancelado' })
       });
       if (res.ok) {
@@ -647,9 +823,13 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
           }
         });
         fetchInventoryLockStatus?.();
+      } else {
+        const err = await res.json().catch(() => ({ error: 'No se pudo cancelar la sesión.' }));
+        showNotification?.(err.error || "No se pudo cancelar la sesión.", "error");
       }
     } catch (err) {
       console.error(err);
+      showNotification?.("Error de conexión al cancelar la sesión.", "error");
     } finally {
       setIsLoading(false);
     }
@@ -1104,6 +1284,13 @@ export default function PhysicalCountManager({ onClose, externalViewMode, embedd
 
           {/* Acciones y Selector de Pestaña */}
           <div className="flex items-center gap-1.5 shrink-0">
+            {pendingSyncCount > 0 && (
+              <div className="flex items-center gap-1 px-2 py-1 bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30 rounded-lg text-[9.5px] font-bold animate-pulse" title="Confirmando conteo en vivo con el servidor (hasta 45s de espera)">
+                <RefreshCw size={11} className="animate-spin shrink-0" />
+                <span className="hidden sm:inline">Sincronizando ({pendingSyncCount})</span>
+                <span className="sm:hidden">{pendingSyncCount}</span>
+              </div>
+            )}
             {activeSession && (
               <div className="flex items-center gap-1 px-2 py-1 bg-slate-100 dark:bg-slate-800 rounded-lg text-[10px] font-mono font-bold text-slate-700 dark:text-slate-300">
                 <span className="text-emerald-600 dark:text-emerald-400 font-black">{activeSummary.checkedItems}</span>

@@ -66,6 +66,7 @@ import {
   validateFirestoreWriteOperation, 
   validateRemoteFirestoreDocument,
   confirmFirestoreWriteInLedger,
+  SYSTEM_SYNC_USER,
   type UserContext 
 } from './firestoreIntegrityMiddleware.ts';
 import fs from 'fs';
@@ -1014,240 +1015,15 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
         const remState = JSON.parse(rawJsonStr);
         const nowIso = getBoliviaISOString();
 
-        // Capture pre-existing tombstones and quarantine state BEFORE unpacking remState
-        // so we can distinguish active unremediated sales from already-remediated or partial recovery states (Z03)
-        const preDeletedSalesRows = db.prepare("SELECT record_id FROM deleted_records WHERE table_name = 'sales'").all() as any[];
-        const preDeletedSalesSet = new Set<string>(preDeletedSalesRows.map(r => String(r.record_id)));
-
-        const preQuarantinedSalesRows = db.prepare("SELECT record_id FROM incident_quarantine_records WHERE incident_id = 'INCIDENT_399_20261027' AND table_name = 'sales'").all() as any[];
-        const preQuarantinedSalesSet = new Set<string>(preQuarantinedSalesRows.map(r => String(r.record_id)));
-
-        const remediatedLedger = readRemediatedSalesLedger();
-
-        const baseTestSaleIds = [399, 400, 401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412, 413, 414, 415, 416, 417, 418, 419, 420, 421, 422, 423, 425, 426, 427, 428];
-        const dynamicDeletedSaleIds = Array.isArray(remState.deleted_records)
-          ? remState.deleted_records
-              .filter((d: any) => d && d.table_name === 'sales' && d.record_id !== undefined)
-              .map((d: any) => Number(d.record_id))
-              .filter((n: number) => Number.isInteger(n) && n > 0 && n !== 398 && n !== 424)
-          : [];
-        const testSaleIds = Array.from(new Set([...baseTestSaleIds, ...dynamicDeletedSaleIds]));
-        const ph = testSaleIds.map(() => '?').join(',');
-
-        const localContaminatedSales = db.prepare(`SELECT * FROM sales WHERE id IN (${ph})`).all(...testSaleIds) as any[];
-        const localContaminatedItems = db.prepare(`SELECT * FROM sale_items WHERE sale_id IN (${ph})`).all(...testSaleIds) as any[];
-        const localContaminatedReturns = db.prepare(`SELECT * FROM sale_returns WHERE sale_id IN (${ph})`).all(...testSaleIds) as any[];
-        const localContaminatedCash = db.prepare(`SELECT * FROM cash_movements WHERE sale_id IN (${ph})`).all(...testSaleIds) as any[];
-        const localContaminatedAr = db.prepare(`SELECT * FROM accounts_receivable WHERE sale_id IN (${ph})`).all(...testSaleIds) as any[];
-
-        // Z03: Only sales with an active header in `sales` that have NOT already been deleted, quarantined, or recorded in the remediation ledger
-        // are eligible to reverse inventory and cash effects. Lingering child rows of already-remediated sales are cleaned up without touching stock or cash.
-        const eligibleSalesForReversal = localContaminatedSales.filter((s: any) => {
-          const sIdStr = String(s.id);
-          return !preDeletedSalesSet.has(sIdStr) && !preQuarantinedSalesSet.has(sIdStr) && !remediatedLedger.sales[sIdStr];
-        });
-
-        const hasAnyContaminatedRows =
-          localContaminatedSales.length > 0 ||
-          localContaminatedItems.length > 0 ||
-          localContaminatedReturns.length > 0 ||
-          localContaminatedCash.length > 0 ||
-          localContaminatedAr.length > 0;
-
+        // Strictly passive tombstone & idempotency hydration ONLY:
+        // Never mutate products.stock, never mutate cash_accounts, and never fabricate 'admin' audit logs.
         db.transaction(() => {
-          const insQuarantine = db.prepare(`
-            INSERT INTO incident_quarantine_records (incident_id, table_name, record_id, payload_json, reason, backup_path)
-            SELECT 'INCIDENT_399_20261027', ?, ?, ?, ?, 'remote_hydration_remediation'
-            WHERE NOT EXISTS (
-              SELECT 1 FROM incident_quarantine_records
-              WHERE incident_id = 'INCIDENT_399_20261027' AND table_name = ? AND record_id = ?
-            )
-          `);
           const insDel = db.prepare("INSERT OR IGNORE INTO deleted_records (table_name, record_id, deleted_at) VALUES (?, ?, ?)");
-
-          // 1. Apply exact NET stock and NET cash reversal ONLY for eligible active sales whose effects are still pending in state (Z02 & Z03)
-          const actuallyReversedSaleIds: number[] = [];
-          for (const s of eligibleSalesForReversal) {
-            const saleIdNum = Number(s.id);
-            const saleIdStr = String(s.id);
-            const saleItems = localContaminatedItems.filter((it: any) => Number(it.sale_id) === saleIdNum);
-            const saleReturns = localContaminatedReturns.filter((ret: any) => Number(ret.sale_id) === saleIdNum);
-            const saleCashMovs = localContaminatedCash.filter((cm: any) => Number(cm.sale_id) === saleIdNum);
-
-            // Net Stock = sold quantity minus already returned quantity in sale_returns
-            const soldByProduct = new Map<number, number>();
-            for (const it of saleItems) {
-              const pId = Number(it.product_id);
-              const qty = Number(it.quantity || 0);
-              if (pId > 0 && qty > 0) {
-                soldByProduct.set(pId, (soldByProduct.get(pId) || 0) + qty);
-              }
-            }
-            const returnedByProduct = new Map<number, number>();
-            for (const ret of saleReturns) {
-              const pId = Number(ret.product_id);
-              const qty = Number(ret.quantity || 0);
-              if (pId > 0 && qty > 0) {
-                returnedByProduct.set(pId, (returnedByProduct.get(pId) || 0) + qty);
-              }
-            }
-
-            // Net Cash = signed sum of cash_movements for this sale (inflows positive, outflows/devoluciones negative)
-            const rate = Number(s.exchange_rate || 6.96) > 0 ? Number(s.exchange_rate || 6.96) : 6.96;
-            const netCashBySeller = new Map<number, number>();
-            let hasOutflowMovement = false;
-
-            for (const cm of saleCashMovs) {
-              if (!cm.seller_id) continue;
-              const sellerId = Number(cm.seller_id);
-              const rawAmt = Number(cm.amount || 0);
-              if (!Number.isFinite(rawAmt) || rawAmt === 0) continue;
-              const absBs = cm.currency === 'USD' ? Number((Math.abs(rawAmt) * rate).toFixed(2)) : Math.abs(rawAmt);
-              const movType = String(cm.type || '').toLowerCase();
-              const isOutflow = rawAmt < 0 || ['devolucion', 'retiro', 'retiro_manual', 'egreso'].includes(movType);
-              if (isOutflow) hasOutflowMovement = true;
-              const signedBs = isOutflow ? -absBs : absBs;
-              netCashBySeller.set(sellerId, Number(((netCashImpact(netCashBySeller, sellerId)) + signedBs).toFixed(2)));
-            }
-
-            // If sale_returns exist without a corresponding negative cash_movements row on a non-credit sale, deduct the already-refunded Bs
-            if (!hasOutflowMovement && saleReturns.length > 0 && String(s.payment_method || '').toLowerCase() !== 'crédito') {
-              const totalRefundAmt = saleReturns.reduce((acc: number, r: any) => acc + Number(r.refund_amount || 0), 0);
-              const totalRefundBs = s.currency === 'USD' ? Number((totalRefundAmt * rate).toFixed(2)) : totalRefundAmt;
-              const targetSeller = Number(s.user_id || 1);
-              if (netCashBySeller.has(targetSeller)) {
-                netCashBySeller.set(targetSeller, Math.max(0, Number(((netCashBySeller.get(targetSeller) || 0) - totalRefundBs).toFixed(2))));
-              }
-            }
-
-            // Z03 Guard: Detect if inventory and cash balances were ALREADY corrected in a partial recovery state
-            let alreadyCorrectedInState = false;
-            const existingKardexFix = db.prepare(`
-              SELECT 1 FROM inventory_audit_logs
-              WHERE reference = 'INCIDENT_399' AND notes LIKE ?
-              LIMIT 1
-            `).get(`%#${saleIdNum}%`);
-            if (existingKardexFix) {
-              alreadyCorrectedInState = true;
-            } else if (netCashBySeller.size > 0) {
-              for (const [sellerId, netBsImpact] of netCashBySeller.entries()) {
-                if (netBsImpact > 0.001) {
-                  const accRow = db.prepare('SELECT current_balance FROM cash_accounts WHERE seller_id = ?').get(sellerId) as any;
-                  const currentBal = Number(accRow?.current_balance ?? 0);
-                  const otherMovs = db.prepare(`
-                    SELECT amount, currency, type FROM cash_movements
-                    WHERE seller_id = ? AND status = 'pendiente' AND (sale_id IS NULL OR sale_id NOT IN (${ph}))
-                  `).all(sellerId, ...testSaleIds) as any[];
-                  let nonContaminatedPendingBs = 0;
-                  for (const m of otherMovs) {
-                    const mAmt = Number(m.amount || 0);
-                    if (!Number.isFinite(mAmt) || mAmt === 0) continue;
-                    const mAbsBs = m.currency === 'USD' ? Number((Math.abs(mAmt) * rate).toFixed(2)) : Math.abs(mAmt);
-                    const mType = String(m.type || '').toLowerCase();
-                    const mOutflow = mAmt < 0 || ['devolucion', 'retiro', 'retiro_manual', 'egreso'].includes(mType);
-                    nonContaminatedPendingBs = Number((nonContaminatedPendingBs + (mOutflow ? -mAbsBs : mAbsBs)).toFixed(2));
-                  }
-                  if (currentBal < netBsImpact - 0.01 || Math.abs(currentBal - nonContaminatedPendingBs) <= 0.05) {
-                    alreadyCorrectedInState = true;
-                    break;
-                  }
-                }
-              }
-            }
-
-            const netStockRestoredRecord: Record<string, number> = {};
-            for (const [pId, soldQty] of soldByProduct.entries()) {
-              const returnedQty = returnedByProduct.get(pId) || 0;
-              const netQtyToRestore = Math.max(0, soldQty - returnedQty);
-              if (netQtyToRestore > 0) {
-                if (!alreadyCorrectedInState) {
-                  db.prepare('UPDATE products SET stock = stock + ?, updated_at = ? WHERE id = ?').run(netRestore(netQtyToRestore), nowIso, pId);
-                  const prodRow = db.prepare('SELECT name, sku, price_unit FROM products WHERE id = ?').get(pId) as any;
-                  if (prodRow) {
-                    db.prepare(`
-                      INSERT INTO inventory_audit_logs (product_id, product_name, product_sku, type, quantity, price, user_id, username, reference, notes, created_at)
-                      VALUES (?, ?, ?, 'ajuste', ?, ?, 4, 'admin', 'INCIDENT_399', ?, ?)
-                    `).run(
-                      pId,
-                      prodRow.name || `Producto #${pId}`,
-                      prodRow.sku || String(pId),
-                      netQtyToRestore,
-                      Number(prodRow.price_unit || 0),
-                      `Restitución neta por retiro de venta #${saleIdNum} (vendido: ${soldQty}, devuelto previo: ${returnedQty})`,
-                      nowIso
-                    );
-                  }
-                }
-                netStockRestoredRecord[String(pId)] = netQtyToRestore;
-                remediatedLedger.products[String(pId)] = nowIso;
-                remediatedInThisPull.products.add(pId);
-              }
-            }
-
-            const netCashDeductedRecord: Record<string, number> = {};
-            for (const [sellerId, netBsImpact] of netCashBySeller.entries()) {
-              if (Math.abs(netBsImpact) > 0.001) {
-                if (!alreadyCorrectedInState) {
-                  db.prepare('UPDATE cash_accounts SET current_balance = ROUND(current_balance - ?, 2), updated_at = ? WHERE seller_id = ?').run(netBsImpact, nowIso, sellerId);
-                }
-                netCashDeductedRecord[String(sellerId)] = netBsImpact;
-                remediatedLedger.sellers[String(sellerId)] = nowIso;
-                remediatedInThisPull.sellers.add(sellerId);
-              }
-            }
-
-            remediatedLedger.sales[saleIdStr] = {
-              remediatedAt: nowIso,
-              netStock: netStockRestoredRecord,
-              netCash: netCashDeductedRecord
-            };
-            if (!alreadyCorrectedInState) {
-              actuallyReversedSaleIds.push(saleIdNum);
-            }
-          }
-
-          // 2. Archive and remove all contaminated / orphan rows
-          if (hasAnyContaminatedRows) {
-            for (const s of localContaminatedSales) {
-              insQuarantine.run('sales', String(s.id), JSON.stringify(s), 'Remediación local por hidratación INCIDENT_399', 'sales', String(s.id));
-              insDel.run('sales', String(s.id), nowIso);
-            }
-            for (const it of localContaminatedItems) {
-              insQuarantine.run('sale_items', String(it.id), JSON.stringify(it), `Ítem de venta contaminada #${it.sale_id}`, 'sale_items', String(it.id));
-              if (it.id !== undefined) insDel.run('sale_items', String(it.id), nowIso);
-            }
-            for (const cm of localContaminatedCash) {
-              insQuarantine.run('cash_movements', String(cm.id), JSON.stringify(cm), `Movimiento de caja de venta contaminada #${cm.sale_id}`, 'cash_movements', String(cm.id));
-              if (cm.id !== undefined) insDel.run('cash_movements', String(cm.id), nowIso);
-            }
-            for (const ar of localContaminatedAr) {
-              if (ar.id !== undefined) {
-                insDel.run('accounts_receivable', String(ar.id), nowIso);
-                db.prepare('DELETE FROM credit_payments WHERE account_receivable_id = ?').run(ar.id);
-              }
-            }
-            for (const ret of localContaminatedReturns) {
-              if (ret.id !== undefined) insDel.run('sale_returns', String(ret.id), nowIso);
-            }
-
-            db.prepare(`DELETE FROM cash_movements WHERE sale_id IN (${ph})`).run(...testSaleIds);
-            db.prepare(`DELETE FROM sale_items WHERE sale_id IN (${ph})`).run(...testSaleIds);
-            db.prepare(`DELETE FROM accounts_receivable WHERE sale_id IN (${ph})`).run(...testSaleIds);
-            db.prepare(`DELETE FROM sale_returns WHERE sale_id IN (${ph})`).run(...testSaleIds);
-            db.prepare(`DELETE FROM sales WHERE id IN (${ph})`).run(...testSaleIds);
-          }
-
-          // 3. Hydrate tombstones, quarantine records, and processed_operations from remState
           if (Array.isArray(remState.deleted_records)) {
             for (const d of remState.deleted_records) {
-              insDel.run(d.table_name, String(d.record_id), d.deleted_at || nowIso);
-            }
-          }
-          const qCount = (db.prepare("SELECT COUNT(*) as c FROM incident_quarantine_records WHERE incident_id = 'INCIDENT_399_20261027'").get() as any)?.c || 0;
-          if (qCount === 0 && Array.isArray(remState.quarantine_records)) {
-            const insQ = db.prepare("INSERT INTO incident_quarantine_records (incident_id, table_name, record_id, payload_json, reason, backup_path, quarantined_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
-            for (const q of remState.quarantine_records) {
-              insQ.run(q.incident_id, q.table_name, q.record_id, q.payload_json, q.reason, q.backup_path, q.quarantined_at);
+              if (d && d.table_name && d.record_id !== undefined) {
+                insDel.run(d.table_name, String(d.record_id), d.deleted_at || nowIso);
+              }
             }
           }
           if (Array.isArray(remState.processed_operations)) {
@@ -1261,57 +1037,21 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
                 status = COALESCE(excluded.status, processed_operations.status)
             `);
             for (const op of remState.processed_operations) {
-              insOp.run(
-                op.client_operation_id,
-                op.operation_type || 'sale',
-                op.payload_hash || null,
-                op.response_body,
-                op.status || 'completed'
-              );
+              if (op && op.client_operation_id) {
+                insOp.run(
+                  op.client_operation_id,
+                  op.operation_type || 'sale',
+                  op.payload_hash || null,
+                  op.response_body,
+                  op.status || 'completed'
+                );
+              }
             }
           }
-
-          // 4. Persist atomic remediation ledger whenever eligible sales were processed, and genuine audit log ONLY when stock/cash was actually reversed
-          if (eligibleSalesForReversal.length > 0) {
-            db.prepare("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('incident_399_remediated_sales_ledger', ?, ?)").run(
-              JSON.stringify(remediatedLedger),
-              nowIso
-            );
-            if (actuallyReversedSaleIds.length > 0) {
-              db.prepare(`
-                INSERT INTO system_audit_logs (
-                  event_type, category, module, action, severity,
-                  entity_type, entity_id, user_id, user_name, user_role,
-                  reason, result, status, metadata, created_at
-                ) VALUES (
-                  'ADMIN_INTERVENTION', 'AUDIT', 'SALES', 'INCIDENT_REMEDIATION', 'HIGH',
-                  'sales', ?, 4, 'admin', 'admin',
-                  'Reversión contable neta e idempotente de ventas retiradas por remediación',
-                  'SUCCESS', 'COMPLETED', ?, ?
-                )
-              `).run(
-                actuallyReversedSaleIds.join(','),
-                JSON.stringify({
-                  incident_id: 'INCIDENT_399_20261027',
-                  remediated_sales: actuallyReversedSaleIds,
-                  ledger: remediatedLedger.sales
-                }),
-                nowIso
-              );
-            }
-          }
-
           ensureSafeAutoincrementSequence(db);
         })();
       } catch (_) {}
     };
-
-    function netRestore(n: number): number {
-      return Math.max(0, Math.round(n));
-    }
-    function netCashImpact(map: Map<number, number>, sellerId: number): number {
-      return map.get(sellerId) || 0;
-    }
 
     // Extract remediation payload from incoming settings snapshot or local settings
     let remediationJsonPayload: string | null = null;
@@ -1518,6 +1258,11 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
               continue;
             }
 
+            // Never import invalidated automatic CONCILIACION_LIBRO_MAYOR entries from post-Nov-3 incident
+            if (table === 'inventory_audit_logs' && data.reference === 'CONCILIACION_LIBRO_MAYOR' && String(data.created_at || '') >= '2026-11-03') {
+              continue;
+            }
+
             // Also check parent sale deletion for child tables (sale_items, cash_movements, accounts_receivable, sale_returns)
             if ((table === 'sale_items' || table === 'cash_movements' || table === 'accounts_receivable' || table === 'sale_returns') && data.sale_id !== undefined && data.sale_id !== null) {
               if (isRecordDeleted('sales', data.sale_id)) {
@@ -1688,7 +1433,7 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
                       'exchange_rate',
                       'UPDATE',
                       { key: 'exchange_rate', value: String(localVal), updated_at: new Date().toISOString() },
-                      { userId: 4, userName: 'admin', userRole: 'admin', isSystemDaemon: true }
+                      SYSTEM_SYNC_USER
                     );
                     setDoc(doc(firestore, getCollectionName('settings'), 'exchange_rate'), validation.enrichedPayload)
                       .then(() => confirmFirestoreWriteInLedger([validation.txHash]))
@@ -1784,10 +1529,7 @@ export async function pullFirestoreToLocal(forceOverwrite: boolean = false) {
         }
       }
 
-      // PILAR 3: Automatically reconcile any product whose updated_at lags behind its immutable stock_arrivals / sales / sale_returns ledger
-      try {
-        reconcileCatalogStockWithLedger();
-      } catch (_) {}
+      // Automatic stock reconciliation during pull is permanently disabled to protect physical inventory integrity.
       
       if (forceOverwrite) {
         console.log(`[Sync] Master database pull (${envKey}) completed successfully (${updatedTableCount} tables synced).`);
@@ -2037,128 +1779,13 @@ export async function clearAllFirestoreAndLocalData(): Promise<void> {
 }
 
 /**
- * PILAR 3: MATHEMATICAL LEDGER AUTO-RECONCILER
- * Verifies every product in the catalog against the immutable append-only ledgers
- * (`stock_arrivals`, `sales`/`sale_items`, and `system_audit_logs` chain continuity).
- * If any product has stock arrivals or sales recorded after its `updated_at` timestamp
- * (or a chain break from an older snapshot overwrite), it automatically restores the
- * exact mathematical stock in SQLite and syncs the healed product to Cloud Firestore.
+ * Automatic catalog stock reconciliation is permanently disabled.
+ * No background daemon or sync cycle is permitted to overwrite `products.stock`
+ * or insert automatic `CONCILIACION_LIBRO_MAYOR` adjustments.
  */
 export function reconcileCatalogStockWithLedger(): { audited: number; corrected: number; corrections: any[] } {
-  const isSandboxCtx = isCurrentContextSandbox();
-  return dbAsyncLocalStorage.run({ isSandbox: isSandboxCtx }, () => {
-    assertEnvironmentDatabaseIsolation(isSandboxCtx, getCollectionName('products'));
-    const prods = db.prepare('SELECT id, name, sku, stock, price_cost, updated_at FROM products ORDER BY id ASC').all() as any[];
-    const arrivals = db.prepare('SELECT id, product_id, quantity, created_at FROM stock_arrivals ORDER BY id ASC').all() as any[];
-    const deletedSaleRows = db.prepare("SELECT record_id FROM deleted_records WHERE table_name = 'sales'").all() as any[];
-    const deletedSalesSet = new Set<string>(deletedSaleRows.map(r => String(r.record_id)));
-    const sales = db.prepare('SELECT id, created_at FROM sales ORDER BY id ASC').all() as any[];
-    const saleItems = db.prepare('SELECT id, sale_id, product_id, quantity FROM sale_items ORDER BY id ASC').all() as any[];
-    let saleReturns: any[] = [];
-    try {
-      saleReturns = db.prepare('SELECT id, sale_id, product_id, quantity, created_at FROM sale_returns ORDER BY id ASC').all() as any[];
-    } catch (_) {}
-    const sysLogs = db.prepare("SELECT id, event_type, entity_id, quantity_before, quantity_changed, quantity_after, created_at FROM system_audit_logs WHERE entity_type = 'producto' ORDER BY id ASC").all() as any[];
-
-    const salesDateMap = new Map<number, string>();
-    for (const s of sales) {
-      if (!deletedSalesSet.has(String(s.id))) {
-        salesDateMap.set(Number(s.id), String(s.created_at || ''));
-      }
-    }
-
-    const corrections: any[] = [];
-    const correctedProductIds: number[] = [];
-    const correctedAuditIds: number[] = [];
-    const nowIso = getBoliviaISOString();
-
-    db.transaction(() => {
-      for (const p of prods) {
-        const pid = Number(p.id);
-        const prodUpdated = String(p.updated_at || '');
-        if (!prodUpdated) continue;
-
-        const arrAfter = arrivals.filter(a => Number(a.product_id) === pid && String(a.created_at || '') > prodUpdated);
-        const returnsAfter = saleReturns.filter(
-          r => Number(r.product_id) === pid && !deletedSalesSet.has(String(r.sale_id)) && String(r.created_at || '') > prodUpdated
-        );
-        const salesAfter = saleItems
-          .filter(si => Number(si.product_id) === pid && salesDateMap.has(Number(si.sale_id)))
-          .map(si => ({ ...si, created_at: salesDateMap.get(Number(si.sale_id))! }))
-          .filter(si => si.created_at > prodUpdated);
-
-        // Also check if a post-Oct-30 chain break occurred in system_audit_logs before the current updated_at (e.g. SKU 6 on Nov 2)
-        const VALID_STOCK_EVENTS = new Set(['ingreso_compra', 'salida_venta', 'creacion_producto', 'ajuste_incremento', 'ajuste_decremento', 'devolucion_cliente']);
-        const pSysLogs = sysLogs.filter(
-          l => Number(l.entity_id) === pid && VALID_STOCK_EVENTS.has(String(l.event_type)) && l.quantity_after !== null && l.quantity_after !== undefined
-        );
-        let chainBreakDelta = 0;
-        for (let i = 1; i < pSysLogs.length; i++) {
-          if (String(pSysLogs[i].created_at || '') >= '2026-10-31') {
-            const prevAfter = Number(pSysLogs[i - 1].quantity_after);
-            const currBefore = Number(pSysLogs[i].quantity_before);
-            if (Number.isFinite(prevAfter) && Number.isFinite(currBefore) && prevAfter !== currBefore) {
-              chainBreakDelta += (prevAfter - currBefore);
-            }
-          }
-        }
-
-        const arrSum = arrAfter.reduce((acc, a) => acc + Number(a.quantity || 0), 0);
-        const returnsSum = returnsAfter.reduce((acc, r) => acc + Number(r.quantity || 0), 0);
-        const salesSum = salesAfter.reduce((acc, s) => acc + Number(s.quantity || 0), 0);
-        let netDelta = arrSum + returnsSum - salesSum;
-
-        // If no movements after updated_at, check if current stock is still missing a post-Oct-31 chainBreakDelta (e.g., SKU 6)
-        if (netDelta === 0 && chainBreakDelta !== 0 && pSysLogs.length > 0) {
-          const lastSysAfter = Number(pSysLogs[pSysLogs.length - 1].quantity_after);
-          const expectedWithChainBreak = lastSysAfter + chainBreakDelta;
-          if (Number(p.stock) === lastSysAfter && Number(p.stock) !== expectedWithChainBreak) {
-            netDelta = chainBreakDelta;
-          }
-        }
-
-        if (netDelta !== 0) {
-          const oldStock = Number(p.stock || 0);
-          const newStock = Math.max(0, oldStock + netDelta);
-          if (newStock !== oldStock) {
-            db.prepare('UPDATE products SET stock = ?, updated_at = ? WHERE id = ?').run(newStock, nowIso, pid);
-
-            const invType = netDelta > 0 ? 'ajuste_incremento' : 'ajuste_decremento';
-            const absDelta = Math.abs(netDelta);
-            const reasonNote = `Conciliación forense automática con Libro Mayor (Ingresos omitidos: +${arrSum}${returnsSum ? `, Devoluciones omitidas: +${returnsSum}` : ''}, Ventas omitidas: -${salesSum}${chainBreakDelta ? `, Continuidad Kárdex: ${chainBreakDelta > 0 ? '+' + chainBreakDelta : chainBreakDelta}` : ''})`;
-
-            const invRes = db.prepare(`
-              INSERT INTO inventory_audit_logs
-              (product_id, product_name, product_sku, type, quantity, price, user_id, username, reference, notes, created_at)
-              VALUES (?, ?, ?, ?, ?, ?, 4, 'admin', 'CONCILIACION_LIBRO_MAYOR', ?, ?)
-            `).run(pid, p.name, p.sku || '', invType, absDelta, Number(p.price_cost || 0), reasonNote, nowIso);
-
-            correctedProductIds.push(pid);
-            if (invRes.lastInsertRowid) correctedAuditIds.push(Number(invRes.lastInsertRowid));
-            corrections.push({
-              id: pid,
-              sku: p.sku,
-              name: p.name,
-              oldStock,
-              newStock,
-              netDelta,
-              reason: reasonNote
-            });
-          }
-        }
-      }
-    })();
-
-    if (correctedProductIds.length > 0) {
-      console.log(`[Ledger Auto-Reconciler] Healed ${correctedProductIds.length} products against immutable sales/arrivals ledger:`, corrections.map(c => `SKU ${c.sku} (${c.oldStock} -> ${c.newStock})`).join(', '));
-      syncAfterWrite({
-        products: correctedProductIds,
-        ...(correctedAuditIds.length > 0 ? { inventory_audit_logs: correctedAuditIds } : {})
-      });
-    }
-
-    return { audited: prods.length, corrected: corrections.length, corrections };
-  });
+  console.log("[Ledger Auto-Reconciler] Disabled: automatic stock mutations are permanently blocked to protect production inventory.");
+  return { audited: 0, corrected: 0, corrections: [] };
 }
 
 let ledgerReconciliationTimer: NodeJS.Timeout | null = null;

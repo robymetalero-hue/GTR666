@@ -1323,14 +1323,6 @@ export default function AuditoriaForenseView() {
                             >
                               Inspeccionar
                             </button>
-                            {!p.isBalanced && (
-                              <button
-                                onClick={() => setReconcileTarget(p)}
-                                className="px-2.5 py-1 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-xs font-semibold shadow-sm transition flex items-center gap-1"
-                              >
-                                <Check className="w-3 h-3" /> Conciliar
-                              </button>
-                            )}
                           </div>
                         </td>
                       </tr>

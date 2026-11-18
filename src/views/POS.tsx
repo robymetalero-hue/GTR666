@@ -15,7 +15,7 @@ import {
 import { jsPDF } from 'jspdf';
 import BarcodeScannerModal from '../components/BarcodeScannerModal';
 import OfflineStatusHUD from '../components/OfflineStatusHUD';
-import { saveOfflineSale, saveOfflineAction, markOperationCompleted } from '../utils/offlineStorage';
+import { markOperationCompleted } from '../utils/offlineStorage';
 import { useElasticScroll } from '../utils/touchScroll';
 import { safeDispatchEvent } from '../utils/events';
 import { getFavorites, toggleFavorite } from '../utils/posUiPreferences';
@@ -256,7 +256,7 @@ export default function POS() {
         hasMoreProducts, loadMoreProducts,
         deductLocalProductStock, registerLocalClient,
         isSupervisorUnlocked, isFullscreen, toggleFullscreen,
-        inventoryLock, isKioskLocked
+        inventoryLock, isKioskLocked, isOffline
     } = useAppContext();
 
     const [loadingMoreProducts, setLoadingMoreProducts] = useState(false);
@@ -819,40 +819,29 @@ export default function POS() {
         };
     }, [products, addToCart, cart, activeCartItemId]);
 
-    // Core checkout parameters — clientOperationId is locked per active cart tab so retries, modal re-opens, or hot updates never generate duplicate IDs for the same sale
+    // Core checkout parameters — clientOperationId is locked per active cart tab in RAM (zero local cache) so retries or modal re-opens never generate duplicate IDs for the same sale
     const [isCheckoutOpen, setIsCheckoutOpen] = useState(false);
     const [isCheckoutProcessing, setIsCheckoutProcessing] = useState(false);
-    const [clientOperationId, setClientOperationId] = useState<string>(() => {
-        try {
-            return localStorage.getItem(`gtr_active_cart_op_id_${activeTabId}`) || "";
-        } catch {
-            return "";
-        }
-    });
+    const tabOpIdMapRef = useRef<Record<number, string>>({});
+    const [clientOperationId, setClientOperationId] = useState<string>("");
     const [checkoutCurrency, setCheckoutCurrency] = useState<'BOB' | 'USD'>('BOB');
     const cashInputRef = useRef<HTMLInputElement>(null);
 
     useEffect(() => {
         if (cart.length === 0) {
+            delete tabOpIdMapRef.current[activeTabId];
             try {
                 localStorage.removeItem(`gtr_active_cart_op_id_${activeTabId}`);
             } catch {}
             setClientOperationId("");
             return;
         }
-        try {
-            const storageKey = `gtr_active_cart_op_id_${activeTabId}`;
-            let existingOpId = localStorage.getItem(storageKey);
-            if (!existingOpId) {
-                existingOpId = "op_" + Date.now() + "_" + Math.random().toString(36).substring(2, 11);
-                localStorage.setItem(storageKey, existingOpId);
-            }
-            setClientOperationId(existingOpId);
-        } catch {
-            if (!clientOperationId) {
-                setClientOperationId("op_" + Date.now() + "_" + Math.random().toString(36).substring(2, 11));
-            }
+        let existingOpId = tabOpIdMapRef.current[activeTabId];
+        if (!existingOpId) {
+            existingOpId = "op_" + Date.now() + "_" + Math.random().toString(36).substring(2, 11);
+            tabOpIdMapRef.current[activeTabId] = existingOpId;
         }
+        setClientOperationId(existingOpId);
     }, [cart.length, activeTabId]);
 
     useEffect(() => {
@@ -1013,20 +1002,71 @@ export default function POS() {
                 items,
                 clientOperationId: opId
             };
-            if (!navigator.onLine) {
-                showNotification("⚠️ Conexión a internet requerida: GTR POS opera exclusivamente en línea con el servidor principal para evitar conflictos de stock.", "error");
+            if (isOffline && typeof navigator !== 'undefined' && !navigator.onLine) {
+                showNotification("⚠️ Conexión a internet requerida: El período de espera de 45s expiró. Reconéctate a internet para guardar el pedido en vivo.", "error");
                 return;
             }
 
             const token = localStorage.getItem('auth_token');
-            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+            const headers: Record<string, string> = {
+                'Content-Type': 'application/json',
+                'x-kiosk-locked': isKioskLocked ? 'true' : 'false'
+            };
             if (token) headers['Authorization'] = `Bearer ${token}`;
 
-            const res = await fetch('/api/pending-sales', {
-                method: 'POST',
-                headers,
-                body: JSON.stringify(payload)
-            });
+            let res: Response | null = null;
+            let lastPendingErr: any = null;
+            const graceDeadline = Date.now() + 45000;
+            let attempt = 0;
+
+            while (Date.now() < graceDeadline) {
+                try {
+                    if (attempt > 0) {
+                        await new Promise<void>((resolve) => {
+                            const t = setTimeout(() => {
+                                window.removeEventListener('online', onSignalWake);
+                                window.removeEventListener('gtr-grace-sync-now', onSignalWake);
+                                resolve();
+                            }, 2000);
+                            const onSignalWake = () => {
+                                clearTimeout(t);
+                                window.removeEventListener('online', onSignalWake);
+                                window.removeEventListener('gtr-grace-sync-now', onSignalWake);
+                                resolve();
+                            };
+                            window.addEventListener('online', onSignalWake, { once: true });
+                            window.addEventListener('gtr-grace-sync-now', onSignalWake, { once: true });
+                        });
+                    }
+                    attempt++;
+                    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+                        lastPendingErr = new Error("Esperando reconexión dentro de la ventana de 45s");
+                        continue;
+                    }
+                    const controller = new AbortController();
+                    const reqTimeout = setTimeout(() => controller.abort(), 8000);
+                    try {
+                        res = await fetch('/api/pending-sales', {
+                            method: 'POST',
+                            headers,
+                            body: JSON.stringify(payload),
+                            signal: controller.signal
+                        });
+                        clearTimeout(reqTimeout);
+                        lastPendingErr = null;
+                        break;
+                    } catch (innerErr) {
+                        clearTimeout(reqTimeout);
+                        throw innerErr;
+                    }
+                } catch (fetchErr) {
+                    lastPendingErr = fetchErr;
+                }
+            }
+
+            if (!res) {
+                throw lastPendingErr || new Error("Network error");
+            }
             
             if (res.ok) {
                 clearCart(true);
@@ -1049,7 +1089,7 @@ export default function POS() {
             }
         } catch (err: any) {
             console.error(err);
-            showNotification("⚠️ Error de conexión al guardar venta pendiente", "error");
+            showNotification("⚠️ Error de conexión con el servidor tras 45s de espera. Tu carrito sigue intacto.", "error");
         } finally {
             isSavingPendingRef.current = false;
             setIsSavingPending(false);
@@ -1729,30 +1769,14 @@ export default function POS() {
         setIsCheckoutProcessing(true);
 
         try {
-            if (!navigator.onLine) {
-                showNotification("⚠️ Sin conexión al servidor principal: Conéctate a internet para procesar la venta en vivo.", "error");
+            if (isOffline && typeof navigator !== 'undefined' && !navigator.onLine) {
+                showNotification("⚠️ Sin conexión al servidor principal (pasaron 45s de espera): Reconéctate a internet para procesar la venta en vivo.", "error");
                 return;
             }
 
-            // Register client details if provided. By hitting POST /api/clients first, we retrieve/create clientId
             let clientId: any = null;
-            if (clientName.trim()) {
-                try {
-                    const clientRes = await fetch('/api/clients', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ name: clientName, phone: clientPhone })
-                    });
-                    if (clientRes.ok) {
-                        const clientData = await clientRes.json();
-                        clientId = clientData.id;
-                    }
-                } catch (e) {
-                    console.error("Client registration error:", e);
-                }
-            }
-
-            const opId = clientOperationId || ("op_" + Date.now() + "_" + Math.random().toString(36).substring(2, 11));
+            const opId = clientOperationId || tabOpIdMapRef.current[activeTabId] || ("op_" + Date.now() + "_" + Math.random().toString(36).substring(2, 11));
+            tabOpIdMapRef.current[activeTabId] = opId;
 
             const splitPaymentObj = methodToUse === 'Mixto'
                 ? { cash_amount: Number(splitCashAmount.toFixed(2)), qr_amount: Number(splitQrAmount.toFixed(2)) }
@@ -1763,14 +1787,14 @@ export default function POS() {
                 ? `${checkoutDescription ? checkoutDescription + ' | ' : ''}[Pago Mixto: Efectivo ${currSym} ${splitPaymentObj.cash_amount.toFixed(2)} + QR ${currSym} ${splitPaymentObj.qr_amount.toFixed(2)}]`
                 : checkoutDescription;
 
-            const salePayload = {
+            const salePayload: any = {
                 total: checkoutCurrency === 'USD' ? usdTotal : total,
                 discount: checkoutCurrency === 'USD' ? (discountValue + pointsRedeemedValue) / exchangeRate : (discountValue + pointsRedeemedValue),
                 payment_method: methodToUse,
                 split_payment: splitPaymentObj,
                 user_id: user?.id || 1,
                 user_name: user?.username || 'Cajero',
-                client_id: clientId,
+                client_id: null,
                 items: cart.filter(c => c.cartQuantity > 0).map(c => ({
                     product_id: c.id,
                     quantity: c.cartQuantity,
@@ -1785,83 +1809,14 @@ export default function POS() {
                 clientOperationId: opId
             };
 
-            const saveOffline = async () => {
-                try {
-                    // In the Online-First model, offline contingency sales are quarantined:
-                    // We DO NOT deduct local inventory blindly. Stock deduction occurs strictly upon Admin Authorization.
-                    salePayload.notes = (salePayload.notes ? salePayload.notes + ' ' : '') + '[Contingencia Offline - Pendiente Aprobación]';
-                    const offlineSale = await saveOfflineSale(salePayload, clientName, clientPhone);
-                    const placeholderSaleId = offlineSale.id;
-
-                    // Immediate local client registration (safe client cache)
-                    if (clientName.trim()) {
-                        registerLocalClient({
-                            id: clientId || -Date.now(),
-                            name: clientName.trim(),
-                            phone: clientPhone ? clientPhone.trim() : ''
-                        });
-                    }
-
-                    const contingencyNotes = (effectiveCheckoutNotes ? effectiveCheckoutNotes + ' ' : '') + '[CONTINGENCIA OFFLINE - PENDIENTE APROBACIÓN]';
-                    generateTicketPDF(methodToUse, placeholderSaleId, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, creditDestination, contingencyNotes, splitPaymentObj);
-                    
-                    setReceiptConfirmation({
-                        saleId: placeholderSaleId,
-                        total: checkoutCurrency === 'USD' ? usdTotal : total,
-                        currency: checkoutCurrency,
-                        itemsCount: cart.reduce((acc, item) => acc + item.cartQuantity, 0),
-                        paymentMethod: methodToUse,
-                        items: [...cart],
-                        clientName,
-                        clientPhone,
-                        discountValue,
-                        discount,
-                        discountType,
-                        pointsRedeemedValue,
-                        subtotal,
-                        exchangeRate,
-                        cashReceived,
-                        destination: creditDestination,
-                        splitPayment: splitPaymentObj
-                    });
-
-                    try {
-                        localStorage.removeItem(`gtr_active_cart_op_id_${activeTabId}`);
-                    } catch (_) {}
-                    setClientOperationId("");
-                    clearCart(true);
-                    setLocalPriceInputs({});
-                    setSelectedCartItemId(null);
-                    setIsMobileCartOpen(false);
-                    setDiscount(0);
-                    setClientName("");
-                    setClientPhone("");
-                    setCreditDestination("");
-                    setCheckoutDescription("");
-                    setInitialAbono(0);
-                    setDueDate("");
-                    setCashReceived("");
-                    setSplitCashInput("");
-                    setSplitQrInput("");
-                    setUsePoints(false);
-                    setPaymentMethod('Efectivo');
-                    setIsCheckoutOpen(false);
-                    triggerVibrate([80, 50, 80]);
-                    showNotification("✓ Venta offline registrada en contingencia. El ticket fue emitido y la venta ingresará a la Bandeja de Aprobación del Administrador al reconectar.", "success");
-                } catch (saveErr) {
-                    triggerVibrate([150, 100, 150]);
-                    console.error("Failed to save offline sale:", saveErr);
-                    showNotification("Fallo al registrar la venta en contingencia offline.", "error");
-                }
-            };
-
             try {
                 const authToken = typeof localStorage !== 'undefined' ? localStorage.getItem('auth_token') : null;
                 const saleHeaders: Record<string, string> = {
                     'Content-Type': 'application/json',
                     'x-pos-checkout': 'true',
+                    'x-kiosk-locked': isKioskLocked ? 'true' : 'false',
                     'x-user-id': String(user?.id || 1),
-                    'x-user-role': String(user?.role || 'vendedor'),
+                    'x-user-role': String(isKioskLocked ? 'vendedor' : (user?.role || 'vendedor')),
                     'x-user-username': String(user?.username || 'Cajero')
                 };
                 if (authToken) {
@@ -1901,6 +1856,29 @@ export default function POS() {
                             lastFetchErr = new Error("Waiting for live connection within 45s grace window");
                             continue;
                         }
+
+                        // Register client details once live connection is confirmed inside grace loop
+                        if (clientName.trim() && !clientId) {
+                            try {
+                                const clientController = new AbortController();
+                                const clientTimeout = setTimeout(() => clientController.abort(), 5000);
+                                const clientRes = await fetch('/api/clients', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ name: clientName, phone: clientPhone }),
+                                    signal: clientController.signal
+                                });
+                                clearTimeout(clientTimeout);
+                                if (clientRes.ok) {
+                                    const clientData = await clientRes.json();
+                                    clientId = clientData.id;
+                                    salePayload.client_id = clientId;
+                                }
+                            } catch (e) {
+                                console.error("Client registration error:", e);
+                            }
+                        }
+
                         const controller = new AbortController();
                         const reqTimeout = setTimeout(() => controller.abort(), 8000);
                         try {
@@ -1928,6 +1906,7 @@ export default function POS() {
                     const data = await res.json();
                     const saleId = data.saleId;
                     markOperationCompleted(opId, String(saleId));
+                    delete tabOpIdMapRef.current[activeTabId];
                     try {
                         localStorage.removeItem(`gtr_active_cart_op_id_${activeTabId}`);
                     } catch (_) {}

@@ -26,7 +26,7 @@ import {
 } from "./database.ts";
 import { hashPassword, verifyPassword, isPasswordHashed, getJwtSecret } from "./authSecurity.ts";
 import { normalizeProductName } from "./src/utils/productUtils.ts";
-import { pullFirestoreToLocal, pushFirestoreToLocal, startPeriodicLedgerReconciliation, syncAfterWrite, pushAllLocalToFirestore, firestore, clearAllFirestoreAndLocalData, recordDeletion, deleteFromFirestore, reconcileCatalogStockWithLedger, getCollectionName, getSyncDeduplicationStats, shouldPushRecordToCloud, ensureCloudHydrated, syncSpecificProductsFromCloud } from "./firebaseSync.ts";
+import { pullFirestoreToLocal, pushLocalToFirestore, startPeriodicLedgerReconciliation, syncAfterWrite, pushAllLocalToFirestore, firestore, clearAllFirestoreAndLocalData, recordDeletion, deleteFromFirestore, reconcileCatalogStockWithLedger, getCollectionName, getSyncDeduplicationStats, shouldPushRecordToCloud, ensureCloudHydrated, syncSpecificProductsFromCloud } from "./firebaseSync.ts";
 import { getProductForensicTimeline, auditEntireCatalog, searchProductsForAudit, generateForensicMarkdownReport, getAvailableAuditPeriods, auditDatabaseByPeriod, reconcileProductDiscrepancy } from "./forensicAuditEngine.ts";
 import { requestContextStorage, getRecentFirestoreLedger, getFirestoreLedgerStats, validateFirestoreWriteOperation } from "./firestoreIntegrityMiddleware.ts";
 import { collection, getDocs, doc, getDoc, setDoc } from "firebase/firestore";
@@ -502,6 +502,25 @@ async function startServer() {
     }
   }
 
+  const isKioskLockedRequest = (req: any): boolean => {
+    return (
+      String(req.headers['x-kiosk-locked'] || '').toLowerCase().trim() === 'true' ||
+      String(req.query?.kiosk_locked || '').toLowerCase().trim() === 'true'
+    );
+  };
+
+  const KIOSK_FORBIDDEN_STOCK_PERMISSIONS = new Set([
+    'add_products',
+    'edit_products',
+    'delete_products',
+    'increase_stock',
+    'adjust_stock',
+    'make_refunds',
+    'edit_prices',
+    'modify_prices',
+    'preview_quantities_in_count'
+  ]);
+
   const enforcePermission = (permissionKey: string) => {
     return (req: any, res: any, next: any) => {
       const user = (req as any).verifiedUser;
@@ -510,8 +529,14 @@ async function startServer() {
         return res.status(401).json({ error: 'No autorizado. Se requiere iniciar sesión con un usuario válido.' });
       }
 
+      if (isKioskLockedRequest(req) && KIOSK_FORBIDDEN_STOCK_PERMISSIONS.has(permissionKey)) {
+        return res.status(403).json({
+          error: `Operación bloqueada en Modo Kiosco (${permissionKey}). Desbloquee supervisión administrativa para modificar existencias o catálogo.`
+        });
+      }
+
       const userRole = String(user.role || '').toLowerCase();
-      if (userRole === 'admin' || userRole === 'administrador' || userRole === 'propietario' || isMainAdmin(user)) {
+      if (!isKioskLockedRequest(req) && (userRole === 'admin' || userRole === 'administrador' || userRole === 'propietario' || isMainAdmin(user))) {
         return next();
       }
 
@@ -555,6 +580,12 @@ async function startServer() {
     const user = (req as any).verifiedUser;
     if (!user) {
       return res.status(401).json({ error: 'No autorizado. Se requiere iniciar sesión como administrador.' });
+    }
+
+    if (isKioskLockedRequest(req)) {
+      return res.status(403).json({
+        error: 'Operación bloqueada en Modo Kiosco: se requiere desbloqueo de supervisión administrativa para alterar inventario o sistema.'
+      });
     }
 
     const userRole = String(user.role || '').toLowerCase();
@@ -3726,6 +3757,9 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
   });
 
   app.put("/api/products/:id", async (req, res) => {
+    if (isKioskLockedRequest(req)) {
+      return res.status(403).json({ error: "Operación bloqueada en Modo Kiosco: no se permite modificar productos ni cantidades físicas desde Kiosco." });
+    }
     const { name, category, sku, stock, price_unit, price_bulk, price_cost, stock_alarm, image, user_id, username } = req.body;
     const { id } = req.params;
     if (!name || !name.trim() || !sku || !sku.trim() || !category || !category.trim()) {
@@ -4116,6 +4150,9 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
   // Bulk adjustment of selected products (prices, costs, category, stock_alarm, or physical stock)
   app.post("/api/products/bulk-adjust", async (req, res) => {
+    if (isKioskLockedRequest(req)) {
+      return res.status(403).json({ error: "Operación bloqueada en Modo Kiosco: no se permite realizar ajustes masivos de inventario desde Kiosco." });
+    }
     const {
       product_ids,
       adjustments, // { price_unit?: { mode: 'percent'|'fixed'|'exact', value: number, currency?: 'USD'|'BOB', rounding?: 'none'|'0.50'|'1.00' }, price_bulk?: ..., price_cost?: ..., category?: string, stock_alarm?: number, stock?: { mode: 'delta'|'exact', value: number } }
@@ -4548,14 +4585,16 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         FROM inventory_count_items ici
         JOIN inventory_counts ic ON ici.inventory_count_id = ic.id
         WHERE ici.product_id = ? AND ici.difference IS NOT NULL AND ici.difference != 0
-          AND ic.status IN ('finalizado', 'aprobado', 'completado')
+          AND (ic.applied_at IS NOT NULL OR ic.status IN ('aprobado', 'cerrado'))
         ORDER BY ic.created_at DESC
       `).all(id) as any[];
 
-      // 5. Existing inventory_audit_logs
+      // 5. Existing inventory_audit_logs (excluding invalidated automatic reconciliations and tombstoned entries)
       const invLogs = db.prepare(`
         SELECT * FROM inventory_audit_logs
         WHERE product_id = ?
+          AND NOT (COALESCE(reference, '') = 'CONCILIACION_LIBRO_MAYOR' AND created_at >= '2026-11-03')
+          AND CAST(id AS TEXT) NOT IN (SELECT record_id FROM deleted_records WHERE table_name = 'inventory_audit_logs')
         ORDER BY created_at DESC
       `).all(id) as any[];
 
@@ -7083,6 +7122,17 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
       let query = `
         SELECT s.*, c.name as client_name, u.username as user_name,
                (SELECT COALESCE(SUM(quantity), 0) FROM sale_items WHERE sale_id = s.id) as item_count,
+               (SELECT GROUP_CONCAT(
+                  CASE
+                    WHEN si.quantity > 1 THEN si.quantity || 'x ' || COALESCE(si.product_name_snapshot, p.name, 'Producto')
+                    ELSE COALESCE(si.product_name_snapshot, p.name, 'Producto')
+                  END,
+                  ', '
+                )
+                FROM sale_items si
+                LEFT JOIN products p ON p.id = si.product_id
+                WHERE si.sale_id = s.id
+               ) as items_summary,
                (SELECT COALESCE(SUM(refund_amount), 0) FROM sale_returns WHERE sale_id = s.id) as returned_amount,
                (SELECT COALESCE(SUM(quantity), 0) FROM sale_returns WHERE sale_id = s.id) as returned_items_count,
                ${capitalSelect}
@@ -8869,7 +8919,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     }
   });
 
-  app.post("/api/pending-sales", (req, res) => {
+  app.post("/api/pending-sales", async (req, res) => {
     const {
       client_name,
       destination,
@@ -8912,7 +8962,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
 
     const verifiedUser = (req as any).verifiedUser;
     const uRole = String(verifiedUser?.role || '').toLowerCase();
-    const isAdmin = verifiedUser && (['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser));
+    const isAdmin = !isKioskLockedRequest(req) && Boolean(verifiedUser && (['admin', 'administrador', 'propietario'].includes(uRole) || isMainAdmin(verifiedUser)));
     const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
 
     if (!isAdmin && userPerms.create_pending_sales === false) {
@@ -8922,7 +8972,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     if (safeDiscountCheck > 0 && !isAdmin && userPerms.apply_discounts === false) {
       return res.status(403).json({ error: "No tienes autorización para aplicar descuentos en pedidos." });
     }
-    const canModifyPrices = isAdmin || !!userPerms.modify_prices || !!userPerms.edit_prices;
+    const canModifyPrices = isAdmin || (!isKioskLockedRequest(req) && (!!userPerms.modify_prices || !!userPerms.edit_prices));
     
     try {
       const rateRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('exchange_rate') as any;
@@ -8979,6 +9029,10 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
           return res.status(400).json({ error: "Cantidad de producto inválida. Las cantidades deben ser enteros positivos." });
         }
         aggregatedDemand.set(pId, (aggregatedDemand.get(pId) || 0) + safeQty);
+      }
+
+      if (shouldReserveStock === 1 && aggregatedDemand.size > 0) {
+        await syncSpecificProductsFromCloud(Array.from(aggregatedDemand.keys()));
       }
 
       for (const [pId, totalDemand] of aggregatedDemand.entries()) {
@@ -10059,13 +10113,11 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     }
   });
 
-  app.post("/api/inventory/reconcile-catalog", enforceAdmin, async (req, res) => {
-    try {
-      const result = reconcileCatalogStockWithLedger();
-      res.json({ success: true, ...result });
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
-    }
+  app.post("/api/inventory/reconcile-catalog", enforceAdmin, async (_req, res) => {
+    return res.status(403).json({
+      success: false,
+      error: "La conciliación automática masiva del catálogo está permanentemente deshabilitada para proteger las cantidades físicas en producción."
+    });
   });
 
   // ==========================================
@@ -10632,8 +10684,7 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
         });
       } catch {}
 
-      // Reconcile and Sync
-      reconcileCatalogStockWithLedger();
+      // Sync explicit sale records only (never run automatic catalog reconciliation)
 
       const syncMap: Record<string, any[]> = {
         sales: [txExecution.saleId],
@@ -10797,18 +10848,11 @@ Debes responder estrictamente en formato JSON sin preámbulos, markdown duplicad
     }
   });
 
-  app.post("/api/forensic-audit/reconcile", requireForensicAuditAccess, (req, res) => {
-    try {
-      const { productId, notes } = req.body;
-      if (!productId) {
-        return res.status(400).json({ error: "ID de producto requerido" });
-      }
-      const adminUsername = req.headers["x-user-name"] ? String(req.headers["x-user-name"]) : "admin";
-      const result = reconcileProductDiscrepancy(Number(productId), notes, adminUsername);
-      res.json(result);
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
-    }
+  app.post("/api/forensic-audit/reconcile", requireForensicAuditAccess, (_req, res) => {
+    return res.status(403).json({
+      success: false,
+      error: "La conciliación forense tiene deshabilitado el permiso de modificar cantidades de inventario. Todo ajuste de stock debe realizarse manualmente desde Inventario o Control Físico aprobado."
+    });
   });
 
   app.get("/api/forensic-audit/catalog", requireForensicAuditAccess, (req, res) => {
@@ -12256,9 +12300,10 @@ DIRECTIVAS CRÍTICAS:
     try {
       const verifiedUser = (req as any).verifiedUser;
       const uRole = String(verifiedUser?.role || '').toLowerCase();
-      const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+      const isKioskReq = isKioskLockedRequest(req);
+      const isAdmin = !isKioskReq && (uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser));
       const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
-      const canPhysicalChecklist = isAdmin || userPerms.physical_control_checklist === true;
+      const canPhysicalChecklist = isAdmin || isKioskReq || userPerms.physical_control_checklist === true;
       if (!canPhysicalChecklist) {
         return res.status(403).json({ error: "No tienes autorización para acceder a sesiones de control físico." });
       }
@@ -12277,8 +12322,8 @@ DIRECTIVAS CRÍTICAS:
     }
   });
 
-  // Crear una nueva sesión de conteo físico (Copia el stock esperado como snapshot interno)
-  app.post("/api/inventory-counts", (req, res) => {
+  // Crear una nueva sesión de conteo físico (Copia el stock esperado como snapshot interno sincronizado desde Cloud Firestore)
+  app.post("/api/inventory-counts", async (req, res) => {
     const { 
       user_id, 
       username, 
@@ -12289,7 +12334,8 @@ DIRECTIVAS CRÍTICAS:
       mode, 
       override_segregation, 
       override_reason,
-      force_new
+      force_new,
+      clientOperationId
     } = req.body;
 
     try {
@@ -12297,22 +12343,30 @@ DIRECTIVAS CRÍTICAS:
       if (!verifiedUser) {
         return res.status(401).json({ error: "Sesión requerida." });
       }
+      const isKioskReq = isKioskLockedRequest(req);
       const uRole = String(verifiedUser.role || '').toLowerCase();
-      const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+      const isAdmin = !isKioskReq && (uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser));
       const userPerms = (typeof verifiedUser.permissions === 'string' ? JSON.parse(verifiedUser.permissions || '{}') : verifiedUser.permissions) || {};
-      const canPhysicalChecklist = isAdmin || userPerms.physical_control_checklist === true;
+      const canPhysicalChecklist = isAdmin || isKioskReq || userPerms.physical_control_checklist === true;
       if (!canPhysicalChecklist) {
         return res.status(403).json({ error: "No tienes autorización para iniciar sesiones de control físico." });
       }
-      const canPreviewQuantities = isAdmin || !!userPerms.preview_quantities_in_count;
+      const canPreviewQuantities = !isKioskReq && (isAdmin || !!userPerms.preview_quantities_in_count);
 
-      // REGLA: Si el usuario no tiene permisos de administrador ni preview_quantities_in_count,
-      // la opción con control para ver cantidades físicas queda estrictamente bloqueada/deshabilitada, forzando 'BLIND'.
+      // Idempotencia para reintentos en vivo dentro de los 45s de gracia
+      if (clientOperationId) {
+        const existingOp = db.prepare('SELECT response_body FROM processed_operations WHERE client_operation_id = ?').get(String(clientOperationId)) as any;
+        if (existingOp && existingOp.response_body) {
+          return res.status(200).json({ ...JSON.parse(existingOp.response_body), isDuplicate: true });
+        }
+      }
+
+      // REGLA: En Modo Kiosco o sin permisos de previsualización, el conteo es SIEMPRE 100% A CIEGAS ('BLIND').
       const finalMode = (canPreviewQuantities && mode === 'STANDARD') ? 'STANDARD' : 'BLIND';
 
       if (force_new) {
         if (!isAdmin) {
-          return res.status(403).json({ error: "Acceso denegado: Solo administradores verificados pueden forzar una nueva sesión y cancelar auditorías activas." });
+          return res.status(403).json({ error: "Acceso denegado: Solo administradores fuera de Modo Kiosco pueden forzar una nueva sesión y cancelar auditorías activas." });
         }
         db.prepare("UPDATE inventory_counts SET status = 'cancelado', notes = 'Cancelada por administrador al forzar nueva auditoría' WHERE status IN ('en_progreso', 'pausado')").run();
       } else {
@@ -12329,9 +12383,6 @@ DIRECTIVAS CRÍTICAS:
       const assignedAuditor = (auditor_name || username || 'Auditor').trim();
       const store = (store_name || 'Almacén Principal').trim();
 
-      // --- VALIDACIÓN DE SEGREGACIÓN DE FUNCIONES ---
-      // Solo aplica si se intenta realizar un conteo visible con control (STANDARD).
-      // En modo A CIEGAS (BLIND), el operador NO ve las existencias del sistema, por lo que el conteo es 100% ciego e imparcial y está totalmente permitido.
       if (!isAdmin && finalMode === 'STANDARD') {
         const isOperatorSelfAuditing = (username && assignedAuditor.toLowerCase().includes(username.toLowerCase())) || assignedAuditor.toLowerCase().includes('cajero');
         if (isOperatorSelfAuditing && !override_segregation) {
@@ -12341,6 +12392,11 @@ DIRECTIVAS CRÍTICAS:
           });
         }
       }
+
+      // Sincronizar catálogo autoritativo desde Cloud Firestore antes de tomar el snapshot inicial
+      try {
+        await pullFirestoreToLocal(false);
+      } catch (_) {}
 
       let products: any[] = [];
       const excludeZero = (finalMode === 'BLIND') || (req.body.exclude_zero_stock === true || req.body.exclude_zero_stock === 1);
@@ -12357,7 +12413,7 @@ DIRECTIVAS CRÍTICAS:
         return res.status(400).json({ error: "No hay productos disponibles para auditar en el alcance seleccionado." });
       }
 
-      const transaction = db.transaction(() => {
+      const responsePayload = db.transaction(() => {
         const result = db.prepare(`
           INSERT INTO inventory_counts (
             user_id, username, auditor_name, store_name, notes, status, 
@@ -12365,20 +12421,20 @@ DIRECTIVAS CRÍTICAS:
           ) 
           VALUES (?, ?, ?, ?, ?, 'en_progreso', ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?)
         `).run(
-          user_id || 1, 
-          username || 'admin', 
+          verifiedUser.id || user_id || 1, 
+          verifiedUser.username || username || 'admin', 
           assignedAuditor, 
           store, 
           notes || (finalMode === 'STANDARD' ? 'Control físico de inventario' : 'Auditoría a ciegas'), 
           finalMode, 
-          override_segregation ? 1 : 0, 
-          override_reason || null, 
+          (!isKioskReq && override_segregation) ? 1 : 0, 
+          (!isKioskReq && override_reason) ? override_reason : null, 
           products.length, 
           category_filter || null,
           excludeZero ? 1 : 0
         );
         
-        const countId = result.lastInsertRowid;
+        const countId = Number(result.lastInsertRowid);
         const insertItem = db.prepare(`
           INSERT INTO inventory_count_items (
             inventory_count_id, product_id, product_name, product_sku, 
@@ -12391,10 +12447,15 @@ DIRECTIVAS CRÍTICAS:
           insertItem.run(countId, p.id, p.name, p.sku, p.stock, p.stock);
         }
 
-        return countId;
-      });
-
-      const countId = transaction();
+        const resp = { success: true, countId, mode: finalMode };
+        if (clientOperationId) {
+          db.prepare(`
+            INSERT OR REPLACE INTO processed_operations (client_operation_id, operation_type, entity_id, payload_hash, response_body, created_at)
+            VALUES (?, 'inventory_count_start', ?, ?, ?, ?)
+          `).run(String(clientOperationId), String(countId), '', JSON.stringify(resp), getBoliviaISOString());
+        }
+        return resp;
+      })();
 
       // Audit log creation
       try {
@@ -12402,49 +12463,52 @@ DIRECTIVAS CRÍTICAS:
         insertSystemAuditLog({
           eventType: 'INVENTORY_COUNT_STARTED',
           category: 'INVENTORY_COUNT',
-          module: 'CONTROL_FISICO',
+          module: isKioskReq ? 'KIOSKO_CHKLST' : 'CONTROL_FISICO',
           action: `Inicio de Control Físico (${finalMode === 'STANDARD' ? 'Con Visibilidad' : 'A Ciegas'})`,
           severity: 'INFO',
           entityType: 'conteo_fisico',
-          entityId: countId,
-          entityName: `Control Físico #${countId} (${store})`,
-          userId: user_id || auditUser.userId || 1,
-          userName: username || auditUser.userName || 'admin',
+          entityId: responsePayload.countId,
+          entityName: `Control Físico #${responsePayload.countId} (${store})`,
+          userId: verifiedUser.id || user_id || auditUser.userId || 1,
+          userName: verifiedUser.username || username || auditUser.userName || 'admin',
           reason: notes || 'Conteo físico de inventario iniciado.',
-          afterData: { total_products: products.length, store, auditor: assignedAuditor, mode: finalMode },
+          afterData: { total_products: products.length, store, auditor: assignedAuditor, mode: finalMode, kiosk: isKioskReq },
           status: 'success'
         });
       } catch (auditErr: any) {
         console.warn("[Audit Error] Failed to log count start:", auditErr.message);
       }
 
-      res.json({ success: true, countId, mode: finalMode });
+      try {
+        syncAfterWrite(["inventory_counts", "inventory_count_items"]);
+      } catch (_) {}
+
+      res.json(responsePayload);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
   });
 
   // Obtener los detalles de una sesión de conteo físico e ítems
-  // PROTECCIÓN DE AUDITORÍA A CIEGAS: Sanitiza los datos devueltos solo al auditor cuando la sesión está en modo BLIND
+  // PROTECCIÓN DE AUDITORÍA A CIEGAS: Sanitiza los datos devueltos en sesiones BLIND o en Modo Kiosco
   app.get("/api/inventory-counts/:id", (req, res) => {
     const { id } = req.params;
     try {
       const verifiedUser = (req as any).verifiedUser;
+      const isKioskReq = isKioskLockedRequest(req);
       const uRole = String(verifiedUser?.role || '').toLowerCase();
-      const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+      const isAdmin = !isKioskReq && (uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser));
       const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
-      const canPhysicalChecklist = isAdmin || userPerms.physical_control_checklist === true;
+      const canPhysicalChecklist = isAdmin || isKioskReq || userPerms.physical_control_checklist === true;
       if (!canPhysicalChecklist) {
         return res.status(403).json({ error: "No tienes autorización para acceder a sesiones de control físico." });
       }
-      const isAuditorView = req.query.is_auditor_view === 'true';
+      const isAuditorView = isKioskReq || req.query.is_auditor_view === 'true';
 
       const count = db.prepare('SELECT * FROM inventory_counts WHERE id = ?').get(id) as any;
       if (!count) {
         return res.status(404).json({ error: "Sesión de conteo no encontrada." });
       }
-
-      // Read-only: Scope and items are fixed upon creation; GET never performs mutations or dynamic insertions
 
       let items = db.prepare(`
         SELECT 
@@ -12461,12 +12525,9 @@ DIRECTIVAS CRÍTICAS:
         ORDER BY ici.id ASC
       `).all(id) as any[];
 
-      // Ocultar stock del sistema:
-      // 1. SIEMPRE en sesiones MODO A CIEGAS mientras la sesión esté activa (en_progreso o pausada) - incluso para admin, para que el conteo físico sea 100% ciego e imparcial.
-      // 2. SIEMPRE para personal no-administrador (cajeros, vendedores, vista kiosco/auditor) en CUALQUIER estado.
       const isBlindSession = count.mode === 'BLIND';
       const isCountActive = count.status === 'en_progreso' || count.status === 'pausado';
-      const hideSystemStock = (isBlindSession && isCountActive) || (!isAdmin || isAuditorView);
+      const hideSystemStock = isKioskReq || (isBlindSession && isCountActive) || (!isAdmin || isAuditorView);
 
       if (hideSystemStock) {
         items = items.map((it: any) => ({
@@ -12488,7 +12549,6 @@ DIRECTIVAS CRÍTICAS:
         return res.json({ ...sanitizedCount, items, is_blind_sanitized: true });
       }
 
-      // Para sesiones activas o con visibilidad, el stock esperado del sistema coincide siempre con el stock real del POS
       items = items.map((it: any) => {
         const liveSysStock = (it.live_stock !== undefined && it.live_stock !== null) ? it.live_stock : (it.expected_quantity || 0);
         const physical = it.physical_quantity || 0;
@@ -12515,18 +12575,26 @@ DIRECTIVAS CRÍTICAS:
     }
   });
 
-  // Actualizar la cantidad física de un ítem individual
-  app.put("/api/inventory-counts/:id/items/:itemId", (req, res) => {
+  // Actualizar la cantidad física de un ítem individual (NUNCA modifica products.stock; soporta idempotencia y sync Cloud)
+  app.put("/api/inventory-counts/:id/items/:itemId", async (req, res) => {
     const { id, itemId } = req.params;
-    const { physical_quantity, counted_stock, notes, status: bodyStatus } = req.body;
+    const { physical_quantity, counted_stock, notes, status: bodyStatus, clientOperationId } = req.body;
     try {
       const verifiedUser = (req as any).verifiedUser;
+      const isKioskReq = isKioskLockedRequest(req);
       const uRole = String(verifiedUser?.role || '').toLowerCase();
-      const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+      const isAdmin = !isKioskReq && (uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser));
       const userPerms = (typeof verifiedUser?.permissions === 'string' ? JSON.parse(verifiedUser?.permissions || '{}') : verifiedUser?.permissions) || {};
-      const canPhysicalChecklist = isAdmin || userPerms.physical_control_checklist === true;
+      const canPhysicalChecklist = isAdmin || isKioskReq || userPerms.physical_control_checklist === true;
       if (!canPhysicalChecklist) {
         return res.status(403).json({ error: "No tienes autorización para modificar ítems del control físico." });
+      }
+
+      if (clientOperationId) {
+        const existingOp = db.prepare('SELECT response_body FROM processed_operations WHERE client_operation_id = ?').get(String(clientOperationId)) as any;
+        if (existingOp && existingOp.response_body) {
+          return res.status(200).json({ ...JSON.parse(existingOp.response_body), isDuplicate: true });
+        }
       }
 
       const count = db.prepare('SELECT id, status, mode, user_id, applied_at FROM inventory_counts WHERE id = ?').get(id) as any;
@@ -12534,7 +12602,7 @@ DIRECTIVAS CRÍTICAS:
         return res.status(400).json({ error: "No se puede modificar un conteo que ya ha sido cerrado, cancelado o aprobado." });
       }
 
-      if (!isAdmin && count.user_id && verifiedUser && Number(count.user_id) !== Number(verifiedUser.id)) {
+      if (!isAdmin && !isKioskReq && count.user_id && verifiedUser && Number(count.user_id) !== Number(verifiedUser.id)) {
         return res.status(403).json({ error: "No tienes autorización para modificar ítems del conteo de otro usuario." });
       }
 
@@ -12546,7 +12614,16 @@ DIRECTIVAS CRÍTICAS:
         }
       }
 
-      // Check both item ID and session ID to prevent cross-session alteration
+      const preItem = db.prepare('SELECT product_id FROM inventory_count_items WHERE id = ? AND inventory_count_id = ?').get(itemId, id) as any;
+      if (!preItem) {
+        return res.status(404).json({ error: "Artículo de conteo no encontrado o no pertenece a esta sesión." });
+      }
+
+      // Sincronizar lectura puntual del producto desde Cloud Firestore para referencia exacta (sin alterar jamás su stock)
+      try {
+        await syncSpecificProductsFromCloud([Number(preItem.product_id)]);
+      } catch (_) {}
+
       const item = db.prepare(`
         SELECT ici.product_id, ici.product_name, ici.expected_quantity, p.stock as live_stock 
         FROM inventory_count_items ici 
@@ -12564,37 +12641,46 @@ DIRECTIVAS CRÍTICAS:
       const difference = physical - liveExpected;
       
       let status = bodyStatus === 'pendiente' ? 'pendiente' : (difference === 0 ? 'correcto' : 'diferencia');
+      const responseStatus = (isKioskReq || count.mode === 'BLIND') ? (status === 'pendiente' ? 'pendiente' : 'contado') : status;
+      const respBody = { success: true, physical_quantity: physical, status: responseStatus };
 
-      db.prepare(`
-        UPDATE inventory_count_items
-        SET expected_quantity = ?, physical_quantity = ?, difference = ?, status = ?, notes = ?, recount_requested = 0, reviewed_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `).run(liveExpected, physical, difference, status, notes || null, itemId);
+      db.transaction(() => {
+        db.prepare(`
+          UPDATE inventory_count_items
+          SET expected_quantity = ?, physical_quantity = ?, difference = ?, status = ?, notes = ?, recount_requested = 0, reviewed_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `).run(liveExpected, physical, difference, status, notes || null, itemId);
 
-      // Recalculate indicators for session
-      const stats = db.prepare(`
-        SELECT 
-          COUNT(*) as total,
-          SUM(CASE WHEN status != 'pendiente' THEN 1 ELSE 0 END) as reviewed,
-          SUM(CASE WHEN status = 'correcto' THEN 1 ELSE 0 END) as correct,
-          SUM(CASE WHEN status = 'diferencia' THEN 1 ELSE 0 END) as diff
-        FROM inventory_count_items
-        WHERE inventory_count_id = ?
-      `).get(id) as any;
+        const stats = db.prepare(`
+          SELECT 
+            COUNT(*) as total,
+            SUM(CASE WHEN status != 'pendiente' THEN 1 ELSE 0 END) as reviewed,
+            SUM(CASE WHEN status = 'correcto' THEN 1 ELSE 0 END) as correct,
+            SUM(CASE WHEN status = 'diferencia' THEN 1 ELSE 0 END) as diff
+          FROM inventory_count_items
+          WHERE inventory_count_id = ?
+        `).get(id) as any;
 
-      db.prepare(`
-        UPDATE inventory_counts
-        SET reviewed_products = ?, correct_products = ?, difference_products = ?
-        WHERE id = ?
-      `).run(stats.reviewed || 0, stats.correct || 0, stats.diff || 0, id);
+        db.prepare(`
+          UPDATE inventory_counts
+          SET reviewed_products = ?, correct_products = ?, difference_products = ?
+          WHERE id = ?
+        `).run(stats.reviewed || 0, stats.correct || 0, stats.diff || 0, id);
 
-      // Audit item reviewed
+        if (clientOperationId) {
+          db.prepare(`
+            INSERT OR REPLACE INTO processed_operations (client_operation_id, operation_type, entity_id, payload_hash, response_body, created_at)
+            VALUES (?, 'inventory_count_item', ?, '', ?, ?)
+          `).run(String(clientOperationId), String(itemId), JSON.stringify(respBody), getBoliviaISOString());
+        }
+      })();
+
       try {
         const auditUser = (req as any).auditUser || {};
         insertSystemAuditLog({
           eventType: 'INVENTORY_COUNT_ITEM_REVIEWED',
           category: 'INVENTORY_COUNT',
-          module: 'CONTROL_FISICO',
+          module: isKioskReq ? 'KIOSKO_CHKLST' : 'CONTROL_FISICO',
           action: 'Conteo Físico Registrado',
           severity: 'info',
           entityType: 'producto',
@@ -12605,7 +12691,7 @@ DIRECTIVAS CRÍTICAS:
           userRole: auditUser.userRole || 'auditor',
           quantityAfter: physical,
           reason: notes || `Cantidad física ingresada: ${physical}`,
-          afterData: { physical_quantity: physical, notes },
+          afterData: { physical_quantity: physical, notes, kiosk: isKioskReq },
           relatedProductId: item.product_id,
           status: 'success'
         });
@@ -12613,19 +12699,27 @@ DIRECTIVAS CRÍTICAS:
         console.warn("[Audit Error] Failed to log count item review:", auditErr.message);
       }
 
-      // B01: Blind count returns neutral status 'contado' to maintain impartiality
-      const responseStatus = (count.mode === 'BLIND') ? 'contado' : status;
-      res.json({ success: true, physical_quantity: physical, status: responseStatus });
+      try {
+        syncAfterWrite({
+          inventory_counts: [Number(id)],
+          inventory_count_items: [Number(itemId)]
+        });
+      } catch (_) {}
+
+      res.json(respBody);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
   });
 
-  // Solicitar recuento de productos con discrepancia por el Administrador
+  // Solicitar recuento de productos con discrepancia por el Administrador (Prohibido en Modo Kiosco)
   app.post("/api/inventory-counts/:id/recount", (req, res) => {
     const { id } = req.params;
     const { item_ids, reason } = req.body;
     try {
+      if (isKioskLockedRequest(req)) {
+        return res.status(403).json({ error: "Operación bloqueada en Modo Kiosco: solo un administrador fuera de Kiosco puede gestionar reconteos." });
+      }
       const verifiedUser = (req as any).verifiedUser;
       if (!verifiedUser) {
         return res.status(401).json({ error: "Sesión requerida." });
@@ -12655,7 +12749,6 @@ DIRECTIVAS CRÍTICAS:
         stmt.run(`[Recuento Solicitado: ${reason || 'Verificar cantidad física'}]`, itemId, id);
       }
 
-      // Reactivar sesión a 'en_progreso' para que el auditor pueda volver a contar esos items
       db.prepare(`UPDATE inventory_counts SET status = 'en_progreso' WHERE id = ?`).run(id);
 
       try {
@@ -12679,16 +12772,20 @@ DIRECTIVAS CRÍTICAS:
         console.warn("[Audit Error] Failed to log recount request:", auditErr.message);
       }
 
+      try {
+        syncAfterWrite(["inventory_counts", "inventory_count_items"]);
+      } catch (_) {}
+
       res.json({ success: true, message: `Recuento solicitado para ${item_ids.length} artículos.` });
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
   });
 
-  // Actualizar el estado general de una sesión de conteo ('pausado', 'finalizado', 'cancelado')
+  // Actualizar el estado general de una sesión de conteo ('pausado', 'finalizado', 'completado', 'cancelado')
   app.put("/api/inventory-counts/:id/status", async (req, res) => {
     const { id } = req.params;
-    const { status, notes, auto_apply } = req.body;
+    const { status, notes, auto_apply, clientOperationId } = req.body;
     try {
       const allowed = ['pausado', 'finalizado', 'cancelado', 'en_progreso', 'completado', 'cerrado', 'aprobado'];
       if (!allowed.includes(status)) {
@@ -12699,8 +12796,22 @@ DIRECTIVAS CRÍTICAS:
       if (!verifiedUser) {
         return res.status(401).json({ error: "Sesión requerida." });
       }
+      const isKioskReq = isKioskLockedRequest(req);
       const uRole = String(verifiedUser.role || '').toLowerCase();
-      const isAdmin = uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser);
+      const isAdmin = !isKioskReq && (uRole === 'admin' || uRole === 'administrador' || uRole === 'propietario' || isMainAdmin(verifiedUser));
+
+      if (clientOperationId) {
+        const existingOp = db.prepare('SELECT response_body FROM processed_operations WHERE client_operation_id = ?').get(String(clientOperationId)) as any;
+        if (existingOp && existingOp.response_body) {
+          return res.status(200).json({ ...JSON.parse(existingOp.response_body), isDuplicate: true });
+        }
+      }
+
+      if (isKioskReq && (auto_apply === true || ['cerrado', 'aprobado'].includes(status))) {
+        return res.status(403).json({
+          error: "Operación bloqueada en Modo Kiosco: el Modo Kiosco solo envía reportes de conteo y jamás puede aplicar ajustes al stock físico."
+        });
+      }
 
       const currentCount = db.prepare('SELECT id, user_id, status, applied_at FROM inventory_counts WHERE id = ?').get(id) as any;
       if (!currentCount) {
@@ -12709,12 +12820,15 @@ DIRECTIVAS CRÍTICAS:
       if (currentCount.status === 'aprobado' || currentCount.status === 'cerrado' || currentCount.applied_at != null) {
         return res.status(400).json({ error: "No se puede modificar una sesión de conteo que ya ha sido aprobada o cerrada." });
       }
-      if (!isAdmin && Number(currentCount.user_id) !== Number(verifiedUser.id)) {
+      if ((status === 'completado' || status === 'finalizado') && (currentCount.status === 'completado' || currentCount.status === 'finalizado')) {
+        return res.json({ success: true, isDuplicate: true });
+      }
+      if (!isAdmin && !isKioskReq && Number(currentCount.user_id) !== Number(verifiedUser.id)) {
         return res.status(403).json({ error: "No tienes autorización para modificar la sesión de control físico de otro usuario." });
       }
 
       if (['cerrado', 'aprobado'].includes(status) && !isAdmin) {
-        return res.status(403).json({ error: "No autorizado: Solo un administrador verificado puede cerrar o aprobar sesiones de control físico." });
+        return res.status(403).json({ error: "No autorizado: Solo un administrador verificado fuera de Modo Kiosco puede cerrar o aprobar sesiones de control físico." });
       }
 
       if (status === 'cancelado') {
@@ -12729,11 +12843,11 @@ DIRECTIVAS CRÍTICAS:
       }
 
       if (auto_apply === true && !isAdmin) {
-        return res.status(403).json({ error: "No autorizado: Solo administradores pueden aplicar ajustes automáticos de stock." });
+        return res.status(403).json({ error: "No autorizado: Solo administradores fuera de Modo Kiosco pueden aplicar ajustes automáticos de stock." });
       }
 
       // Separación estricta: 'completado' o 'finalizado' solo preparan el informe. NUNCA modifican el inventario.
-      if (status === 'cerrado' && auto_apply === true && isAdmin) {
+      if (status === 'cerrado' && auto_apply === true && isAdmin && !isKioskReq) {
         const countRow = db.prepare('SELECT status, applied_at FROM inventory_counts WHERE id = ?').get(id) as any;
         if (!countRow) {
           return res.status(404).json({ error: "Sesión de conteo no encontrada." });
@@ -12776,7 +12890,7 @@ DIRECTIVAS CRÍTICAS:
                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 `).run(
                   item.product_id, p.name, p.sku, logType, absQty, p.price_cost || 0,
-                  1, 'admin', `Control Físico #${id}`,
+                  verifiedUser.id, verifiedUser.username, `Control Físico #${id}`,
                   `Ajuste directo por control físico (De ${oldStock} a ${newStock} pz).`,
                   getBoliviaISOString()
                 );
@@ -12785,9 +12899,13 @@ DIRECTIVAS CRÍTICAS:
             }
           }
 
-          db.prepare(`UPDATE inventory_counts SET status = 'cerrado', completed_at = CURRENT_TIMESTAMP, approved_at = CURRENT_TIMESTAMP, applied_at = CURRENT_TIMESTAMP, approved_by_username = 'admin', notes = ? WHERE id = ?`)
-            .run(notes || 'Control físico completado y concilado directamente', id);
+          db.prepare(`UPDATE inventory_counts SET status = 'cerrado', completed_at = CURRENT_TIMESTAMP, approved_at = CURRENT_TIMESTAMP, applied_at = CURRENT_TIMESTAMP, approved_by_username = ?, notes = ? WHERE id = ?`)
+            .run(verifiedUser.username, notes || 'Control físico completado y conciliado directamente', id);
           incrementInventoryVersion();
+          if (clientOperationId) {
+            db.prepare('INSERT OR REPLACE INTO processed_operations (client_operation_id, operation_type, response_body) VALUES (?, ?, ?)')
+              .run(String(clientOperationId), 'inventory_count_status', JSON.stringify({ success: true, applied: true }));
+          }
         });
 
         transaction();
@@ -12864,6 +12982,10 @@ DIRECTIVAS CRÍTICAS:
       updateData.push(id);
 
       db.prepare(`UPDATE inventory_counts SET ${query} WHERE id = ?`).run(...updateData);
+      if (clientOperationId) {
+        db.prepare('INSERT OR REPLACE INTO processed_operations (client_operation_id, operation_type, response_body) VALUES (?, ?, ?)')
+          .run(String(clientOperationId), 'inventory_count_status', JSON.stringify({ success: true }));
+      }
 
       // Audit status change
       try {
@@ -12887,9 +13009,9 @@ DIRECTIVAS CRÍTICAS:
           entityType: 'conteo_fisico',
           entityId: id,
           entityName: `Sesión de control #${id}`,
-          userId: auditUser.userId || 1,
-          userName: auditUser.userName || 'admin',
-          userRole: auditUser.userRole || 'admin',
+          userId: verifiedUser.id || auditUser.userId || 0,
+          userName: verifiedUser.username || auditUser.userName || 'operador',
+          userRole: verifiedUser.role || auditUser.userRole || 'vendedor',
           reason: notes || `Sesión de conteo físico cambiada a estado: ${status}`,
           afterData: { status },
           status: 'success'
@@ -12949,9 +13071,10 @@ DIRECTIVAS CRÍTICAS:
               const logType = item.difference > 0 ? 'ajuste_incremento' : 'ajuste_decremento';
               const absQty = Math.abs(item.difference);
               
+              const verifiedApprover = (req as any).verifiedUser || {};
               const auditUser = (req as any).auditUser || {};
-              const normUserId = auditUser.userId || admin_id || 1;
-              const normUsername = auditUser.userName || admin_username || 'admin';
+              const normUserId = verifiedApprover.id || auditUser.userId || admin_id || 0;
+              const normUsername = verifiedApprover.username || auditUser.userName || admin_username || 'administrador';
               db.prepare(`
                 INSERT INTO inventory_audit_logs 
                 (product_id, product_name, product_sku, type, quantity, price, user_id, username, reference, notes, created_at)
@@ -12981,9 +13104,9 @@ DIRECTIVAS CRÍTICAS:
                   entityType: 'producto',
                   entityId: item.product_id,
                   entityName: p.name,
-                  userId: admin_id || 1,
-                  userName: admin_username || 'admin',
-                  userRole: 'admin',
+                  userId: normUserId,
+                  userName: normUsername,
+                  userRole: verifiedApprover.role || 'admin',
                   quantityBefore: oldStock,
                   quantityChanged: item.difference,
                   quantityAfter: newStock,
@@ -13000,12 +13123,16 @@ DIRECTIVAS CRÍTICAS:
           }
         }
 
+        const finalApprover = (req as any).verifiedUser || {};
+        const finalApproverName = finalApprover.username || admin_username || 'administrador';
+        const finalApproverId = finalApprover.id || admin_id || 0;
+
         // Close session with approval metadata
         db.prepare(`
           UPDATE inventory_counts 
           SET status = 'cerrado', completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP), approved_at = CURRENT_TIMESTAMP, applied_at = CURRENT_TIMESTAMP, approved_by_username = ?, notes = ?
           WHERE id = ?
-        `).run(admin_username || 'admin', notes || 'Conciliado y cerrado por administración.', id);
+        `).run(finalApproverName, notes || 'Conciliado y cerrado por administración.', id);
 
         incrementInventoryVersion();
 
@@ -13020,9 +13147,9 @@ DIRECTIVAS CRÍTICAS:
             entityType: 'conteo_fisico',
             entityId: id,
             entityName: `Sesión de control #${id}`,
-            userId: admin_id || 1,
-            userName: admin_username || 'admin',
-            userRole: 'admin',
+            userId: finalApproverId,
+            userName: finalApproverName,
+            userRole: finalApprover.role || 'admin',
             reason: notes || 'Conteo conciliado y aprobado por administrador.',
             afterData: { count_id: id, items_count: items.length },
             status: 'success'
@@ -14352,286 +14479,23 @@ DIRECTIVAS CRÍTICAS:
                       }]
                     });
                   }
-                } else if (fc.name === "addNewProductToInventory") {
-                  const { name, category, sku, priceUnit, stock, stockAlarm } = fc.args as any;
-                  if (getActiveInventoryCount()) {
-                    activeSession.sendToolResponse({
-                      functionResponses: [{
-                        id: fc.id,
-                        name: fc.name,
-                        response: { result: "Operación rechazada: Existe un Control Físico de Inventario activo. No se permiten modificaciones de existencias hasta que el control sea cerrado por Administración." }
-                      }]
-                    });
-                    continue;
-                  }
-                  try {
-                    const trimmedName = String(name || '').trim();
-                    const trimmedSku = String(sku || '').trim();
-                    const normName = normalizeProductName(trimmedName);
-                    const allProds = db.prepare('SELECT id, name, sku, stock, price_unit FROM products').all() as any[];
-                    
-                    let existing = allProds.find(p => p.sku && p.sku.toLowerCase() === trimmedSku.toLowerCase());
-                    if (!existing) {
-                      existing = allProds.find(p => normalizeProductName(p.name) === normName);
-                    }
-
-                    if (existing) {
-                      // Update existing product stock instead of creating a duplicate
-                      db.prepare('UPDATE products SET stock = stock + ?, updated_at = ? WHERE id = ?').run(Number(stock || 0), getBoliviaISOString(), existing.id);
-                      syncAfterWrite("products");
-                      
-                      safeSend(JSON.stringify({
-                        type: 'action',
-                        action: 'refreshProducts',
-                        payload: {}
-                      }));
-
-                      activeSession.sendToolResponse({
-                        functionResponses: [{
-                          id: fc.id,
-                          name: fc.name,
-                          response: { result: `El producto "${existing.name}" ya existía en el inventario (#${existing.id}, SKU: ${existing.sku}). Se han sumado ${stock} unidades a sus existencias (Stock total actual: ${existing.stock + Number(stock || 0)}).` }
-                        }]
-                      });
-                    } else {
-                      const alarm = stockAlarm !== undefined ? stockAlarm : 5;
-                      const finalSku = trimmedSku || ("AUTO-" + Math.floor(100000 + Math.random() * 900000));
-                      db.prepare('INSERT INTO products (name, category, sku, stock, price_unit, price_bulk, stock_alarm) VALUES (?, ?, ?, ?, ?, ?, ?)')
-                        .run(trimmedName, category || 'Varios', finalSku, stock, priceUnit, priceUnit * 0.8, alarm);
-                      syncAfterWrite("products");
-                      
-                      safeSend(JSON.stringify({
-                        type: 'action',
-                        action: 'refreshProducts',
-                        payload: {}
-                      }));
-
-                      activeSession.sendToolResponse({
-                        functionResponses: [{
-                          id: fc.id,
-                          name: fc.name,
-                          response: { result: `El nuevo producto "${trimmedName}" con SKU "${finalSku}" a un precio de $${priceUnit} y stock inicial de ${stock} ha sido insertado con éxito en la base de datos.` }
-                        }]
-                      });
-                    }
-                  } catch (dbErr: any) {
-                    activeSession.sendToolResponse({
-                      functionResponses: [{
-                        id: fc.id,
-                        name: fc.name,
-                        response: { result: `Error al procesar producto en inventario: ${dbErr.message}` }
-                      }]
-                    });
-                  }
-                } else if (fc.name === "updateProductPrice") {
-                  const { skuOrName, priceUnit } = fc.args as any;
-                  try {
-                    let updated = db.prepare('UPDATE products SET price_unit = ? WHERE sku = ?').run(priceUnit, skuOrName);
-                    if (updated.changes === 0) {
-                      updated = db.prepare('UPDATE products SET price_unit = ? WHERE name LIKE ?').run(priceUnit, `%${skuOrName}%`);
-                    }
-                    syncAfterWrite("products");
-                    
-                    safeSend(JSON.stringify({
-                      type: 'action',
-                      action: 'refreshProducts',
-                      payload: {}
-                    }));
-
-                    activeSession.sendToolResponse({
-                      functionResponses: [{
-                        id: fc.id,
-                        name: fc.name,
-                        response: { result: updated.changes > 0 ? `Precio de "${skuOrName}" actualizado con éxito a $${priceUnit}.` : `No se encontró ningún producto con SKU o nombre similar a "${skuOrName}".` }
-                      }]
-                    });
-                  } catch (dbErr: any) {
-                    activeSession.sendToolResponse({
-                      functionResponses: [{
-                        id: fc.id,
-                        name: fc.name,
-                        response: { result: `Error al actualizar precio: ${dbErr.message}` }
-                      }]
-                    });
-                  }
-                } else if (fc.name === "updateProductStock") {
-                  const { skuOrName, stock } = fc.args as any;
-                  if (getActiveInventoryCount()) {
-                    activeSession.sendToolResponse({
-                      functionResponses: [{
-                        id: fc.id,
-                        name: fc.name,
-                        response: { result: "Operación rechazada: Existe un Control Físico de Inventario activo. No se permiten modificaciones de existencias hasta que el control sea cerrado por Administración." }
-                      }]
-                    });
-                    continue;
-                  }
-                  try {
-                    let updated = db.prepare('UPDATE products SET stock = ?, updated_at = ? WHERE sku = ?').run(stock, getBoliviaISOString(), skuOrName);
-                    if (updated.changes === 0) {
-                      updated = db.prepare('UPDATE products SET stock = ?, updated_at = ? WHERE name LIKE ?').run(stock, getBoliviaISOString(), `%${skuOrName}%`);
-                    }
-                    syncAfterWrite("products");
-                    
-                    safeSend(JSON.stringify({
-                      type: 'action',
-                      action: 'refreshProducts',
-                      payload: {}
-                    }));
-
-                    activeSession.sendToolResponse({
-                      functionResponses: [{
-                        id: fc.id,
-                        name: fc.name,
-                        response: { result: updated.changes > 0 ? `Existencias de stock de "${skuOrName}" actualizadas con éxito a ${stock} unidades.` : `No se encontró ningún producto con SKU o nombre similar a "${skuOrName}".` }
-                      }]
-                    });
-                  } catch (dbErr: any) {
-                    activeSession.sendToolResponse({
-                      functionResponses: [{
-                        id: fc.id,
-                        name: fc.name,
-                        response: { result: `Error al actualizar stock: ${dbErr.message}` }
-                      }]
-                    });
-                  }
-                } else if (fc.name === "removeProductFromInventory") {
-                  const { skuOrName } = fc.args as any;
-                  try {
-                    let deleted = db.prepare('DELETE FROM products WHERE sku = ?').run(skuOrName);
-                    if (deleted.changes === 0) {
-                      deleted = db.prepare('DELETE FROM products WHERE name LIKE ?').run(`%${skuOrName}%`);
-                    }
-                    syncAfterWrite("products");
-                    
-                    safeSend(JSON.stringify({
-                      type: 'action',
-                      action: 'refreshProducts',
-                      payload: {}
-                    }));
-
-                    activeSession.sendToolResponse({
-                      functionResponses: [{
-                        id: fc.id,
-                        name: fc.name,
-                        response: { result: deleted.changes > 0 ? `Producto "${skuOrName}" eliminado con éxito.` : `No se localizó ningún producto con SKU o nombre similar a "${skuOrName}" para eliminar.` }
-                      }]
-                    });
-                  } catch (dbErr: any) {
-                    activeSession.sendToolResponse({
-                      functionResponses: [{
-                        id: fc.id,
-                        name: fc.name,
-                        response: { result: `Error al eliminar producto: ${dbErr.message}` }
-                      }]
-                    });
-                  }
-                } else if (fc.name === "updateExchangeRate") {
-                  const { rate } = fc.args as any;
-                  try {
-                    const numRate = parseFloat(rate);
-                    if (isNaN(numRate) || numRate <= 0) {
-                      throw new Error("El tipo de cambio debe ser un número positivo mayor que cero.");
-                    }
-                    const oldRow = db.prepare('SELECT value FROM settings WHERE key = ?').get('exchange_rate') as any;
-                    const oldRate = oldRow ? parseFloat(oldRow.value) : 6.96;
-
-                    db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('exchange_rate', String(numRate));
-                    db.prepare('INSERT INTO exchange_rate_audit (user_id, username, old_rate, new_rate) VALUES (?, ?, ?, ?)')
-                      .run(0, "Asistente de IA", oldRate, numRate);
-                    syncAfterWrite(["settings", "exchange_rate_audit"]);
-
-                    // Notify clients
-                    safeSend(JSON.stringify({
-                      type: 'action',
-                      action: 'exchangeRateUpdated',
-                      payload: { exchange_rate: numRate }
-                    }));
-
-                    activeSession.sendToolResponse({
-                      functionResponses: [{
-                        id: fc.id,
-                        name: fc.name,
-                        response: { result: `Tipo de cambio de USD a Bolivianos (Bs.) actualizado con éxito. Anterior: ${oldRate}, Nuevo: ${numRate}.` }
-                      }]
-                    });
-                  } catch (dbErr: any) {
-                    activeSession.sendToolResponse({
-                      functionResponses: [{
-                        id: fc.id,
-                        name: fc.name,
-                        response: { result: `Error al actualizar tipo de cambio: ${dbErr.message}` }
-                      }]
-                    });
-                  }
-                } else if (fc.name === "createUser") {
-                  const { username, password, role, viewReports, editPrices, viewInventory } = fc.args as any;
-                  try {
-                    const permissions = {
-                      view_reports: viewReports !== undefined ? !!viewReports : true,
-                      edit_prices: editPrices !== undefined ? !!editPrices : true,
-                      view_inventory: viewInventory !== undefined ? !!viewInventory : true
-                    };
-                    const hashedPassword = isPasswordHashed(password) ? password : hashPassword(password);
-                    const resUser = db.prepare('INSERT INTO users (username, password, role, permissions) VALUES (?, ?, ?, ?)')
-                      .run(username, hashedPassword, role, JSON.stringify(permissions));
-                    syncAfterWrite("users");
-
-                    // Notify clients
-                    safeSend(JSON.stringify({
-                      type: 'action',
-                      action: 'refreshUsers',
-                      payload: {}
-                    }));
-
-                    activeSession.sendToolResponse({
-                      functionResponses: [{
-                        id: fc.id,
-                        name: fc.name,
-                        response: { result: `La cuenta de usuario "${username}" con rol "${role}" ha sido creada con éxito en la base de datos.` }
-                      }]
-                    });
-                  } catch (dbErr: any) {
-                    activeSession.sendToolResponse({
-                      functionResponses: [{
-                        id: fc.id,
-                        name: fc.name,
-                        response: { result: `Error al crear el usuario: ${dbErr.message}` }
-                      }]
-                    });
-                  }
-                } else if (fc.name === "deleteUser") {
-                  const { username } = fc.args as any;
-                  try {
-                    if (username === "admin") {
-                      throw new Error("No se puede eliminar la cuenta principal 'admin'.");
-                    }
-                    const result = db.prepare('DELETE FROM users WHERE username = ? AND role != ?').run(username, 'admin');
-                    syncAfterWrite("users");
-
-                    // Notify clients
-                    safeSend(JSON.stringify({
-                      type: 'action',
-                      action: 'refreshUsers',
-                      payload: {}
-                    }));
-
-                    activeSession.sendToolResponse({
-                      functionResponses: [{
-                        id: fc.id,
-                        name: fc.name,
-                        response: { result: result.changes > 0 ? `El usuario "${username}" ha sido eliminado exitosamente.` : `No se encontró ningún usuario con el nombre "${username}" disponible para eliminar.` }
-                      }]
-                    });
-                  } catch (dbErr: any) {
-                    activeSession.sendToolResponse({
-                      functionResponses: [{
-                        id: fc.id,
-                        name: fc.name,
-                        response: { result: `Error al eliminar el usuario: ${dbErr.message}` }
-                      }]
-                    });
-                  }
+                } else if (
+                  fc.name === "addNewProductToInventory" ||
+                  fc.name === "updateProductPrice" ||
+                  fc.name === "updateProductStock" ||
+                  fc.name === "removeProductFromInventory" ||
+                  fc.name === "updateExchangeRate" ||
+                  fc.name === "createUser" ||
+                  fc.name === "deleteUser" ||
+                  fc.name === "workspaceApplyCorrection"
+                ) {
+                  activeSession.sendToolResponse({
+                    functionResponses: [{
+                      id: fc.id,
+                      name: fc.name,
+                      response: { result: "BLOQUEADO POR SEGURIDAD DE PRODUCCIÓN: Las modificaciones directas de inventario, precios, usuarios o código por asistente externo están permanentemente deshabilitadas. Utilice únicamente los módulos oficiales de Ingresos, Ventas o Inventario." }
+                    }]
+                  });
                 } else if (fc.name === "modifyCartItemPrice") {
                   const { productNameOrSku, priceType, customPriceBs } = fc.args as any;
                   safeSend(JSON.stringify({
@@ -14663,56 +14527,12 @@ DIRECTIVAS CRÍTICAS:
                 } else if (fc.name === "executeDatabaseQuery") {
                   const { sql, params } = fc.args as any;
                   try {
-                    const stmt = db.prepare(sql);
-                    let result: any;
-                    const cleanSql = sql.trim().toLowerCase();
-                    const queryParams = params || [];
-
-                    if (cleanSql.startsWith("select") || cleanSql.startsWith("pragma")) {
-                      result = stmt.all(...queryParams);
-                    } else {
-                      const runResult = stmt.run(...queryParams);
-                      result = {
-                        changes: runResult.changes,
-                        lastInsertRowid: runResult.lastInsertRowid
-                      };
-
-                      // Replicate raw AI modifications to Firestore
-                      const SYNC_TABLES = ['users', 'products', 'clients', 'sales', 'sale_items', 'shifts', 'settings', 'exchange_rate_audit', 'caja_cierres'];
-                      const tablesAffected = SYNC_TABLES.filter(t => cleanSql.includes(t));
-                      if (tablesAffected.length > 0) {
-                        syncAfterWrite(tablesAffected);
-                      } else {
-                        syncAfterWrite(SYNC_TABLES);
-                      }
-
-                      // Dynamic reactive updates
-                      if (cleanSql.includes("products")) {
-                        safeSend(JSON.stringify({
-                          type: 'action',
-                          action: 'refreshProducts',
-                          payload: {}
-                        }));
-                      }
-                      if (cleanSql.includes("users")) {
-                        safeSend(JSON.stringify({
-                          type: 'action',
-                          action: 'refreshUsers',
-                          payload: {}
-                        }));
-                      }
-                      if (cleanSql.includes("settings") || cleanSql.includes("exchange_rate")) {
-                        const rateRow = db.prepare("SELECT value FROM settings WHERE key = ?").get("exchange_rate") as any;
-                        if (rateRow) {
-                          safeSend(JSON.stringify({
-                            type: 'action',
-                            action: 'exchangeRateUpdated',
-                            payload: { exchange_rate: parseFloat(rateRow.value) }
-                          }));
-                        }
-                      }
+                    const cleanSql = String(sql || "").trim().toLowerCase();
+                    if (!cleanSql.startsWith("select") || /\b(insert|update|delete|drop|alter|replace|create|attach|pragma)\b/i.test(cleanSql)) {
+                      throw new Error("Solo se permiten consultas SELECT de lectura. Toda modificación directa a la base de datos está bloqueada.");
                     }
-
+                    const stmt = db.prepare(sql);
+                    const result = stmt.all(...(params || []));
                     activeSession.sendToolResponse({
                       functionResponses: [{
                         id: fc.id,
@@ -14725,117 +14545,18 @@ DIRECTIVAS CRÍTICAS:
                       functionResponses: [{
                         id: fc.id,
                         name: fc.name,
-                        response: { result: `Error de ejecución SQL: ${dbErr.message}` }
+                        response: { result: `Consulta rechazada: ${dbErr.message}` }
                       }]
                     });
                   }
-                } else if (fc.name === "workspaceListFiles") {
-                  try {
-                    const files = listFilesRecursively(process.cwd());
-                    activeSession.sendToolResponse({
-                      functionResponses: [{
-                        id: fc.id,
-                        name: fc.name,
-                        response: { result: `[ARCHIVOS DEL WORKSPACE GTR POS]\n` + files.map(f => `- ${f}`).join("\n") }
-                      }]
-                    });
-                  } catch (err: any) {
-                    activeSession.sendToolResponse({
-                      functionResponses: [{
-                        id: fc.id,
-                        name: fc.name,
-                        response: { result: `Error al listar archivos: ${err.message}` }
-                      }]
-                    });
-                  }
-                } else if (fc.name === "workspaceReadFile") {
-                  const { filePath } = fc.args as any;
-                  try {
-                    const normalized = path.normalize(filePath);
-                    if (normalized.startsWith("..") || path.isAbsolute(normalized)) {
-                      throw new Error("Ruta de archivo no permitida. Debe estar contenida en el workspace.");
-                    }
-                    const fullPath = path.join(process.cwd(), normalized);
-                    if (!fs.existsSync(fullPath)) {
-                      throw new Error(`El archivo '${normalized}' no existe.`);
-                    }
-                    const stat = fs.statSync(fullPath);
-                    if (stat.size > 250000) {
-                      throw new Error(`El archivo '${normalized}' es demasiado grande para leer por voz.`);
-                    }
-                    const content = fs.readFileSync(fullPath, "utf-8");
-                    activeSession.sendToolResponse({
-                      functionResponses: [{
-                        id: fc.id,
-                        name: fc.name,
-                        response: { result: `[CONTENIDO DE ${normalized}]\n${content}` }
-                      }]
-                    });
-                  } catch (err: any) {
-                    activeSession.sendToolResponse({
-                      functionResponses: [{
-                        id: fc.id,
-                        name: fc.name,
-                        response: { result: `Error al leer archivo: ${err.message}` }
-                      }]
-                    });
-                  }
-                } else if (fc.name === "workspaceApplyCorrection") {
-                  const { filePath, targetContent, replacementContent } = fc.args as any;
-                  try {
-                    const normalized = path.normalize(filePath);
-                    if (normalized.startsWith("..") || path.isAbsolute(normalized)) {
-                      throw new Error("Ruta de archivo no permitida. Debe estar contenida dentro del workspace.");
-                    }
-                    const fullPath = path.join(process.cwd(), normalized);
-                    if (!fs.existsSync(fullPath)) {
-                      throw new Error(`El archivo '${normalized}' no existe.`);
-                    }
-                    const originalContent = fs.readFileSync(fullPath, "utf-8");
-                    
-                    let updatedContent = "";
-                    let success = false;
-                    if (originalContent.includes(targetContent)) {
-                      updatedContent = originalContent.replace(targetContent, replacementContent);
-                      success = true;
-                    } else {
-                      const cleanTarget = targetContent.trim().replace(/\r\n/g, "\n");
-                      const cleanOriginal = originalContent.replace(/\r\n/g, "\n");
-                      if (cleanOriginal.includes(cleanTarget)) {
-                        updatedContent = cleanOriginal.replace(cleanTarget, replacementContent.replace(/\r\n/g, "\n"));
-                        success = true;
-                      }
-                    }
-
-                    if (!success) {
-                      throw new Error(`No se pudo encontrar el fragmento de código original a reemplazar en '${normalized}'. Asegúrate de que coincida textualmente.`);
-                    }
-
-                    fs.writeFileSync(fullPath, updatedContent, "utf-8");
-
-                    activeSession.sendToolResponse({
-                      functionResponses: [{
-                        id: fc.id,
-                        name: fc.name,
-                        response: { result: `ÉXITO: Parche integrado de forma autónoma en '${normalized}'.` }
-                      }]
-                    });
-
-                    safeSend(JSON.stringify({
-                      type: 'action',
-                      action: 'system_patched',
-                      payload: { filePath: normalized }
-                    }));
-
-                  } catch (err: any) {
-                    activeSession.sendToolResponse({
-                      functionResponses: [{
-                        id: fc.id,
-                        name: fc.name,
-                        response: { result: `Error al aplicar corrección autónoma: ${err.message}` }
-                      }]
-                    });
-                  }
+                } else if (fc.name === "workspaceListFiles" || fc.name === "workspaceReadFile") {
+                  activeSession.sendToolResponse({
+                    functionResponses: [{
+                      id: fc.id,
+                      name: fc.name,
+                      response: { result: "Operación de archivos de servidor deshabilitada en producción." }
+                    }]
+                  });
                 } else if (fc.name === "auditInvestigateProduct") {
                   const { skuOrName } = fc.args as any;
                   try {
@@ -14993,20 +14714,11 @@ ${recentEvents || 'Sin movimientos registrados'}`;
                       });
                     } else {
                       const target = productMatches[0];
-                      const reconcileRes = reconcileProductDiscrepancy(target.id, justification || 'Conciliación pericial por voz', 'admin');
-                      
-                      try {
-                        broadcastAlert(JSON.stringify({
-                          type: 'inventory_updated',
-                          data: { productId: target.id, newStock: reconcileRes.updatedStock }
-                        }));
-                      } catch (_) {}
-
                       activeSession.sendToolResponse({
                         functionResponses: [{
                           id: fc.id,
                           name: fc.name,
-                          response: { result: `ÉXITO: Producto "${target.name}" conciliado correctamente. Nuevo Stock Físico en BD: ${reconcileRes.updatedStock} u. Detalle: ${reconcileRes.message}.` }
+                          response: { result: `BLOQUEADO POR SEGURIDAD: La conciliación automática de stock para "${target.name}" (Stock actual: ${target.stock} u.) está deshabilitada por voz para proteger el inventario en producción.` }
                         }]
                       });
                     }
